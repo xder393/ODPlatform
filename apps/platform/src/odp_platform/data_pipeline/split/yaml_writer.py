@@ -42,6 +42,7 @@ def write_dataset_yaml(
         "train": "train/images",
         "val":   "val/images",
         "test":  "test/images",
+        "nc":    len(classes),
         "names": {i: name for i, name in enumerate(classes)},
 
         # ============================================================

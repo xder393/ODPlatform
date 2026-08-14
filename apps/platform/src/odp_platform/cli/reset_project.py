@@ -97,6 +97,42 @@ def _audit_context() -> dict:
     }
 
 
+def _git_tracked_rel_paths(path: Path) -> set:
+    """返回 path 下被 git 追踪的文件相对路径 (相对 ROOT_DIR, posix 格式)。
+
+    reset 用它跳过占位 README 这类进 git 的文档——reset 只该删运行时产物,
+    不该删 git 追踪的文件。
+    """
+    try:
+        out = subprocess.check_output(
+            ["git", "ls-files", "--full-name", "--", str(path)],
+            cwd=ROOT_DIR, text=True, stderr=subprocess.DEVNULL,
+        )
+        return {line.strip() for line in out.splitlines() if line.strip()}
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return set()
+
+
+def _delete_tree_keep_tracked(path: Path, tracked: set) -> None:
+    """删除 path 下所有内容, 但跳过 git 追踪的文件 (如占位 README)。"""
+    entries = sorted(path.rglob("*"), key=lambda p: len(p.parts), reverse=True)
+    for entry in entries:
+        rel = entry.relative_to(ROOT_DIR).as_posix()
+        if entry.is_file():
+            if rel in tracked:
+                continue
+            try:
+                os.chmod(entry, stat.S_IWRITE)
+                entry.unlink()
+            except OSError:
+                pass
+        elif entry.is_dir():
+            try:
+                entry.rmdir()
+            except OSError:
+                pass  # 非空 (里面保留了 git 文件) 就留着
+
+
 # ─────────────────────────────────────────────────────────
 # 扫描 / 计划展示 / 确认 / 删除
 # ─────────────────────────────────────────────────────────
@@ -223,8 +259,13 @@ def _delete_one(
         logger.info(f"[{idx}/{total}] 删除 {rel} ({size_str}, {file_count} 个文件)")
 
     try:
-        shutil.rmtree(path, onerror=_on_rm_error)
-        logger.info(f"[{idx}/{total}] ✅ 已删除: {rel}")
+        tracked = _git_tracked_rel_paths(path)
+        if tracked:
+            _delete_tree_keep_tracked(path, tracked)
+            logger.info(f"[{idx}/{total}] ✅ 已删除(保留 git 文件 {len(tracked)} 个): {rel}")
+        else:
+            shutil.rmtree(path, onerror=_on_rm_error)
+            logger.info(f"[{idx}/{total}] ✅ 已删除: {rel}")
         return None
     except OSError as e:
         logger.error(f"[{idx}/{total}] ❌ 删除失败 {rel}: {e}")

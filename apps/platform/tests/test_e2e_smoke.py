@@ -67,6 +67,7 @@ def test_e2e_smoke_voc(toy_voc_dataset):
     assert "names" in doc
     assert 0 in doc["names"]
     assert doc["names"][0] == "cat"
+    assert doc["nc"] == 1
 
     assert "odp_meta" in doc
     assert doc["odp_meta"]["source_format"] == "pascal_voc"
