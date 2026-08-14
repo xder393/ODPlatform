@@ -61,6 +61,7 @@ odp-transform  = "odp_platform.cli.transform_data:main"
 odp-validate   = "odp_platform.cli.validate_data:main"
 odp-gen-config = "odp_platform.runtime_config.generator:main"
 odp-train      = "odp_platform.cli.train_model:main"
+odp-val        = "odp_platform.cli.val_model:main"
 odp-infer      = "odp_platform.cli.infer:main"
 
 

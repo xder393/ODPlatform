@@ -39,6 +39,7 @@ pip install torch ultralytics
 | `odp-validate` | 数据集质检(图像标签成对 / 字段 / 格式 / 防泄露) |
 | `odp-gen-config` | 生成训练/验证/推理的运行配置模板 |
 | `odp-train` | 训练 |
+| `odp-val` | 评估(在数据集上算 mAP/precision/recall) |
 | `odp-infer` | 推理 |
 
 ## 典型流程
@@ -60,7 +61,10 @@ odp-gen-config train
 # 4. 训练
 odp-train --data configs/datasets/safety_helmet.yaml ...
 
-# 5. 推理
+# 5. 评估
+odp-val --model runs/detect_train/train/weights/best.pt --split val
+
+# 6. 推理
 odp-infer ...
 ```
 

@@ -85,10 +85,18 @@ class TrainMetrics:
         cls,
         results: Any,
         model_trainer: Any = None,
+        task: str | None = None,
     ) -> "TrainMetrics":
-        """从 ultralytics 的训练/验证结果对象构造 TrainMetrics."""
-        # 1. task
-        task = getattr(results, "task", "unknown")
+        """从 ultralytics 的训练/验证结果对象构造 TrainMetrics.
+
+        Args:
+            results: ultralytics 结果对象 (train 的 Results / val 的 Metrics)
+            model_trainer: 可选, train 时给 model.trainer (save_dir 兜底)
+            task: 显式覆盖 — model.val() 返回的 Metrics 对象往往不带 .task,
+                  D7 ValService 用 config.task 传入, 保证指标字段选择正确.
+        """
+        # 1. task (显式 > results.task > unknown)
+        task = task or getattr(results, "task", "unknown")
 
         # 2. save_dir(results 优先, trainer 备胎, 都没就 unknown)
         save_dir_raw = getattr(results, "save_dir", None)
@@ -152,16 +160,22 @@ def log_train_metrics(
     metrics: TrainMetrics,
     *,
     logger: logging.Logger | None = None,
+    title: str = "训练结果",
     key_width: int = 20,
     section_width: int = 60,
 ) -> None:
-    """把 TrainMetrics 漂亮打印到 logger."""
+    """把 TrainMetrics 漂亮打印到 logger.
+
+    Args:
+        metrics: 要打印的指标快照
+        title: 标题 (train 用默认"训练结果", D7 评估传"评估结果")
+    """
     log = logger or logging.getLogger(__name__)
     line = "=" * section_width
     thin = "-" * section_width
 
     log.info(line)
-    log.info(f"训练结果 ({metrics.task.capitalize()} Task)".center(section_width))
+    log.info(f"{title} ({metrics.task.capitalize()} Task)".center(section_width))
     log.info(line)
 
     # 基本信息

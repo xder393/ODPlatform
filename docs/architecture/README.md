@@ -6,3 +6,4 @@
 - ADR-002-data-pipeline.md — data_pipeline 子系统架构
 - ADR-004-data-validation.md — data_validation 子系统架构
 - ADR-006-training-subsystem.md — training 子系统架构
+- ADR-007-evaluation.md — evaluation 子系统架构
