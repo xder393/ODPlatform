@@ -353,7 +353,7 @@ class MainWindow(QMainWindow):
             return
         self._set_busy(True, task_name)
         self.tabs.setCurrentWidget(self.log_view)
-        worker = Worker(fn, *args)
+        worker = Worker(fn, *args, log_signals=self._signals)
         worker.signals.finished.connect(self._on_task_done)
         worker.signals.error.connect(self._on_task_error)
         self._pool.start(worker)
