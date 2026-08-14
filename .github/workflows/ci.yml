@@ -17,7 +17,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install colorlog psutil pyyaml pydantic scikit-learn pillow
+          pip install colorlog psutil pyyaml pydantic scikit-learn pillow pytest
           pip install -e ./apps/platform --no-deps
 
       - name: Run tests
