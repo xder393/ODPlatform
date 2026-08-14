@@ -128,3 +128,89 @@ def run_infer(model: str, source: str) -> dict[str, Any]:
         "saved": result.saved,
         "stats": result.stats,
     }
+
+
+def import_dataset(source: str) -> dict[str, Any]:
+    """把拖进来的数据集(文件夹/zip)导入到 data/raw/<name>/.
+
+    处理规则 (按文件扩展名归类, 平铺):
+      - 图片 (jpg/png/bmp/... 见 IMAGE_EXTENSIONS) → data/raw/<name>/images/
+      - 标注 (xml / json / txt)                        → data/raw/<name>/annotations/
+    所以下面这些布局都能识别:
+      - 平铺: img.jpg + img.xml 混在一起
+      - 标准: images/ + annotations/
+      - VOC:  JPEGImages/ + Annotations/
+      - zip 包: 先解压再导入
+    重名文件跳过 (幂等), 已在 data/raw/ 下则直接返回.
+    """
+    import shutil
+    import tempfile
+    import zipfile
+    from pathlib import Path
+
+    from odp_platform.common.constants import IMAGE_EXTENSIONS
+    from odp_platform.common.paths import RAW_DATA_DIR
+
+    IMAGE_EXTS = {e.lower() for e in IMAGE_EXTENSIONS}
+    ANN_EXTS = {".xml", ".json", ".txt"}
+
+    src = Path(source)
+    tmp_root = None
+    try:
+        # 1. zip 先解压到临时目录
+        if src.is_file() and src.suffix.lower() == ".zip":
+            tmp_root = Path(tempfile.mkdtemp(prefix="odp_import_"))
+            with zipfile.ZipFile(src) as zf:
+                zf.extractall(tmp_root)
+            entries = [p for p in tmp_root.iterdir()]
+            if len(entries) == 1 and entries[0].is_dir():
+                src = entries[0]        # zip 里只有一个顶层目录, 用它
+            else:
+                src = tmp_root
+        elif not src.is_dir():
+            raise ValueError(f"只接受文件夹或 zip: {source}")
+
+        name = src.name
+        dest = RAW_DATA_DIR / name
+
+        # 已经在本仓库 data/raw/ 下 → 无需重复导入
+        if src.resolve() == dest.resolve():
+            return {"kind": "import", "name": name, "images": 0,
+                    "annotations": 0, "path": str(dest), "already_here": True}
+
+        images_dir = dest / "images"
+        ann_dir = dest / "annotations"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        ann_dir.mkdir(parents=True, exist_ok=True)
+
+        found_img = found_ann = 0
+        copied_img = copied_ann = 0
+        for f in sorted(src.rglob("*")):
+            if not f.is_file():
+                continue
+            ext = f.suffix.lower()
+            if ext in IMAGE_EXTS:
+                found_img += 1
+                if not (images_dir / f.name).exists():
+                    shutil.copy2(f, images_dir / f.name)
+                    copied_img += 1
+            elif ext in ANN_EXTS:
+                found_ann += 1
+                if not (ann_dir / f.name).exists():
+                    shutil.copy2(f, ann_dir / f.name)
+                    copied_ann += 1
+
+        if found_img == 0 and found_ann == 0:
+            raise ValueError(
+                f"在 {src.name} 里没找到图片或标注 "
+                f"(图片: {sorted(IMAGE_EXTS)}, 标注: xml/json/txt)"
+            )
+
+        # 什么都没复制 → 说明同名数据集之前已经导入过
+        already_here = copied_img == 0 and copied_ann == 0
+        return {"kind": "import", "name": name, "images": copied_img,
+                "annotations": copied_ann, "path": str(dest),
+                "already_here": already_here}
+    finally:
+        if tmp_root is not None:
+            shutil.rmtree(tmp_root, ignore_errors=True)

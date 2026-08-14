@@ -14,7 +14,7 @@ from __future__ import annotations
 import html
 from pathlib import Path
 
-from PySide6.QtCore import QThreadPool
+from PySide6.QtCore import QThreadPool, Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QComboBox, QDoubleSpinBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
@@ -26,6 +26,44 @@ from . import tasks
 from .charts import ChartWidget
 from .log_bridge import install_log_bridge
 from .workers import Worker
+
+
+class DropZone(QLabel):
+    """拖放区: 接受数据集文件夹或 zip, 发出 dropped(本地路径) 信号."""
+
+    dropped = Signal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setText("拖数据集文件夹 / zip 到这里\n自动导入到 data/raw/")
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setAcceptDrops(True)
+        self.setMinimumHeight(56)
+        self.setStyleSheet(
+            "QLabel { border: 2px dashed #999; border-radius: 6px; color: #666; }"
+        )
+
+    def dragEnterEvent(self, event) -> None:
+        if self._first_valid_path(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event) -> None:
+        path = self._first_valid_path(event.mimeData())
+        if path:
+            self.dropped.emit(path)
+            event.acceptProposedAction()
+
+    @staticmethod
+    def _first_valid_path(mime) -> str | None:
+        if not mime.hasUrls():
+            return None
+        for url in mime.urls():
+            p = url.toLocalFile()
+            if p and (Path(p).is_dir() or p.lower().endswith(".zip")):
+                return p
+        return None
 
 
 class MainWindow(QMainWindow):
@@ -100,6 +138,10 @@ class MainWindow(QMainWindow):
     def _build_dataset_group(self) -> QGroupBox:
         group = QGroupBox("数据集")
         layout = QVBoxLayout(group)
+
+        self.drop_zone = DropZone()
+        self.drop_zone.dropped.connect(self._on_dataset_dropped)
+        layout.addWidget(self.drop_zone)
 
         row = QHBoxLayout()
         self.dataset_combo = QComboBox()
@@ -224,6 +266,9 @@ class MainWindow(QMainWindow):
         if name:
             self.data_edit.setText(f"{name}.yaml")
 
+    def _on_dataset_dropped(self, path: str) -> None:
+        self._start_task("导入数据集", tasks.import_dataset, path)
+
     def _on_task_changed(self, index: int) -> None:
         self.task_stack.setCurrentIndex(index)
 
@@ -259,6 +304,11 @@ class MainWindow(QMainWindow):
         self._status_label.setText("完成")
         self._render_result(result)
         self.chart_view.set_result(result)
+        if result.get("kind") == "import":
+            self._refresh_datasets()
+            idx = self.dataset_combo.findText(result.get("name"))
+            if idx >= 0:
+                self.dataset_combo.setCurrentIndex(idx)
         self.tabs.setCurrentWidget(self.result_view)
 
     def _on_task_error(self, message: str) -> None:
@@ -336,6 +386,18 @@ def _result_to_html(result: dict) -> str:
 
     if kind == "error":
         return f"<h3 style='color:#c0392b'>出错</h3><p>{_esc(result.get('message'))}</p>"
+
+    if kind == "import":
+        if result.get("already_here"):
+            msg = "已在 data/raw/ 下, 无需重复导入"
+        else:
+            msg = f"图片 {result.get('images')} 张, 标注 {result.get('annotations')} 个"
+        return (
+            "<h3>数据集导入完成</h3>"
+            f"<table>{_kv([('数据集', result.get('name')), ('结果', msg),
+                          ('路径', result.get('path'))])}</table>"
+            "<p>现在可以在左边选中它, 点「开始转换」。</p>"
+        )
 
     if kind == "transform":
         counts = result.get("counts", {})

@@ -1,7 +1,11 @@
 # apps/desktop — ODPlatform 桌面端 (PySide6)
 
-给核心引擎 `apps/platform/` 套一层 GUI：数据集选择、格式转换、质量检查、
-配置生成、任务执行(训练/评估/推理)、结果展示。
+给核心引擎 `apps/platform/` 套一层 GUI：拖拽导入数据集、格式转换、质量检查、
+配置生成、任务执行(训练/评估/推理)、结果展示(表格 + 图表)。
+
+拖拽支持：把数据集**文件夹或 zip** 拖到「数据集」框里，自动整理成
+`data/raw/<名字>/{images, annotations}/`（兼容平铺 / images+annotations /
+VOC 的 JPEGImages+Annotations 三种布局）。
 
 ## 结构
 
