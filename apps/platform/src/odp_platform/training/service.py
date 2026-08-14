@@ -185,8 +185,12 @@ class TrainService:
             logger.info("=" * 60)
             logger.info("训练完成".center(60))
             logger.info("=" * 60)
+            # ★ ultralytics 8.x 的 model.train() 返回 Metrics 对象, 不带 .task,
+            #   用 config.task 显式覆盖, 保证 _METRIC_FIELDS_BY_TASK 选对字段表
             metrics = TrainMetrics.from_yolo_results(
-                yolo_results, model_trainer=getattr(model, "trainer", None)
+                yolo_results,
+                model_trainer=getattr(model, "trainer", None),
+                task=config.task,
             )
             log_train_metrics(metrics, logger=logger)
 
