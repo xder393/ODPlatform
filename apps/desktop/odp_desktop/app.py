@@ -17,15 +17,70 @@ from pathlib import Path
 from PySide6.QtCore import QThreadPool, Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QComboBox, QDoubleSpinBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
-    QLineEdit, QMainWindow, QPlainTextEdit, QProgressBar, QPushButton,
-    QSpinBox, QStackedWidget, QTabWidget, QTextBrowser, QVBoxLayout, QWidget,
+    QComboBox, QDoubleSpinBox, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
+    QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QProgressBar, QPushButton,
+    QScrollArea, QSpinBox, QSplitter, QStackedWidget, QTabWidget, QTextBrowser,
+    QVBoxLayout, QWidget,
 )
 
 from . import tasks
 from .charts import ChartWidget
 from .log_bridge import install_log_bridge
 from .workers import Worker
+
+
+# ====================================================================
+# 全局样式 (QSS)
+# ====================================================================
+APP_STYLE = """
+QMainWindow, QWidget { background: #f5f6f8; color: #1f2937; font-size: 13px; }
+QGroupBox {
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    margin-top: 10px;
+    padding: 10px 8px 8px 8px;
+    font-weight: 600;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 4px;
+    color: #374151;
+}
+QPushButton {
+    background: #3b82f6;
+    color: #ffffff;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-weight: 500;
+}
+QPushButton:hover { background: #2563eb; }
+QPushButton:pressed { background: #1d4ed8; }
+QPushButton:disabled { background: #cbd5e1; color: #f1f5f9; }
+QComboBox, QLineEdit, QSpinBox, QDoubleSpinBox {
+    background: #ffffff;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    padding: 5px 8px;
+}
+QComboBox:focus, QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {
+    border: 1px solid #3b82f6;
+}
+QTabWidget::pane { border: 1px solid #e5e7eb; background: #ffffff; border-radius: 4px; }
+QTabBar::tab {
+    background: #e5e7eb;
+    padding: 8px 18px;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    margin-right: 2px;
+}
+QTabBar::tab:selected { background: #ffffff; font-weight: 600; }
+QScrollArea { border: none; background: transparent; }
+QStatusBar { background: #ffffff; border-top: 1px solid #e5e7eb; }
+QStatusBar QLabel { color: #4b5563; }
+"""
 
 
 class DropZone(QLabel):
@@ -72,7 +127,8 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("ODPlatform — 目标检测开发平台")
-        self.resize(1080, 720)
+        self.resize(1120, 760)
+        self.setMinimumSize(900, 600)
 
         # 日志桥 (单例) + 线程池
         self._signals = install_log_bridge()
@@ -92,12 +148,16 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         root = QHBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
 
-        # ---- 左栏: 控制面板 ----
+        # ---- 左右 splitter, 可拖拽调整 ----
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        # 左栏: 控制面板放进滚动区, 内容再高也不会被截断
         left = QWidget()
-        left.setFixedWidth(340)
         left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(8, 8, 8, 8)
+        left_layout.setContentsMargins(8, 10, 8, 10)
+        left_layout.setSpacing(8)
 
         left_layout.addWidget(self._build_dataset_group())
         left_layout.addWidget(self._build_transform_group())
@@ -106,7 +166,14 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self._build_task_group())
         left_layout.addStretch(1)
 
-        # ---- 右栏: 日志 + 结果 + 图表 ----
+        scroll = QScrollArea()
+        scroll.setWidget(left)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setMinimumWidth(320)
+
+        # 右栏: 日志 + 结果 + 图表
         self.tabs = QTabWidget()
 
         self.log_view = QPlainTextEdit()
@@ -122,8 +189,13 @@ class MainWindow(QMainWindow):
         self.chart_view = ChartWidget()
         self.tabs.addTab(self.chart_view, "图表")
 
-        root.addWidget(left)
-        root.addWidget(self.tabs, 1)
+        splitter.addWidget(scroll)
+        splitter.addWidget(self.tabs)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([360, 760])
+
+        root.addWidget(splitter)
 
     def _build_status_bar(self) -> None:
         self._status_label = QLabel("就绪")
@@ -369,51 +441,83 @@ class MainWindow(QMainWindow):
 # 结果 → HTML
 # ====================================================================
 
+_RESULT_STYLE = """
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         color: #1f2937; margin: 12px 16px; }
+  h3 { color: #111827; border-bottom: 2px solid #e5e7eb; padding-bottom: 8px; margin: 4px 0 10px; }
+  h4 { color: #4b5563; margin: 16px 0 6px; }
+  table { border-collapse: collapse; width: 100%; margin: 4px 0 14px; }
+  th, td { padding: 7px 10px; text-align: left; border-bottom: 1px solid #eef0f3; }
+  th { background: #f8fafc; color: #64748b; font-weight: 600; }
+  td.k { color: #64748b; width: 150px; }
+  .badge { display: inline-block; padding: 1px 10px; border-radius: 10px;
+           color: #fff; font-size: 12px; font-weight: 600; }
+  .badge-PASS, .badge-INFO { background: #22a06b; }
+  .badge-WARNING { background: #d97706; }
+  .badge-ERROR { background: #dc2626; }
+  .err { color: #dc2626; }
+  .ok  { color: #16a34a; font-weight: 600; }
+  .muted { color: #64748b; }
+</style>
+"""
+
+
 def _esc(value) -> str:
     return html.escape(str(value))
 
 
 def _kv(rows) -> str:
+    """键值表, 值会被转义."""
     return "".join(
-        f"<tr><td style='padding:3px 12px 3px 0;color:#666'>{_esc(k)}</td>"
-        f"<td>{_esc(v)}</td></tr>"
+        f"<tr><td class='k'>{_esc(k)}</td><td>{_esc(v)}</td></tr>"
         for k, v in rows
     )
+
+
+def _kv_raw(rows) -> str:
+    """键值表, 值当作已安全的 HTML 原样输出 (用于徽章/状态)."""
+    return "".join(
+        f"<tr><td class='k'>{_esc(k)}</td><td>{v}</td></tr>"
+        for k, v in rows
+    )
+
+
+def _page(title: str, body: str) -> str:
+    return f"<html><head>{_RESULT_STYLE}</head><body><h3>{_esc(title)}</h3>{body}</body></html>"
+
+
+def _badge(sev: str) -> str:
+    return f"<span class='badge badge-{_esc(sev)}'>{_esc(sev)}</span>"
 
 
 def _result_to_html(result: dict) -> str:
     kind = result.get("kind")
 
     if kind == "error":
-        return f"<h3 style='color:#c0392b'>出错</h3><p>{_esc(result.get('message'))}</p>"
+        return _page("出错", f"<p class='err'>{_esc(result.get('message'))}</p>")
 
     if kind == "import":
         if result.get("already_here"):
             msg = "已在 data/raw/ 下, 无需重复导入"
         else:
             msg = f"图片 {result.get('images')} 张, 标注 {result.get('annotations')} 个"
-        return (
-            "<h3>数据集导入完成</h3>"
-            f"<table>{_kv([('数据集', result.get('name')), ('结果', msg),
-                          ('路径', result.get('path'))])}</table>"
-            "<p>现在可以在左边选中它, 点「开始转换」。</p>"
-        )
+        body = _kv([("数据集", result.get("name")), ("结果", msg),
+                    ("路径", result.get("path"))])
+        return _page("数据集导入完成",
+                     f"<table>{body}</table>"
+                     "<p class='muted'>现在可以在左边选中它, 点「开始转换」。</p>")
 
     if kind == "transform":
         counts = result.get("counts", {})
-        return (
-            "<h3>格式转换完成</h3>"
-            f"<table>{_kv([('train', counts.get('train')), ('val', counts.get('val')),
-                          ('test', counts.get('test')), ('yaml', result.get('yaml'))])}</table>"
-        )
+        body = _kv([("train", counts.get("train")), ("val", counts.get("val")),
+                    ("test", counts.get("test")), ("yaml", result.get("yaml"))])
+        return _page("格式转换完成", f"<table>{body}</table>")
 
     if kind == "validate":
         sev = result.get("overall_severity", "?")
-        color = {"PASS": "#27ae60", "INFO": "#27ae60",
-                 "WARNING": "#e67e22", "ERROR": "#c0392b"}.get(sev, "#333")
         ds = result.get("dataset_summary", {})
-        rows = _kv([
-            ("总体", f"<b style='color:{color}'>{_esc(sev)}</b>"),
+        body = _kv_raw([("总体", _badge(sev))]) + _kv([
             ("类别数", ds.get("nc")),
             ("类别", ", ".join(ds.get("classes", []))),
             ("图像总数", ds.get("total_images")),
@@ -425,53 +529,41 @@ def _result_to_html(result: dict) -> str:
             for s, st in result.get("stats_per_split", {}).items()
         )
         check_rows = "".join(
-            f"<tr><td>{_esc(r['severity'])}</td><td>{_esc(r['name'])}</td>"
+            f"<tr><td>{_badge(r['severity'])}</td><td>{_esc(r['name'])}</td>"
             f"<td>{_esc(r['summary'])}</td></tr>"
             for r in result.get("results", [])
         )
-        return (
-            "<h3>质量检查结果</h3>"
-            f"<table>{rows}</table>"
+        body += (
             "<h4>各 split 数据量</h4>"
-            "<table border='0' cellspacing='0' cellpadding='4'>"
-            "<tr><th style='text-align:left'>split</th><th style='text-align:left'>图像</th>"
-            "<th style='text-align:left'>有标注</th><th style='text-align:left'>实例</th></tr>"
+            "<table><tr><th>split</th><th>图像</th><th>有标注</th><th>实例</th></tr>"
             f"{split_rows}</table>"
             "<h4>检查项</h4>"
-            "<table border='0' cellspacing='0' cellpadding='4'>"
-            "<tr><th style='text-align:left'>级别</th><th style='text-align:left'>检查项</th>"
-            "<th style='text-align:left'>结论</th></tr>"
+            "<table><tr><th>级别</th><th>检查项</th><th>结论</th></tr>"
             f"{check_rows}</table>"
         )
+        return _page("质量检查结果", body)
 
     if kind == "gen_config":
         ok = "已生成" if result.get("generated") else "已存在(未覆盖)"
-        return (
-            "<h3>配置生成</h3>"
-            f"<table>{_kv([('状态', ok), ('路径', result.get('path'))])}</table>"
-            "<p>编辑该 yaml 后即可在任务执行里使用(或走 CLI)。</p>"
-        )
+        body = _kv([("状态", ok), ("路径", result.get("path"))])
+        return _page("配置生成",
+                     f"<table>{body}</table>"
+                     "<p class='muted'>编辑该 yaml 后即可在任务执行里使用。</p>")
 
     if kind in ("train", "val", "infer"):
         if result.get("success"):
-            rows = [("状态", "<b style='color:#27ae60'>成功</b>"),
-                    ("输出目录", result.get("output_dir"))]
-            metrics = result.get("metrics") or {}
-            for k, v in metrics.items():
-                rows.append((k, v))
+            rows = _kv_raw([("状态", "<span class='ok'>成功</span>"),
+                            ("输出目录", _esc(result.get("output_dir")))])
+            rows += _kv([(k, v) for k, v in (result.get("metrics") or {}).items()])
             if kind == "train":
-                rows.append(("耗时(秒)", result.get("train_time")))
+                rows += _kv([("耗时(秒)", result.get("train_time"))])
             elif kind == "val":
-                rows.append(("耗时(秒)", result.get("val_time")))
+                rows += _kv([("耗时(秒)", result.get("val_time"))])
             else:
-                rows.append(("耗时(秒)", result.get("infer_time")))
-                rows.append(("已保存", result.get("saved")))
-            return f"<h3>{kind} 完成</h3><table>{_kv(rows)}</table>"
-        else:
-            return (
-                f"<h3>{kind} 失败</h3>"
-                f"<p style='color:#c0392b'>{_esc(result.get('error'))}</p>"
-            )
+                rows += _kv([("耗时(秒)", result.get("infer_time")),
+                             ("已保存", result.get("saved"))])
+            return _page(f"{kind} 完成", f"<table>{rows}</table>")
+        return _page(f"{kind} 失败", f"<p class='err'>{_esc(result.get('error'))}</p>")
 
     return f"<pre>{_esc(result)}</pre>"
 
@@ -484,6 +576,7 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName("ODPlatform")
+    app.setStyleSheet(APP_STYLE)
     win = MainWindow()
     win.show()
     return app.exec()
