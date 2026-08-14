@@ -386,6 +386,9 @@ class MainWindow(QMainWindow):
         self.ds_card_cls.findChild(QLabel).setText(str(len(info["classes"])) if info["classes"] else "?")
         self._refresh_preview(name)
         self._refresh_tree(name)
+        # 训练/评估页的数据字段跟着当前数据集走
+        if hasattr(self, "train_data_edit"):
+            self.train_data_edit.setText(f"{name}.yaml")
 
     def _refresh_preview(self, name: str) -> None:
         # 清空旧预览
