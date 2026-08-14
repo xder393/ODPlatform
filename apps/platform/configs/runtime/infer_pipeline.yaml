@@ -1,0 +1,55 @@
+# infer_pipeline.yaml — ODPlatform D8 推理子系统的"帧源 + 美化"配置
+# 这份配置管 D5 的 infer.yaml 管不到的那一半. 互不重叠, 各管各的.
+
+# ============================================================================
+# 帧源 (frame_source) — 主要给摄像头/RTSP 用; 视频文件 / 图片夹 走默认即可
+# ============================================================================
+frame_source:
+  camera:
+    # 这一块只有 source 是摄像头号 (0/1/2...) 时才生效, 视频文件源会被忽略
+    width: 1280
+    height: 720
+    fps: 30
+    # backend: AUTO         # 可选, 默认 AUTO; 也可以 DSHOW(Win) / V4L2(Linux) / AVFOUNDATION(Mac)
+    # auto_focus: true
+    # buffer_size: 1        # 摄像头驱动内部缓冲, 越小延迟越低
+
+# ============================================================================
+# 美化 (visualization) — 关掉就走 YOLO 原生 result.plot()
+# ============================================================================
+visualization:
+  enabled: true                 # false → 退回 YOLO 原生绘制 (更快但丑)
+  use_label_mapping: true       # false → 全显英文 (即使 label_mapping 非空)
+
+  # 英文 → 中文 (没写的类别保持英文)
+  label_mapping:
+    person: 人员
+    car: 汽车
+    bicycle: 自行车
+    motorcycle: 摩托车
+    bus: 公交车
+    truck: 卡车
+    cat: 猫
+    dog: 狗
+
+  # 类别 → 颜色 (BGR), 没写的用 default_color
+  color_mapping:
+    person:    [0, 255, 0]      # 绿
+    car:       [0, 0, 255]      # 红
+    bicycle:   [255, 128, 0]    # 橙
+    cat:       [255, 100, 200]  # 粉
+    dog:       [200, 150, 50]   # 棕
+
+  default_color: [0, 255, 0]    # 没在 color_mapping 里的类别用这个
+
+  # 中文字体路径 (没装就用 PIL 默认, 中文会乱码)
+  # Windows 自带: C:/Windows/Fonts/msyh.ttc
+  # Mac 自带:    /System/Library/Fonts/PingFang.ttc
+  # font_path: /usr/share/fonts/truetype/wqy/wqy-microhei.ttc
+
+  # 样式覆盖 — 透传给 DrawStyle.from_image_size, 全部可省
+  style:
+    # box_thickness: 2            # 框线粗细 (默认自适应)
+    # text_scale: 0.6             # 标签字号
+    # text_color: [255, 255, 255] # 标签字色
+    # text_bg_alpha: 0.6          # 标签背景不透明度 (0-1)
