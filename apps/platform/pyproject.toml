@@ -1,0 +1,70 @@
+# apps/platform/pyproject.toml
+# =============================================================================
+# ODPlatform - platform 端配置 (hatchling backend)
+# =============================================================================
+
+[build-system]
+requires = ["hatchling>=1.18.0"]
+build-backend = "hatchling.build"
+
+
+[project]
+name = "odp-platform"
+dynamic = ["version"]                              # 版本号从 _version.py 动态读
+description = "ODPlatform - 目标检测开发平台核心引擎"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "ODPlatform Team" },
+]
+keywords = ["object-detection", "yolo", "deep-learning", "ml-platform"]
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "colorlog>=6.7.0",
+    "psutil>=5.9.0",
+    "torch>=2.0.0",
+    "ultralytics>=8.0.0",
+    "pyyaml>=6.0",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.1.0",
+    "mypy>=1.5.0",
+]
+
+
+# =============================================================================
+# Entry-point Scripts (PEP 621 标准字段, 与 backend 无关)
+# =============================================================================
+[project.scripts]
+odp-init  = "odp_platform.cli.init_project:initialize_project"
+odp-reset = "odp_platform.cli.reset_project:main"
+
+
+# =============================================================================
+# Hatchling 配置 (告诉它两件事: 包源码在哪、版本号从哪读)
+# =============================================================================
+
+# 告诉 hatchling 包源码在 src/odp_platform/
+[tool.hatch.build.targets.wheel]
+packages = ["src/odp_platform"]
+
+# 动态版本号: 从 src/odp_platform/_version.py 的 __version__ 读
+[tool.hatch.version]
+path = "src/odp_platform/_version.py"
