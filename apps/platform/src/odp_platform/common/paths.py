@@ -152,6 +152,9 @@ def get_dirs_to_initialize() -> List[Path]:
 
         # 工具元数据(reset 等元工具的审计日志位置)
         META_LOGGING_DIR,
+
+        # 数据集配置目录(D3 数据流水线产出 <name>.yaml)
+        DATASET_CONFIGS_DIR,
     ]
 
 
@@ -218,6 +221,28 @@ def is_protected(path: Path) -> bool:
         if protected_resolved.is_relative_to(path):
             return True
     return False
+
+
+# ============================================================
+# D3 增量: 数据集配置目录 + 路径辅助函数
+# ============================================================
+DATASET_CONFIGS_DIR: Path = CONFIGS_DIR / "datasets"
+
+
+def raw_dataset_root(dataset_name: str) -> Path:
+    """返回某个数据集的 raw 根目录: data/raw/<name>/
+
+    Args:
+        dataset_name: 数据集名 (= data/raw/ 下的子目录名)
+    """
+    return RAW_DATA_DIR / dataset_name
+
+
+def dataset_yaml_path(dataset_name: str) -> Path:
+    """返回某数据集的 ultralytics yaml 输出路径:
+    <DATASET_CONFIGS_DIR>/<name>.yaml
+    """
+    return DATASET_CONFIGS_DIR / f"{dataset_name}.yaml"
 
 
 if __name__ == "__main__":

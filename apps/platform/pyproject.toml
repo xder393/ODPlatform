@@ -38,6 +38,8 @@ dependencies = [
     "ultralytics>=8.0.0",
     "pyyaml>=6.0",
     "pydantic>=2.0",
+    "scikit-learn>=1.3,<2.0",
+    "pillow",
 ]
 
 [project.optional-dependencies]
@@ -53,8 +55,9 @@ dev = [
 # Entry-point Scripts (PEP 621 标准字段, 与 backend 无关)
 # =============================================================================
 [project.scripts]
-odp-init  = "odp_platform.cli.init_project:initialize_project"
-odp-reset = "odp_platform.cli.reset_project:main"
+odp-init       = "odp_platform.cli.init_project:initialize_project"
+odp-reset      = "odp_platform.cli.reset_project:main"
+odp-transform  = "odp_platform.cli.transform_data:main"
 
 
 # =============================================================================
