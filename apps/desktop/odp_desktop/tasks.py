@@ -42,7 +42,8 @@ def validate_dataset_checked(dataset_name: str) -> dict[str, Any]:
         "overall_severity": report.overall_severity,
         "exit_code": report.exit_code,
         "results": [
-            {"name": r.name, "severity": r.severity, "summary": r.summary}
+            {"name": r.name, "severity": r.severity, "summary": r.summary,
+             "details": r.details}
             for r in report.results
         ],
         "dataset_summary": {

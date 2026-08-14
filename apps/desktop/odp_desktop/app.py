@@ -112,15 +112,6 @@ def _row(label: str, value: QWidget) -> QWidget:
     return box
 
 
-class _Dot(QPushButton):
-    def __init__(self, color: str, on_click=None) -> None:
-        super().__init__()
-        self.setFixedSize(12, 12)
-        self.setStyleSheet(f"QPushButton {{ background: {color}; border-radius: 6px; }}")
-        if on_click:
-            self.clicked.connect(on_click)
-
-
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -136,6 +127,7 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._refresh_datasets()
+        self._refresh_experiments()
 
     # ==================================================================
     # 整体骨架
@@ -184,14 +176,7 @@ class MainWindow(QMainWindow):
         header.setObjectName("header")
         header.setFixedHeight(46)
         lay = QHBoxLayout(header)
-        lay.setContentsMargins(14, 0, 14, 0)
-
-        dots = QHBoxLayout()
-        dots.setSpacing(8)
-        dots.addWidget(_Dot(RED, on_click=self.close))
-        dots.addWidget(_Dot("#FFCC00"))
-        dots.addWidget(_Dot(GREEN))
-        lay.addLayout(dots)
+        lay.setContentsMargins(16, 0, 14, 0)
 
         title = QLabel("Dataset Converter & Validator")
         title.setStyleSheet("font-weight: 600; font-size: 13px;")
@@ -228,6 +213,12 @@ class MainWindow(QMainWindow):
     def _switch_page(self, idx: int) -> None:
         self.left_stack.setCurrentIndex(idx)
         self.right_stack.setCurrentIndex(idx)
+        # 切页时同步上下文
+        name = self._current_dataset or self.dataset_combo.currentText()
+        if idx == 1:
+            self.val_dataset_label.setText(name or "(未选择)")
+        elif idx == 3:
+            self._refresh_experiments()
 
     # ==================================================================
     # 四个页面
@@ -574,11 +565,8 @@ class MainWindow(QMainWindow):
 
         opts = QGroupBox("转换选项")
         og = QVBoxLayout(opts)
-        self.opt_keep = QCheckBox("保留原始图片（推荐）")
-        self.opt_keep.setChecked(True)
-        self.opt_split = QCheckBox("生成训练/验证/测试划分")
+        self.opt_split = QCheckBox("生成训练/验证/测试划分（80/10/10）")
         self.opt_split.setChecked(True)
-        og.addWidget(self.opt_keep)
         og.addWidget(self.opt_split)
         lay.addWidget(opts)
 
@@ -625,7 +613,9 @@ class MainWindow(QMainWindow):
             f"数据集：{name}"
         )
         self.conv_result.setText("转换中...")
-        self._run_inprocess("格式转换", tasks.transform_dataset, name, fmt, 0.8, 0.1,
+        train_rate = 0.8 if self.opt_split.isChecked() else 1.0
+        val_rate = 0.1 if self.opt_split.isChecked() else 0.0
+        self._run_inprocess("格式转换", tasks.transform_dataset, name, fmt, train_rate, val_rate,
                             on_done=self._on_convert_done)
 
     def _on_convert_done(self, result) -> None:
@@ -659,6 +649,7 @@ class MainWindow(QMainWindow):
 
         self.del_exp_btn = QPushButton("删除实验")
         self.del_exp_btn.setProperty("role", "danger")
+        self.del_exp_btn.clicked.connect(self._delete_experiment)
         lay.addWidget(self.del_exp_btn)
         return w
 
@@ -739,6 +730,21 @@ class MainWindow(QMainWindow):
         e = getattr(self, "_current_exp", None)
         if e and e.get("log_path"):
             self._open_path(Path(e["log_path"]))
+
+    def _delete_experiment(self) -> None:
+        row = self.exp_list.currentRow()
+        if row < 0 or not getattr(self, "_experiments", None):
+            return
+        from PySide6.QtWidgets import QMessageBox
+        e = self._experiments[row]
+        ret = QMessageBox.question(
+            self, "删除实验",
+            f"确定删除实验「{e['name']}」的输出目录吗？\n{e['output_dir']}",
+        )
+        if ret == QMessageBox.StandardButton.Yes:
+            import shutil
+            shutil.rmtree(e["output_dir"], ignore_errors=True)
+            self._refresh_experiments()
 
     # ==================================================================
     # 任务执行 / 取消
