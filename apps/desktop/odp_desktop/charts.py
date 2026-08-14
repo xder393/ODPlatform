@@ -56,7 +56,10 @@ class ChartWidget(QWidget):
         self._canvas = None
 
     def set_result(self, result: dict[str, Any]) -> None:
-        fig = figure_for_result(result)
+        self.set_figure(figure_for_result(result))
+
+    def set_figure(self, fig) -> None:
+        """直接嵌入一张 matplotlib Figure (fig=None 则清空)."""
         self._clear()
         if fig is None:
             return
@@ -143,6 +146,44 @@ def _metrics_figure(result: dict[str, Any]):
             b.get_x() + b.get_width() / 2, v + max(values) * 0.02,
             f"{v:.3f}", ha="center", va="bottom", fontsize=9,
         )
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    return fig
+
+
+def training_curve_figure(results_csv: str):
+    """从 ultralytics results.csv 画训练/验证 loss 曲线."""
+    import csv
+    from pathlib import Path
+
+    from matplotlib.figure import Figure
+
+    p = Path(results_csv)
+    if not p.exists():
+        return None
+    try:
+        raw = list(csv.DictReader(p.read_text(encoding="utf-8").splitlines()))
+    except Exception:
+        return None
+    if not raw:
+        return None
+
+    # ultralytics 的列名带前导空格, 统一 strip
+    rows = [{k.strip(): v for k, v in r.items()} for r in raw]
+    epochs = [i + 1 for i in range(len(rows))]
+    train = [float(r["train/box_loss"]) for r in rows if r.get("train/box_loss")]
+    val = [float(r["val/box_loss"]) for r in rows if r.get("val/box_loss")]
+
+    fig = Figure(figsize=(5.6, 3.4))
+    ax = fig.add_subplot(111)
+    if train:
+        ax.plot(epochs[:len(train)], train, label="train loss", color="#007AFF", lw=1.6)
+    if val:
+        ax.plot(epochs[:len(val)], val, label="val loss", color="#FF9500", lw=1.6)
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("loss")
+    ax.legend()
+    ax.grid(alpha=0.2)
     ax.spines[["top", "right"]].set_visible(False)
     fig.tight_layout()
     return fig

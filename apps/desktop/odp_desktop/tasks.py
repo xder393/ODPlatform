@@ -214,3 +214,195 @@ def import_dataset(source: str) -> dict[str, Any]:
     finally:
         if tmp_root is not None:
             shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+# ====================================================================
+# 数据集信息检测 / 预览 / 实验列表 (供新 UI 用)
+# ====================================================================
+
+def detect_dataset_info(dataset_name: str) -> dict[str, Any]:
+    """扫描 data/raw/<name>, 返回 {name, exists, format, images, annotations, classes}."""
+    import json as _json
+    import xml.etree.ElementTree as ET
+    from pathlib import Path
+
+    from odp_platform.common.constants import IMAGE_EXTENSIONS
+    from odp_platform.common.paths import RAW_DATA_DIR
+
+    root = RAW_DATA_DIR / dataset_name
+    if not root.is_dir():
+        return {"name": dataset_name, "exists": False,
+                "error": f"目录不存在: {root}"}
+
+    img_exts = {e.lower() for e in IMAGE_EXTENSIONS}
+    images_dir = root / "images"
+    ann_dir = root / "annotations"
+
+    images = sorted(
+        p for p in images_dir.rglob("*")
+        if p.is_file() and p.suffix.lower() in img_exts
+    ) if images_dir.is_dir() else []
+    anns = sorted(p for p in ann_dir.rglob("*") if p.is_file()) if ann_dir.is_dir() else []
+
+    # 格式检测: 按标注扩展名
+    exts = {p.suffix.lower() for p in anns}
+    if ".xml" in exts:
+        fmt = "pascal_voc"
+    elif ".json" in exts:
+        fmt = "coco"
+    elif ".txt" in exts:
+        fmt = "yolo"
+    else:
+        fmt = "unknown"
+
+    # 类别提取
+    classes: list[str] = []
+    if fmt == "pascal_voc":
+        for f in sorted(ann_dir.glob("*.xml"))[:100]:
+            try:
+                for el in ET.parse(f).getroot().iter("name"):
+                    n = (el.text or "").strip()
+                    if n and n not in classes:
+                        classes.append(n)
+            except Exception:
+                pass
+    elif fmt == "coco":
+        for f in sorted(ann_dir.glob("*.json"))[:1]:
+            try:
+                data = _json.loads(f.read_text(encoding="utf-8"))
+                cats = sorted(data.get("categories", []), key=lambda c: c.get("id", 0))
+                classes = [c["name"] for c in cats]
+            except Exception:
+                pass
+
+    return {"name": dataset_name, "exists": True, "format": fmt,
+            "images": len(images), "annotations": len(anns), "classes": classes}
+
+
+def sample_image_paths(dataset_name: str, limit: int = 6) -> list[str]:
+    """取数据集的几张样本图 (绝对路径), 给预览用."""
+    from pathlib import Path
+
+    from odp_platform.common.constants import IMAGE_EXTENSIONS
+    from odp_platform.common.paths import RAW_DATA_DIR
+
+    img_exts = {e.lower() for e in IMAGE_EXTENSIONS}
+    images_dir = RAW_DATA_DIR / dataset_name / "images"
+    if not images_dir.is_dir():
+        return []
+    out = []
+    for p in sorted(images_dir.iterdir()):
+        if p.is_file() and p.suffix.lower() in img_exts:
+            out.append(str(p))
+            if len(out) >= limit:
+                break
+    return out
+
+
+def draw_boxes_pil(image_path: str, label_path: str, class_names: list[str] | None = None):
+    """在图上画 YOLO 标注框, 返回 PIL Image. 没有标注时原样返回."""
+    from pathlib import Path
+
+    from PIL import Image, ImageDraw
+
+    img = Image.open(image_path).convert("RGB")
+    w, h = img.size
+    d = ImageDraw.Draw(img)
+    label_file = Path(label_path)
+    if not label_file.exists():
+        return img
+    for line in label_file.read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        try:
+            cid = int(parts[0])
+            cx, cy, bw, bh = (float(x) for x in parts[1:5])
+        except ValueError:
+            continue
+        x0 = (cx - bw / 2) * w
+        y0 = (cy - bh / 2) * h
+        x1 = (cx + bw / 2) * w
+        y1 = (cy + bh / 2) * h
+        d.rectangle([x0, y0, x1, y1], outline=(255, 59, 48), width=max(2, w // 300))
+        if class_names and 0 <= cid < len(class_names):
+            d.text((x0, max(0, y0 - 12)), str(class_names[cid]), fill=(255, 59, 48))
+    return img
+
+
+# ====================================================================
+# 重任务 → 子进程参数 (可取消)
+# ====================================================================
+
+def train_args(model: str, data: str, epochs: int, imgsz: int, device: str) -> list[str]:
+    import sys
+    return [sys.executable, "-m", "odp_platform.cli.train_model",
+            "--data", data, "--model", model, "--epochs", str(epochs),
+            "--imgsz", str(imgsz), "--device", device, "--workers", "0"]
+
+
+def val_args(model: str, data: str, split: str, imgsz: int, device: str) -> list[str]:
+    import sys
+    return [sys.executable, "-m", "odp_platform.cli.val_model",
+            "--data", data, "--model", model, "--split", split,
+            "--imgsz", str(imgsz), "--device", device]
+
+
+def infer_args(model: str, source: str, device: str, save: bool = True) -> list[str]:
+    import sys
+    args = [sys.executable, "-m", "odp_platform.cli.infer",
+            "--model", model, "--source", source, "--device", device]
+    if save:
+        args.append("--save")
+    return args
+
+
+# ====================================================================
+# 训练实验列表 (读 runs/**/odp_audit.json)
+# ====================================================================
+
+def _f(value: Any, nd: int = 4):
+    try:
+        return round(float(value), nd)
+    except (TypeError, ValueError):
+        return None
+
+
+def list_experiments() -> list[dict[str, Any]]:
+    """扫描 runs/**/odp_audit.json, 按时间倒序返回实验列表."""
+    import json as _json
+    from pathlib import Path
+
+    from odp_platform.common.paths import RUNS_DIR
+
+    exps: list[dict[str, Any]] = []
+    audits = sorted(
+        Path(RUNS_DIR).rglob("odp_audit.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for audit in audits:
+        try:
+            data = _json.loads(audit.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        cfg = data.get("config", {}).get("values", {})
+        metrics = data.get("metrics", {})
+        overall = metrics.get("overall", {})
+        exps.append({
+            "name": audit.parent.name,                       # train / train2 / val / ...
+            "group": audit.parent.parent.name,               # detect_train / detect_val / ...
+            "task": metrics.get("task", cfg.get("task", "detect")),
+            "model": cfg.get("model", "?"),
+            "data": cfg.get("data", "?"),
+            "time": metrics.get("timestamp", ""),
+            "mAP50": _f(overall.get("metrics/mAP50(B)")),
+            "mAP50_95": _f(overall.get("metrics/mAP50-95(B)")),
+            "precision": _f(overall.get("metrics/precision(B)")),
+            "recall": _f(overall.get("metrics/recall(B)")),
+            "output_dir": str(audit.parent),
+            "log_path": data.get("result_summary", {}).get("log_path"),
+            "results_csv": str(audit.parent / "results.csv"),
+            "confusion_png": str(audit.parent / "confusion_matrix.png"),
+        })
+    return exps

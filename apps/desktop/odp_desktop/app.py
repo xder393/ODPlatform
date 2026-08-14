@@ -1,13 +1,11 @@
 # -*- coding:utf-8 -*-
-"""ODPlatform 桌面端主窗口 (PySide6).
+"""ODPlatform 桌面端 — Dataset Converter & Validator (macOS 原生风格).
 
-布局:
-  左栏  数据集选择 / 格式转换 / 质量检查 / 配置生成 / 任务执行
-  右栏  日志页(实时) + 结果页(结构化 HTML) + 图表页(matplotlib)
-
-设计纪律 (跟 CLI 层一致):
-  - 业务全在 odp_platform 服务层, 这里只做"取参数 → 后台跑 → 展示"
-  - 长任务走 QThreadPool, UI 不冻结; 运行时有进度条 + 状态提示
+结构:
+  标题栏(红黄绿灯 + 名称 + 停止按钮)
+  分段导航(数据集 / 质量检查 / 格式转换 / 训练实验)
+  左栏(280px 工具操作区) + 右栏(预览/结果区), 可拖拽
+  底部实时日志
 """
 from __future__ import annotations
 
@@ -15,567 +13,829 @@ import html
 from pathlib import Path
 
 from PySide6.QtCore import QThreadPool, Qt, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QImage, QPixmap
 from PySide6.QtWidgets import (
-    QComboBox, QDoubleSpinBox, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
-    QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QProgressBar, QPushButton,
-    QScrollArea, QSpinBox, QSplitter, QStackedWidget, QTabWidget, QTextBrowser,
-    QVBoxLayout, QWidget,
+    QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout,
+    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QMainWindow, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
+    QSpinBox, QSplitter, QStackedWidget, QTabWidget, QTableWidget,
+    QTableWidgetItem, QTextBrowser, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+    QWidget,
 )
 
 from . import tasks
-from .charts import ChartWidget
+from .charts import ChartWidget, training_curve_figure
 from .log_bridge import install_log_bridge
-from .workers import Worker
+from .workers import SubprocessWorker, Worker
+
+# ---- 颜色 ----
+BLUE = "#007AFF"
+GREEN = "#34C759"
+ORANGE = "#FF9500"
+RED = "#FF3B30"
+GRAY = "#8E8E93"
+BG = "#F5F5F7"
+
+# ---- 四个工具 ----
+TOOLS = ["数据集", "质量检查", "格式转换", "训练实验"]
 
 
 # ====================================================================
-# 全局样式 (QSS)
+# 样式
 # ====================================================================
-APP_STYLE = """
-QMainWindow, QWidget { background: #f5f6f8; color: #1f2937; font-size: 13px; }
-QGroupBox {
-    background: #ffffff;
-    border: 1px solid #e5e7eb;
-    border-radius: 8px;
-    margin-top: 10px;
-    padding: 10px 8px 8px 8px;
-    font-weight: 600;
-}
-QGroupBox::title {
-    subcontrol-origin: margin;
-    left: 10px;
-    padding: 0 4px;
-    color: #374151;
-}
-QPushButton {
-    background: #3b82f6;
-    color: #ffffff;
-    border: none;
-    border-radius: 6px;
-    padding: 8px 12px;
-    font-weight: 500;
-}
-QPushButton:hover { background: #2563eb; }
-QPushButton:pressed { background: #1d4ed8; }
-QPushButton:disabled { background: #cbd5e1; color: #f1f5f9; }
-QComboBox, QLineEdit, QSpinBox, QDoubleSpinBox {
-    background: #ffffff;
-    border: 1px solid #d1d5db;
-    border-radius: 4px;
-    padding: 5px 8px;
-}
-QComboBox:focus, QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {
-    border: 1px solid #3b82f6;
-}
-QTabWidget::pane { border: 1px solid #e5e7eb; background: #ffffff; border-radius: 4px; }
-QTabBar::tab {
-    background: #e5e7eb;
-    padding: 8px 18px;
-    border-top-left-radius: 6px;
-    border-top-right-radius: 6px;
-    margin-right: 2px;
-}
-QTabBar::tab:selected { background: #ffffff; font-weight: 600; }
-QScrollArea { border: none; background: transparent; }
-QStatusBar { background: #ffffff; border-top: 1px solid #e5e7eb; }
-QStatusBar QLabel { color: #4b5563; }
+APP_STYLE = f"""
+QMainWindow, QWidget {{ background: {BG}; color: #1D1D1F; font-family: -apple-system; font-size: 13px; }}
+QFrame#header {{ background: #ffffff; border-bottom: 1px solid #E5E5EA; }}
+QFrame#nav {{ background: {BG}; }}
+QPushButton {{ background: transparent; border: none; border-radius: 8px; padding: 7px 14px; }}
+QPushButton:hover {{ background: rgba(0,0,0,0.05); }}
+QPushButton:disabled {{ color: #C7C7CC; }}
+QPushButton[role="primary"] {{ background: {BLUE}; color: white; font-weight: 600; }}
+QPushButton[role="primary"]:hover {{ background: #0069D9; }}
+QPushButton[role="primary"]:disabled {{ background: #B3D7FF; }}
+QPushButton[role="secondary"] {{ background: #ffffff; color: {BLUE}; border: 1px solid {BLUE}; }}
+QPushButton[role="danger"] {{ color: {RED}; }}
+QPushButton[role="nav"] {{ border-radius: 8px; padding: 5px 16px; color: #1D1D1F; background: transparent; }}
+QPushButton[role="nav"]:checked {{ background: #ffffff; font-weight: 600; }}
+QComboBox, QLineEdit, QSpinBox {{ background: #ffffff; border: 1px solid #D1D1D6; border-radius: 6px; padding: 5px 8px; }}
+QGroupBox {{ background: #ffffff; border: 1px solid #E5E5EA; border-radius: 10px; margin-top: 8px; padding: 8px; font-weight: 600; }}
+QGroupBox::title {{ subcontrol-origin: margin; left: 10px; color: #6E6E73; }}
+QScrollArea {{ border: none; background: transparent; }}
+QTreeWidget, QListWidget, QTableWidget, QPlainTextEdit, QTextBrowser {{ background: #ffffff; border: 1px solid #E5E5EA; border-radius: 8px; }}
+QListWidget::item {{ padding: 8px; border-radius: 8px; }}
+QListWidget::item:selected {{ background: {BLUE}; color: white; }}
+QFrame#card {{ background: #ffffff; border: 1px solid #E5E5EA; border-radius: 10px; }}
+QFrame#term {{ background: #1E1E1E; border-radius: 8px; }}
+QFrame#term QLabel {{ background: transparent; color: #4AF626; font-family: Menlo; font-size: 12px; }}
+QStatusBar {{ background: #ffffff; border-top: 1px solid #E5E5EA; }}
+QProgressBar {{ border: none; background: #E5E5EA; border-radius: 3px; height: 6px; }}
+QProgressBar::chunk {{ background: {BLUE}; border-radius: 3px; }}
 """
 
 
-class DropZone(QLabel):
-    """拖放区: 接受数据集文件夹或 zip, 发出 dropped(本地路径) 信号."""
+def _pil_to_pixmap(img, max_w: int = 240, max_h: int = 170) -> QPixmap:
+    img = img.copy()
+    img.thumbnail((max_w, max_h))
+    data = img.convert("RGB").tobytes("raw", "RGB")
+    qimg = QImage(data, img.width, img.height, img.width * 3, QImage.Format.Format_RGB888)
+    return QPixmap.fromImage(qimg)
 
-    dropped = Signal(str)
 
-    def __init__(self) -> None:
+def _card(title: str, value: str, sub: str = "", value_color: str = "#1D1D1F") -> QFrame:
+    """统计卡片."""
+    card = QFrame()
+    card.setObjectName("card")
+    lay = QVBoxLayout(card)
+    lay.setContentsMargins(14, 10, 14, 10)
+    v = QLabel(value)
+    v.setStyleSheet(f"font-size: 26px; font-weight: 700; color: {value_color};")
+    t = QLabel(title)
+    t.setStyleSheet("color: #8E8E93; font-size: 12px;")
+    lay.addWidget(v)
+    lay.addWidget(t)
+    if sub:
+        s = QLabel(sub)
+        s.setStyleSheet("color: #8E8E93; font-size: 11px;")
+        lay.addWidget(s)
+    return card
+
+
+def _row(label: str, value: QWidget) -> QWidget:
+    box = QWidget()
+    lay = QVBoxLayout(box)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(2)
+    l = QLabel(label)
+    l.setStyleSheet("color: #6E6E73; font-size: 12px;")
+    lay.addWidget(l)
+    lay.addWidget(value)
+    return box
+
+
+class _Dot(QPushButton):
+    def __init__(self, color: str, on_click=None) -> None:
         super().__init__()
-        self.setText("拖数据集文件夹 / zip 到这里\n自动导入到 data/raw/")
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setAcceptDrops(True)
-        self.setMinimumHeight(56)
-        self.setStyleSheet(
-            "QLabel { border: 2px dashed #999; border-radius: 6px; color: #666; }"
-        )
-
-    def dragEnterEvent(self, event) -> None:
-        if self._first_valid_path(event.mimeData()):
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-
-    def dropEvent(self, event) -> None:
-        path = self._first_valid_path(event.mimeData())
-        if path:
-            self.dropped.emit(path)
-            event.acceptProposedAction()
-
-    @staticmethod
-    def _first_valid_path(mime) -> str | None:
-        if not mime.hasUrls():
-            return None
-        for url in mime.urls():
-            p = url.toLocalFile()
-            if p and (Path(p).is_dir() or p.lower().endswith(".zip")):
-                return p
-        return None
+        self.setFixedSize(12, 12)
+        self.setStyleSheet(f"QPushButton {{ background: {color}; border-radius: 6px; }}")
+        if on_click:
+            self.clicked.connect(on_click)
 
 
 class MainWindow(QMainWindow):
-    """ODPlatform 桌面端."""
-
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("ODPlatform — 目标检测开发平台")
-        self.resize(1120, 760)
-        self.setMinimumSize(900, 600)
+        self.setWindowTitle("Dataset Converter & Validator")
+        self.resize(1180, 800)
+        self.setMinimumSize(1000, 660)
 
-        # 日志桥 (单例) + 线程池
         self._signals = install_log_bridge()
-        self._signals.message.connect(self._append_log)
         self._pool = QThreadPool.globalInstance()
         self._busy = False
+        self._cancel_fn = None
+        self._current_dataset = ""
 
         self._build_ui()
-        self._build_status_bar()
         self._refresh_datasets()
 
-    # ====================================================================
-    # UI 构建
-    # ====================================================================
-
+    # ==================================================================
+    # 整体骨架
+    # ==================================================================
     def _build_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
-        root = QHBoxLayout(central)
+        root = QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # ---- 左右 splitter, 可拖拽调整 ----
+        root.addWidget(self._build_header())
+        root.addWidget(self._build_nav())
+
+        # 主区: 左(操作) + 右(内容)
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # 左栏: 控制面板放进滚动区, 内容再高也不会被截断
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(8, 10, 8, 10)
-        left_layout.setSpacing(8)
+        self.left_stack = QStackedWidget()
+        self.right_stack = QStackedWidget()
+        for i in range(4):
+            left, right = self._build_page(i)
+            self.left_stack.addWidget(left)
+            self.right_stack.addWidget(right)
 
-        left_layout.addWidget(self._build_dataset_group())
-        left_layout.addWidget(self._build_transform_group())
-        left_layout.addWidget(self._build_validate_group())
-        left_layout.addWidget(self._build_genconfig_group())
-        left_layout.addWidget(self._build_task_group())
-        left_layout.addStretch(1)
-
-        scroll = QScrollArea()
-        scroll.setWidget(left)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setMinimumWidth(320)
-
-        # 右栏: 日志 + 结果 + 图表
-        self.tabs = QTabWidget()
-
-        self.log_view = QPlainTextEdit()
-        self.log_view.setReadOnly(True)
-        self.log_view.setMaximumBlockCount(10000)
-        self.log_view.setFont(QFont("Menlo", 11))
-        self.tabs.addTab(self.log_view, "日志")
-
-        self.result_view = QTextBrowser()
-        self.result_view.setOpenExternalLinks(True)
-        self.tabs.addTab(self.result_view, "结果")
-
-        self.chart_view = ChartWidget()
-        self.tabs.addTab(self.chart_view, "图表")
-
-        splitter.addWidget(scroll)
-        splitter.addWidget(self.tabs)
+        splitter.addWidget(self.left_stack)
+        splitter.addWidget(self.right_stack)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([360, 760])
+        splitter.setSizes([300, 880])
+        root.addWidget(splitter, 1)
 
-        root.addWidget(splitter)
+        # 底部实时日志
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(8000)
+        self.log_view.setFont(QFont("Menlo", 11))
+        self.log_view.setStyleSheet(
+            "QPlainTextEdit { background:#1E1E1E; color:#4AF626; border:none; border-radius:0; }")
+        self.log_view.setFixedHeight(150)
+        root.addWidget(self.log_view)
 
-    def _build_status_bar(self) -> None:
-        self._status_label = QLabel("就绪")
-        self.statusBar().addWidget(self._status_label, 1)
+        self._signals.message.connect(self.log_view.appendPlainText)
 
-        self._progress = QProgressBar()
-        self._progress.setRange(0, 0)          # 不确定进度 (滚动条)
-        self._progress.setFixedWidth(160)
-        self._progress.setVisible(False)
-        self.statusBar().addPermanentWidget(self._progress)
+    def _build_header(self) -> QFrame:
+        header = QFrame()
+        header.setObjectName("header")
+        header.setFixedHeight(46)
+        lay = QHBoxLayout(header)
+        lay.setContentsMargins(14, 0, 14, 0)
 
-    def _build_dataset_group(self) -> QGroupBox:
-        group = QGroupBox("数据集")
-        layout = QVBoxLayout(group)
+        dots = QHBoxLayout()
+        dots.setSpacing(8)
+        dots.addWidget(_Dot(RED, on_click=self.close))
+        dots.addWidget(_Dot("#FFCC00"))
+        dots.addWidget(_Dot(GREEN))
+        lay.addLayout(dots)
 
-        self.drop_zone = DropZone()
-        self.drop_zone.dropped.connect(self._on_dataset_dropped)
-        layout.addWidget(self.drop_zone)
+        title = QLabel("Dataset Converter & Validator")
+        title.setStyleSheet("font-weight: 600; font-size: 13px;")
+        lay.addWidget(title)
 
-        row = QHBoxLayout()
+        lay.addStretch(1)
+
+        self.stop_btn = QPushButton("停止")
+        self.stop_btn.setProperty("role", "danger")
+        self.stop_btn.setVisible(False)
+        self.stop_btn.clicked.connect(self._cancel)
+        lay.addWidget(self.stop_btn)
+
+        return header
+
+    def _build_nav(self) -> QFrame:
+        nav = QFrame()
+        nav.setObjectName("nav")
+        lay = QHBoxLayout(nav)
+        lay.setContentsMargins(12, 8, 12, 8)
+        self._nav_group = QButtonGroup(self)
+        self._nav_group.setExclusive(True)
+        for i, name in enumerate(TOOLS):
+            btn = QPushButton(name)
+            btn.setProperty("role", "nav")
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda _=False, idx=i: self._switch_page(idx))
+            self._nav_group.addButton(btn, i)
+            lay.addWidget(btn)
+        self._nav_group.button(0).setChecked(True)
+        lay.addStretch(1)
+        return nav
+
+    def _switch_page(self, idx: int) -> None:
+        self.left_stack.setCurrentIndex(idx)
+        self.right_stack.setCurrentIndex(idx)
+
+    # ==================================================================
+    # 四个页面
+    # ==================================================================
+    def _build_page(self, idx: int):
+        builders = [
+            (self._build_dataset_left, self._build_dataset_right),
+            (self._build_validate_left, self._build_validate_right),
+            (self._build_convert_left, self._build_convert_right),
+            (self._build_train_left, self._build_train_right),
+        ]
+        return builders[idx][0](), builders[idx][1]()
+
+    # ---------------- 数据集 ----------------
+    def _build_dataset_left(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(8)
+
+        title = QLabel("数据集")
+        title.setStyleSheet("font-size: 17px; font-weight: 700;")
+        lay.addWidget(title)
+
+        pick_btn = QPushButton("选择数据集文件夹")
+        pick_btn.setProperty("role", "primary")
+        pick_btn.clicked.connect(self._pick_folder)
+        lay.addWidget(pick_btn)
+
         self.dataset_combo = QComboBox()
-        row.addWidget(self.dataset_combo, 1)
-        refresh_btn = QPushButton("刷新")
-        refresh_btn.clicked.connect(self._refresh_datasets)
-        row.addWidget(refresh_btn)
-        layout.addLayout(row)
+        self.dataset_combo.currentTextChanged.connect(self._on_dataset_selected)
+        lay.addWidget(_row("或从已导入的里选", self.dataset_combo))
 
-        self.dataset_combo.currentTextChanged.connect(self._on_dataset_changed)
-        return group
+        refresh = QPushButton("刷新列表")
+        refresh.setProperty("role", "secondary")
+        refresh.clicked.connect(self._refresh_datasets)
+        lay.addWidget(refresh)
 
-    def _build_transform_group(self) -> QGroupBox:
-        group = QGroupBox("格式转换 (odp-transform)")
-        layout = QVBoxLayout(group)
+        # 数据集信息
+        info = QGroupBox("当前数据集")
+        info_lay = QVBoxLayout(info)
+        self.info_name = QLabel("—")
+        self.info_format = QLabel("—")
+        self.info_counts = QLabel("—")
+        self.info_classes = QLabel("—")
+        for l in (self.info_name, self.info_format, self.info_counts, self.info_classes):
+            l.setWordWrap(True)
+            info_lay.addWidget(l)
+        lay.addWidget(info)
 
-        self.format_combo = QComboBox()
-        self.format_combo.addItems(["pascal_voc", "coco", "yolo"])
-        layout.addWidget(self._labeled("格式", self.format_combo))
+        lay.addStretch(1)
 
-        grid = QGridLayout()
-        self.train_rate = QDoubleSpinBox()
-        self.train_rate.setRange(0.0, 1.0)
-        self.train_rate.setSingleStep(0.05)
-        self.train_rate.setValue(0.8)
-        self.val_rate = QDoubleSpinBox()
-        self.val_rate.setRange(0.0, 1.0)
-        self.val_rate.setSingleStep(0.05)
-        self.val_rate.setValue(0.1)
-        grid.addWidget(QLabel("train"), 0, 0)
-        grid.addWidget(self.train_rate, 0, 1)
-        grid.addWidget(QLabel("val"), 1, 0)
-        grid.addWidget(self.val_rate, 1, 1)
-        layout.addLayout(grid)
+        self.ds_check_btn = QPushButton("开始检查")
+        self.ds_check_btn.setProperty("role", "primary")
+        self.ds_check_btn.clicked.connect(lambda: self._goto_page(1))
+        lay.addWidget(self.ds_check_btn)
 
-        self.transform_btn = QPushButton("开始转换")
-        self.transform_btn.clicked.connect(self._run_transform)
-        layout.addWidget(self.transform_btn)
-        return group
+        self.ds_convert_btn = QPushButton("转换格式")
+        self.ds_convert_btn.setProperty("role", "secondary")
+        self.ds_convert_btn.clicked.connect(lambda: self._goto_page(2))
+        lay.addWidget(self.ds_convert_btn)
+        return w
 
-    def _build_validate_group(self) -> QGroupBox:
-        group = QGroupBox("质量检查 (odp-validate)")
-        layout = QVBoxLayout(group)
-        self.validate_btn = QPushButton("开始检查")
-        self.validate_btn.clicked.connect(self._run_validate)
-        layout.addWidget(self.validate_btn)
-        return group
+    def _build_dataset_right(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(14, 14, 14, 14)
+        lay.setSpacing(10)
 
-    def _build_genconfig_group(self) -> QGroupBox:
-        group = QGroupBox("配置生成 (odp-gen-config)")
-        layout = QVBoxLayout(group)
-        self.genconfig_combo = QComboBox()
-        self.genconfig_combo.addItems(["train", "val", "infer"])
-        layout.addWidget(self._labeled("配置", self.genconfig_combo))
-        self.genconfig_btn = QPushButton("生成配置")
-        self.genconfig_btn.clicked.connect(self._run_genconfig)
-        layout.addWidget(self.genconfig_btn)
-        return group
+        self.ds_title = QLabel("未选择数据集")
+        self.ds_title.setStyleSheet("font-size: 15px; font-weight: 600;")
+        lay.addWidget(self.ds_title)
 
-    def _build_task_group(self) -> QGroupBox:
-        group = QGroupBox("任务执行 (train / val / infer)")
-        layout = QVBoxLayout(group)
+        cards = QHBoxLayout()
+        self.ds_card_images = _card("图片数", "—")
+        self.ds_card_ann = _card("标注数", "—")
+        self.ds_card_cls = _card("类别数", "—")
+        cards.addWidget(self.ds_card_images)
+        cards.addWidget(self.ds_card_ann)
+        cards.addWidget(self.ds_card_cls)
+        lay.addLayout(cards)
 
-        self.task_combo = QComboBox()
-        self.task_combo.addItems(["train", "val", "infer"])
-        self.task_combo.currentIndexChanged.connect(self._on_task_changed)
-        layout.addWidget(self._labeled("任务", self.task_combo))
+        # 样本预览(带框)
+        prev_label = QLabel("样本预览")
+        prev_label.setStyleSheet("font-weight: 600;")
+        lay.addWidget(prev_label)
+        self.preview_grid = QGridLayout()
+        self.preview_grid.setSpacing(6)
+        lay.addLayout(self.preview_grid)
 
-        self.model_edit = QLineEdit("yolo11n.pt")
-        layout.addWidget(self._labeled("模型", self.model_edit))
+        # 目录结构
+        tree_label = QLabel("目录结构")
+        tree_label.setStyleSheet("font-weight: 600;")
+        lay.addWidget(tree_label)
+        self.ds_tree = QTreeWidget()
+        self.ds_tree.setHeaderLabel("结构")
+        lay.addWidget(self.ds_tree, 1)
+        return w
 
-        self.data_edit = QLineEdit()
-        layout.addWidget(self._labeled("数据(yaml)", self.data_edit))
+    def _on_dataset_selected(self, name: str) -> None:
+        if name:
+            self._current_dataset = name
+            self._refresh_dataset_info(name)
 
-        # 动态第三字段: train→epochs, val→split, infer→source
-        self.task_stack = QStackedWidget()
-        self.epochs_spin = QSpinBox()
-        self.epochs_spin.setRange(1, 10000)
-        self.epochs_spin.setValue(100)
-        self.split_combo = QComboBox()
-        self.split_combo.addItems(["val", "test", "train"])
-        self.source_edit = QLineEdit()
-        self.source_edit.setPlaceholderText("图片/视频路径 或 摄像头号(0)")
-        self.task_stack.addWidget(self.epochs_spin)
-        self.task_stack.addWidget(self.split_combo)
-        self.task_stack.addWidget(self.source_edit)
-        layout.addWidget(self.task_stack)
+    def _pick_folder(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "选择数据集文件夹")
+        if not folder:
+            return
+        self._run_inprocess("导入数据集", tasks.import_dataset, folder,
+                            on_done=self._on_import_done)
 
-        self.task_btn = QPushButton("执行任务")
-        self.task_btn.clicked.connect(self._run_task)
-        layout.addWidget(self.task_btn)
-        return group
-
-    @staticmethod
-    def _labeled(text: str, widget: QWidget) -> QWidget:
-        """一个 label + widget 的竖排小容器."""
-        box = QWidget()
-        lay = QVBoxLayout(box)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(QLabel(text))
-        lay.addWidget(widget)
-        return box
-
-    # ====================================================================
-    # 数据集
-    # ====================================================================
+    def _on_import_done(self, result) -> None:
+        self._refresh_datasets()
+        name = result.get("name")
+        if name:
+            idx = self.dataset_combo.findText(name)
+            if idx >= 0:
+                self.dataset_combo.setCurrentIndex(idx)
 
     def _refresh_datasets(self) -> None:
         from odp_platform.common.paths import RAW_DATA_DIR
         raw = Path(RAW_DATA_DIR)
         current = self.dataset_combo.currentText()
+        self.dataset_combo.blockSignals(True)
         self.dataset_combo.clear()
         if raw.is_dir():
-            names = sorted(p.name for p in raw.iterdir() if p.is_dir())
-            self.dataset_combo.addItems(names)
-        if current:
-            idx = self.dataset_combo.findText(current)
-            if idx >= 0:
-                self.dataset_combo.setCurrentIndex(idx)
+            self.dataset_combo.addItems(sorted(p.name for p in raw.iterdir() if p.is_dir()))
+        if current and self.dataset_combo.findText(current) >= 0:
+            self.dataset_combo.setCurrentText(current)
+        self.dataset_combo.blockSignals(False)
+        if self.dataset_combo.currentText():
+            self._refresh_dataset_info(self.dataset_combo.currentText())
 
-    def _on_dataset_changed(self, name: str) -> None:
-        if name:
-            self.data_edit.setText(f"{name}.yaml")
-
-    def _on_dataset_dropped(self, path: str) -> None:
-        self._start_task("导入数据集", tasks.import_dataset, path)
-
-    def _on_task_changed(self, index: int) -> None:
-        self.task_stack.setCurrentIndex(index)
-
-    # ====================================================================
-    # 后台任务调度
-    # ====================================================================
-
-    def _start_task(self, task_name: str, fn, *args) -> None:
-        if self._busy:
+    def _refresh_dataset_info(self, name: str) -> None:
+        info = tasks.detect_dataset_info(name)
+        if not info.get("exists"):
+            self.info_name.setText(name)
+            self.info_format.setText("(目录不存在)")
             return
-        self._set_busy(True, task_name)
-        self.tabs.setCurrentWidget(self.log_view)
-        worker = Worker(fn, *args, log_signals=self._signals)
-        worker.signals.finished.connect(self._on_task_done)
-        worker.signals.error.connect(self._on_task_error)
-        self._pool.start(worker)
+        fmt_disp = {"pascal_voc": "VOC", "coco": "COCO", "yolo": "YOLO"}.get(info["format"], "未知")
+        self.info_name.setText(f"名称：{info['name']}")
+        self.info_format.setText(f"格式：{fmt_disp}")
+        self.info_counts.setText(f"图片 {info['images']} 张 / 标注 {info['annotations']} 个")
+        self.info_classes.setText("类别：" + (", ".join(info["classes"]) if info["classes"] else "(YOLO 需手动填类别)"))
+        self.ds_title.setText(f"数据集：{name}（{fmt_disp}）")
+        self.ds_card_images.findChild(QLabel).setText(str(info["images"]))
+        self.ds_card_ann.findChild(QLabel).setText(str(info["annotations"]))
+        self.ds_card_cls.findChild(QLabel).setText(str(len(info["classes"])) if info["classes"] else "?")
+        self._refresh_preview(name)
+        self._refresh_tree(name)
+
+    def _refresh_preview(self, name: str) -> None:
+        # 清空旧预览
+        while self.preview_grid.count():
+            item = self.preview_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        from odp_platform.common.paths import RAW_DATA_DIR
+        ann_dir = Path(RAW_DATA_DIR) / name / "annotations"
+        for i, img_path in enumerate(tasks.sample_image_paths(name, limit=4)):
+            try:
+                label_path = ann_dir / (Path(img_path).stem + ".txt")
+                img = tasks.draw_boxes_pil(img_path, str(label_path))
+                pm = _pil_to_pixmap(img)
+            except Exception:
+                continue
+            lb = QLabel()
+            lb.setPixmap(pm)
+            lb.setToolTip(Path(img_path).name)
+            lb.setStyleSheet("border:1px solid #E5E5EA; border-radius:6px;")
+            self.preview_grid.addWidget(lb, 0, i)
+
+    def _refresh_tree(self, name: str) -> None:
+        from odp_platform.common.paths import RAW_DATA_DIR
+        self.ds_tree.clear()
+        root = Path(RAW_DATA_DIR) / name
+        top = QTreeWidgetItem([name])
+        self.ds_tree.addTopLevelItem(top)
+        for sub in ("images", "annotations"):
+            d = root / sub
+            if not d.is_dir():
+                continue
+            files = sorted(p.name for p in d.iterdir() if p.is_file())
+            sub_item = QTreeWidgetItem([f"{sub}（{len(files)}）"])
+            top.addChild(sub_item)
+            for f in files[:8]:
+                sub_item.addChild(QTreeWidgetItem([f]))
+        top.setExpanded(True)
+
+    # ---------------- 质量检查 ----------------
+    def _build_validate_left(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(8)
+
+        title = QLabel("质量检查")
+        title.setStyleSheet("font-size: 17px; font-weight: 700;")
+        lay.addWidget(title)
+
+        lay.addWidget(QLabel("检查数据集："))
+        self.val_dataset_label = QLabel("(未选择)")
+        self.val_dataset_label.setStyleSheet("font-weight: 600;")
+        lay.addWidget(self.val_dataset_label)
+
+        check_group = QGroupBox("检查项")
+        cg = QVBoxLayout(check_group)
+        self.check_labels = {}
+        for key, disp in [
+            ("pair_existence", "图片-标注完整性检查"),
+            ("label_format", "标注格式 / 非法类别检查"),
+            ("split_uniqueness", "数据泄露检查"),
+            ("yaml_schema", "yaml 字段一致性检查"),
+        ]:
+            cb = QCheckBox(disp)
+            cb.setChecked(True)
+            cb.setEnabled(False)
+            cg.addWidget(cb)
+            self.check_labels[key] = cb
+        lay.addWidget(check_group)
+
+        lay.addStretch(1)
+
+        self.val_run_btn = QPushButton("执行检查")
+        self.val_run_btn.setProperty("role", "primary")
+        self.val_run_btn.clicked.connect(self._run_validate)
+        lay.addWidget(self.val_run_btn)
+        return w
+
+    def _build_validate_right(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(14, 14, 14, 14)
+        lay.setSpacing(10)
+
+        self.val_progress = QProgressBar()
+        self.val_progress.setRange(0, 0)
+        self.val_progress.setVisible(False)
+        self.val_progress_label = QLabel("")
+        self.val_progress_label.setStyleSheet("color:#8E8E93;")
+        lay.addWidget(self.val_progress_label)
+        lay.addWidget(self.val_progress)
+
+        cards = QHBoxLayout()
+        self.val_card_pass = _card("通过", "—", value_color=GREEN)
+        self.val_card_warn = _card("警告", "—", value_color=ORANGE)
+        self.val_card_err = _card("错误", "—", value_color=RED)
+        cards.addWidget(self.val_card_pass)
+        cards.addWidget(self.val_card_warn)
+        cards.addWidget(self.val_card_err)
+        lay.addLayout(cards)
+
+        lay.addWidget(QLabel("问题详情"))
+        self.issue_table = QTableWidget(0, 5)
+        self.issue_table.setHorizontalHeaderLabels(["序号", "文件", "问题类型", "描述", "严重程度"])
+        self.issue_table.horizontalHeader().setStretchLastSection(True)
+        self.issue_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        lay.addWidget(self.issue_table, 1)
+
+        self.export_btn = QPushButton("导出报告")
+        self.export_btn.setProperty("role", "secondary")
+        self.export_btn.clicked.connect(self._export_report)
+        self.export_btn.setEnabled(False)
+        lay.addWidget(self.export_btn)
+        return w
+
+    def _run_validate(self) -> None:
+        name = self._current_dataset or self.dataset_combo.currentText()
+        if not name:
+            self._log_plain("请先选择数据集")
+            return
+        self.val_dataset_label.setText(name)
+        self.val_progress.setVisible(True)
+        self.val_progress_label.setText("正在检查...")
+        self._run_inprocess("质量检查", tasks.validate_dataset_checked, name,
+                            on_done=self._on_validate_done)
+
+    def _on_validate_done(self, result) -> None:
+        self.val_progress.setVisible(False)
+        self.val_progress_label.setText("检查完成")
+        counts = {"PASS": 0, "INFO": 0, "WARNING": 0, "ERROR": 0}
+        for r in result.get("results", []):
+            counts[r["severity"]] = counts.get(r["severity"], 0) + 1
+        self.val_card_pass.findChild(QLabel).setText(str(counts.get("PASS", 0) + counts.get("INFO", 0)))
+        self.val_card_warn.findChild(QLabel).setText(str(counts.get("WARNING", 0)))
+        self.val_card_err.findChild(QLabel).setText(str(counts.get("ERROR", 0)))
+        # 更新左侧检查项状态色
+        for r in result.get("results", []):
+            cb = self.check_labels.get(r["name"])
+            if cb:
+                color = {"PASS": GREEN, "INFO": GREEN, "WARNING": ORANGE, "ERROR": RED}.get(r["severity"], GRAY)
+                cb.setStyleSheet(f"color: {color};")
+        self._fill_issues(result)
+        self.export_btn.setEnabled(True)
+        self._last_report_path = result.get("report_path")
+
+    def _fill_issues(self, result) -> None:
+        self.issue_table.setRowCount(0)
+        idx = 0
+        for r in result.get("results", []):
+            if r["severity"] in ("PASS", "INFO"):
+                continue
+            det = r.get("details", {}) if isinstance(r, dict) else {}
+            fname = _first_file(det)
+            self.issue_table.insertRow(idx)
+            self.issue_table.setItem(idx, 0, QTableWidgetItem(str(idx + 1)))
+            self.issue_table.setItem(idx, 1, QTableWidgetItem(fname))
+            self.issue_table.setItem(idx, 2, QTableWidgetItem(r["name"]))
+            self.issue_table.setItem(idx, 3, QTableWidgetItem(r["summary"]))
+            sev = QTableWidgetItem(r["severity"])
+            sev.setForeground(Qt.GlobalColor.red if r["severity"] == "ERROR" else Qt.GlobalColor.darkYellow)
+            self.issue_table.setItem(idx, 4, sev)
+            idx += 1
+
+    def _export_report(self) -> None:
+        p = getattr(self, "_last_report_path", None)
+        if not p:
+            return
+        self._open_path(Path(p).parent)
+
+    # ---------------- 格式转换 ----------------
+    def _build_convert_left(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(8)
+
+        title = QLabel("格式转换")
+        title.setStyleSheet("font-size: 17px; font-weight: 700;")
+        lay.addWidget(title)
+
+        self.conv_src = QComboBox()
+        self.conv_src.addItems(["pascal_voc", "coco", "yolo"])
+        lay.addWidget(_row("源格式", self.conv_src))
+
+        self.conv_dst = QComboBox()
+        self.conv_dst.addItems(["YOLO"])
+        self.conv_dst.setEnabled(False)
+        lay.addWidget(_row("目标格式", self.conv_dst))
+
+        self.conv_classes = QLineEdit()
+        self.conv_classes.setPlaceholderText("YOLO 格式需填类别, 逗号分隔")
+        lay.addWidget(_row("类别(仅 YOLO)", self.conv_classes))
+
+        opts = QGroupBox("转换选项")
+        og = QVBoxLayout(opts)
+        self.opt_keep = QCheckBox("保留原始图片（推荐）")
+        self.opt_keep.setChecked(True)
+        self.opt_split = QCheckBox("生成训练/验证/测试划分")
+        self.opt_split.setChecked(True)
+        og.addWidget(self.opt_keep)
+        og.addWidget(self.opt_split)
+        lay.addWidget(opts)
+
+        lay.addStretch(1)
+        self.conv_run_btn = QPushButton("开始转换")
+        self.conv_run_btn.setProperty("role", "primary")
+        self.conv_run_btn.clicked.connect(self._run_convert)
+        lay.addWidget(self.conv_run_btn)
+        return w
+
+    def _build_convert_right(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(14, 14, 14, 14)
+        lay.setSpacing(10)
+
+        self.conv_summary = QLabel("转换配置摘要\n—")
+        self.conv_summary.setStyleSheet("background:#fff; border:1px solid #E5E5EA; border-radius:8px; padding:12px;")
+        lay.addWidget(self.conv_summary)
+
+        self.conv_result = QLabel("")
+        self.conv_result.setWordWrap(True)
+        lay.addWidget(self.conv_result)
+        return w
+
+    def _run_convert(self) -> None:
+        name = self._current_dataset or self.dataset_combo.currentText()
+        if not name:
+            self._log_plain("请先选择数据集")
+            return
+        fmt = self.conv_src.currentText()
+        info = tasks.detect_dataset_info(name)
+        classes = None
+        if fmt == "yolo":
+            raw = self.conv_classes.text().strip()
+            if raw:
+                classes = [c.strip() for c in raw.split(",") if c.strip()]
+            if not classes:
+                self._log_plain("YOLO 格式需要填类别名")
+                return
+        self.conv_summary.setText(
+            f"源格式 → 目标格式：{fmt} → YOLO\n"
+            f"图片：{info.get('images', '?')} 张 / 标注：{info.get('annotations', '?')} 个\n"
+            f"数据集：{name}"
+        )
+        self.conv_result.setText("转换中...")
+        self._run_inprocess("格式转换", tasks.transform_dataset, name, fmt, 0.8, 0.1,
+                            on_done=self._on_convert_done)
+
+    def _on_convert_done(self, result) -> None:
+        if result.get("kind") == "transform":
+            counts = result.get("counts", {})
+            self.conv_result.setText(
+                f"<span style='color:#34C759'>✓ 转换成功</span><br>"
+                f"train {counts.get('train')} / val {counts.get('val')} / test {counts.get('test')}<br>"
+                f"输出：{html.escape(str(result.get('yaml')))}"
+            )
+
+    # ---------------- 训练实验 ----------------
+    def _build_train_left(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(8)
+
+        title = QLabel("训练实验")
+        title.setStyleSheet("font-size: 17px; font-weight: 700;")
+        lay.addWidget(title)
+
+        self.exp_list = QListWidget()
+        self.exp_list.currentRowChanged.connect(self._on_exp_selected)
+        lay.addWidget(self.exp_list, 1)
+
+        refresh = QPushButton("刷新实验列表")
+        refresh.setProperty("role", "secondary")
+        refresh.clicked.connect(self._refresh_experiments)
+        lay.addWidget(refresh)
+
+        self.del_exp_btn = QPushButton("删除实验")
+        self.del_exp_btn.setProperty("role", "danger")
+        lay.addWidget(self.del_exp_btn)
+        return w
+
+    def _build_train_right(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(14, 14, 14, 14)
+        lay.setSpacing(10)
+
+        self.exp_title = QLabel("选择左侧实验查看详情")
+        self.exp_title.setStyleSheet("font-size: 15px; font-weight: 600;")
+        lay.addWidget(self.exp_title)
+
+        cards = QHBoxLayout()
+        self.exp_card_map = _card("mAP50-95", "—", value_color=BLUE)
+        self.exp_card_map50 = _card("mAP50", "—", value_color=BLUE)
+        self.exp_card_prec = _card("Precision", "—")
+        self.exp_card_recall = _card("Recall", "—")
+        for c in (self.exp_card_map, self.exp_card_map50, self.exp_card_prec, self.exp_card_recall):
+            cards.addWidget(c)
+        lay.addLayout(cards)
+
+        self.exp_curve = ChartWidget()
+        lay.addWidget(self.exp_curve, 1)
+
+        self.exp_confusion = QLabel("")
+        self.exp_confusion.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self.exp_confusion)
+
+        btns = QHBoxLayout()
+        self.export_model_btn = QPushButton("导出模型")
+        self.export_model_btn.setProperty("role", "secondary")
+        self.export_model_btn.clicked.connect(self._export_model)
+        btns.addWidget(self.export_model_btn)
+        self.view_log_btn = QPushButton("查看完整日志")
+        self.view_log_btn.setProperty("role", "secondary")
+        self.view_log_btn.clicked.connect(self._view_log)
+        btns.addWidget(self.view_log_btn)
+        btns.addStretch(1)
+        lay.addLayout(btns)
+        return w
+
+    def _refresh_experiments(self) -> None:
+        self.exp_list.clear()
+        self._experiments = tasks.list_experiments()
+        for e in self._experiments:
+            m = e.get("mAP50")
+            m_str = f"{m:.3f}" if m is not None else "—"
+            item = QListWidgetItem(f"{e['name']}  ·  {e['model']}  ·  mAP50 {m_str}")
+            item.setToolTip(f"{e['group']} · {e['time']}")
+            self.exp_list.addItem(item)
+
+    def _on_exp_selected(self, row: int) -> None:
+        if row < 0 or not getattr(self, "_experiments", None):
+            return
+        e = self._experiments[row]
+        self.exp_title.setText(f"{e['name']}（{e['group']} · {e['model']}）")
+        for card, key in ((self.exp_card_map, "mAP50_95"), (self.exp_card_map50, "mAP50"),
+                          (self.exp_card_prec, "precision"), (self.exp_card_recall, "recall")):
+            v = e.get(key)
+            card.findChild(QLabel).setText(f"{v:.3f}" if v is not None else "—")
+        # 曲线
+        self.exp_curve.set_figure(training_curve_figure(e.get("results_csv", "")))
+        # 混淆矩阵
+        cm = Path(e.get("confusion_png", ""))
+        if cm.exists():
+            self.exp_confusion.setPixmap(QPixmap(str(cm)).scaled(480, 360, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        else:
+            self.exp_confusion.setText("(无混淆矩阵)")
+        self._current_exp = e
+
+    def _export_model(self) -> None:
+        e = getattr(self, "_current_exp", None)
+        if e:
+            self._open_path(Path(e["output_dir"]))
+
+    def _view_log(self) -> None:
+        e = getattr(self, "_current_exp", None)
+        if e and e.get("log_path"):
+            self._open_path(Path(e["log_path"]))
+
+    # ==================================================================
+    # 任务执行 / 取消
+    # ==================================================================
+    def _log_plain(self, msg: str) -> None:
+        self._signals.message.emit(msg)
 
     def _set_busy(self, busy: bool, task_name: str = "") -> None:
         self._busy = busy
-        for btn in (
-            self.transform_btn, self.validate_btn,
-            self.genconfig_btn, self.task_btn,
-        ):
-            btn.setEnabled(not busy)
-        if busy:
-            self._status_label.setText(f"运行中: {task_name} ...")
-            self._progress.setVisible(True)
-        else:
-            self._progress.setVisible(False)
+        self.stop_btn.setVisible(busy)
+        self.stop_btn.setText(f"停止{' · ' + task_name if busy else ''}")
 
-    def _on_task_done(self, result) -> None:
-        self._set_busy(False)
-        self._status_label.setText("完成")
-        self._render_result(result)
-        self.chart_view.set_result(result)
-        if result.get("kind") == "import":
-            self._refresh_datasets()
-            idx = self.dataset_combo.findText(result.get("name"))
-            if idx >= 0:
-                self.dataset_combo.setCurrentIndex(idx)
-        self.tabs.setCurrentWidget(self.result_view)
-
-    def _on_task_error(self, message: str) -> None:
-        self._set_busy(False)
-        self._status_label.setText("出错")
-        self._render_result({"kind": "error", "message": message})
-        self.tabs.setCurrentWidget(self.result_view)
-
-    # ====================================================================
-    # 各按钮 → 任务
-    # ====================================================================
-
-    def _run_transform(self) -> None:
-        name = self.dataset_combo.currentText()
-        if not name:
-            self._render_result({"kind": "error", "message": "请先选择数据集(或把数据集放进 data/raw/ 后刷新)"})
+    def _run_inprocess(self, task_name: str, fn, *args, on_done=None) -> None:
+        if self._busy:
             return
-        self._start_task(
-            "格式转换", tasks.transform_dataset, name,
-            self.format_combo.currentText(),
-            self.train_rate.value(), self.val_rate.value(),
-        )
+        self._set_busy(True, task_name)
+        worker = Worker(fn, *args, log_signals=self._signals)
+        self._cancel_fn = None  # 快任务不支持取消
+        worker.signals.finished.connect(lambda r: self._on_inprocess_done(r, on_done))
+        worker.signals.error.connect(lambda e: self._on_inprocess_error(e))
+        self._pool.start(worker)
 
-    def _run_validate(self) -> None:
-        name = self.dataset_combo.currentText()
-        if not name:
-            self._render_result({"kind": "error", "message": "请先选择数据集"})
+    def _on_inprocess_done(self, result, on_done) -> None:
+        self._set_busy(False)
+        if on_done:
+            on_done(result)
+
+    def _on_inprocess_error(self, msg: str) -> None:
+        self._set_busy(False)
+        self._log_plain(f"[错误] {msg}")
+
+    def _run_subprocess(self, task_name: str, args: list[str]) -> None:
+        if self._busy:
             return
-        self._start_task("质量检查", tasks.validate_dataset_checked, name)
+        self._set_busy(True, task_name)
+        self._worker = SubprocessWorker(args, log_signals=self._signals)
+        self._cancel_fn = self._worker.cancel
+        self._worker.signals.finished.connect(self._on_subprocess_done)
+        self._worker.signals.error.connect(lambda e: self._log_plain(f"[错误] {e}"))
+        self._pool.start(self._worker)
 
-    def _run_genconfig(self) -> None:
-        self._start_task("配置生成", tasks.generate_config, self.genconfig_combo.currentText())
-
-    def _run_task(self) -> None:
-        model = self.model_edit.text().strip()
-        data = self.data_edit.text().strip()
-        kind = self.task_combo.currentText()
-        if kind == "train":
-            self._start_task("训练", tasks.run_train, model, data, self.epochs_spin.value())
-        elif kind == "val":
-            self._start_task("评估", tasks.run_val, model, data, self.split_combo.currentText())
+    def _on_subprocess_done(self, code: int) -> None:
+        self._set_busy(False)
+        self._cancel_fn = None
+        if code == 0:
+            self._log_plain("✓ 完成")
         else:
-            source = self.source_edit.text().strip()
-            self._start_task("推理", tasks.run_infer, model, source)
+            self._log_plain(f"✗ 进程退出码 {code}")
+        self._refresh_experiments()
 
-    # ====================================================================
-    # 日志 / 结果渲染
-    # ====================================================================
+    def _cancel(self) -> None:
+        if self._cancel_fn:
+            self._log_plain("正在停止...")
+            self._cancel_fn()
+            self._cancel_fn = None
 
-    def _append_log(self, message: str) -> None:
-        self.log_view.appendPlainText(message)
+    # ==================================================================
+    # 工具方法
+    # ==================================================================
+    def _goto_page(self, idx: int) -> None:
+        self._nav_group.button(idx).setChecked(True)
+        self._switch_page(idx)
 
-    def _render_result(self, result: dict) -> None:
-        self.result_view.setHtml(_result_to_html(result))
-
-
-# ====================================================================
-# 结果 → HTML
-# ====================================================================
-
-_RESULT_STYLE = """
-<style>
-  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
-         color: #1f2937; margin: 12px 16px; }
-  h3 { color: #111827; border-bottom: 2px solid #e5e7eb; padding-bottom: 8px; margin: 4px 0 10px; }
-  h4 { color: #4b5563; margin: 16px 0 6px; }
-  table { border-collapse: collapse; width: 100%; margin: 4px 0 14px; }
-  th, td { padding: 7px 10px; text-align: left; border-bottom: 1px solid #eef0f3; }
-  th { background: #f8fafc; color: #64748b; font-weight: 600; }
-  td.k { color: #64748b; width: 150px; }
-  .badge { display: inline-block; padding: 1px 10px; border-radius: 10px;
-           color: #fff; font-size: 12px; font-weight: 600; }
-  .badge-PASS, .badge-INFO { background: #22a06b; }
-  .badge-WARNING { background: #d97706; }
-  .badge-ERROR { background: #dc2626; }
-  .err { color: #dc2626; }
-  .ok  { color: #16a34a; font-weight: 600; }
-  .muted { color: #64748b; }
-</style>
-"""
+    def _open_path(self, path: Path) -> None:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
 
-def _esc(value) -> str:
-    return html.escape(str(value))
-
-
-def _kv(rows) -> str:
-    """键值表, 值会被转义."""
-    return "".join(
-        f"<tr><td class='k'>{_esc(k)}</td><td>{_esc(v)}</td></tr>"
-        for k, v in rows
-    )
-
-
-def _kv_raw(rows) -> str:
-    """键值表, 值当作已安全的 HTML 原样输出 (用于徽章/状态)."""
-    return "".join(
-        f"<tr><td class='k'>{_esc(k)}</td><td>{v}</td></tr>"
-        for k, v in rows
-    )
-
-
-def _page(title: str, body: str) -> str:
-    return f"<html><head>{_RESULT_STYLE}</head><body><h3>{_esc(title)}</h3>{body}</body></html>"
-
-
-def _badge(sev: str) -> str:
-    return f"<span class='badge badge-{_esc(sev)}'>{_esc(sev)}</span>"
-
-
-def _result_to_html(result: dict) -> str:
-    kind = result.get("kind")
-
-    if kind == "error":
-        return _page("出错", f"<p class='err'>{_esc(result.get('message'))}</p>")
-
-    if kind == "import":
-        if result.get("already_here"):
-            msg = "已在 data/raw/ 下, 无需重复导入"
-        else:
-            msg = f"图片 {result.get('images')} 张, 标注 {result.get('annotations')} 个"
-        body = _kv([("数据集", result.get("name")), ("结果", msg),
-                    ("路径", result.get("path"))])
-        return _page("数据集导入完成",
-                     f"<table>{body}</table>"
-                     "<p class='muted'>现在可以在左边选中它, 点「开始转换」。</p>")
-
-    if kind == "transform":
-        counts = result.get("counts", {})
-        body = _kv([("train", counts.get("train")), ("val", counts.get("val")),
-                    ("test", counts.get("test")), ("yaml", result.get("yaml"))])
-        return _page("格式转换完成", f"<table>{body}</table>")
-
-    if kind == "validate":
-        sev = result.get("overall_severity", "?")
-        ds = result.get("dataset_summary", {})
-        body = _kv_raw([("总体", _badge(sev))]) + _kv([
-            ("类别数", ds.get("nc")),
-            ("类别", ", ".join(ds.get("classes", []))),
-            ("图像总数", ds.get("total_images")),
-            ("报告", result.get("report_path") or "(未写盘)"),
-        ])
-        split_rows = "".join(
-            f"<tr><td>{_esc(s)}</td><td>{_esc(st['image_count'])}</td>"
-            f"<td>{_esc(st['annotated_count'])}</td><td>{_esc(st['total_instances'])}</td></tr>"
-            for s, st in result.get("stats_per_split", {}).items()
-        )
-        check_rows = "".join(
-            f"<tr><td>{_badge(r['severity'])}</td><td>{_esc(r['name'])}</td>"
-            f"<td>{_esc(r['summary'])}</td></tr>"
-            for r in result.get("results", [])
-        )
-        body += (
-            "<h4>各 split 数据量</h4>"
-            "<table><tr><th>split</th><th>图像</th><th>有标注</th><th>实例</th></tr>"
-            f"{split_rows}</table>"
-            "<h4>检查项</h4>"
-            "<table><tr><th>级别</th><th>检查项</th><th>结论</th></tr>"
-            f"{check_rows}</table>"
-        )
-        return _page("质量检查结果", body)
-
-    if kind == "gen_config":
-        ok = "已生成" if result.get("generated") else "已存在(未覆盖)"
-        body = _kv([("状态", ok), ("路径", result.get("path"))])
-        return _page("配置生成",
-                     f"<table>{body}</table>"
-                     "<p class='muted'>编辑该 yaml 后即可在任务执行里使用。</p>")
-
-    if kind in ("train", "val", "infer"):
-        if result.get("success"):
-            rows = _kv_raw([("状态", "<span class='ok'>成功</span>"),
-                            ("输出目录", _esc(result.get("output_dir")))])
-            rows += _kv([(k, v) for k, v in (result.get("metrics") or {}).items()])
-            if kind == "train":
-                rows += _kv([("耗时(秒)", result.get("train_time"))])
-            elif kind == "val":
-                rows += _kv([("耗时(秒)", result.get("val_time"))])
-            else:
-                rows += _kv([("耗时(秒)", result.get("infer_time")),
-                             ("已保存", result.get("saved"))])
-            return _page(f"{kind} 完成", f"<table>{rows}</table>")
-        return _page(f"{kind} 失败", f"<p class='err'>{_esc(result.get('error'))}</p>")
-
-    return f"<pre>{_esc(result)}</pre>"
+def _first_file(details: dict) -> str:
+    """从 check details 里扒第一个文件名."""
+    if not details:
+        return "-"
+    for key in ("missing_examples", "errors_preview"):
+        v = details.get(key)
+        if isinstance(v, dict) and v:
+            for lst in v.values():
+                if isinstance(lst, list) and lst:
+                    first = lst[0]
+                    if isinstance(first, dict):
+                        return str(first.get("label") or first.get("file") or "-")
+                    return str(first)
+        elif isinstance(v, list) and v:
+            first = v[0]
+            if isinstance(first, dict):
+                return str(first.get("label") or first.get("file") or "-")
+            return str(first)
+    return "-"
 
 
 def main() -> int:
-    """桌面端入口."""
     import sys
 
     from PySide6.QtWidgets import QApplication
 
     app = QApplication(sys.argv)
-    app.setApplicationName("ODPlatform")
+    app.setApplicationName("Dataset Converter & Validator")
     app.setStyleSheet(APP_STYLE)
     win = MainWindow()
     win.show()
