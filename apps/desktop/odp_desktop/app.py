@@ -15,10 +15,10 @@ from pathlib import Path
 from PySide6.QtCore import QThreadPool, Qt, Signal
 from PySide6.QtGui import QFont, QImage, QPixmap
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout,
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMainWindow, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
-    QSpinBox, QSplitter, QStackedWidget, QTabWidget, QTableWidget,
+    QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame,
+    QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QListWidgetItem, QMainWindow, QPlainTextEdit, QProgressBar, QPushButton,
+    QScrollArea, QSpinBox, QSplitter, QStackedWidget, QTabWidget, QTableWidget,
     QTableWidgetItem, QTextBrowser, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
     QWidget,
 )
@@ -36,8 +36,8 @@ RED = "#FF3B30"
 GRAY = "#8E8E93"
 BG = "#F5F5F7"
 
-# ---- 四个工具 ----
-TOOLS = ["数据集", "质量检查", "格式转换", "训练实验"]
+# ---- 五个工具 ----
+TOOLS = ["数据集", "质量检查", "格式转换", "训练", "检测"]
 
 
 # ====================================================================
@@ -162,7 +162,7 @@ class MainWindow(QMainWindow):
 
         self.left_stack = QStackedWidget()
         self.right_stack = QStackedWidget()
-        for i in range(4):
+        for i in range(len(TOOLS)):
             left, right = self._build_page(i)
             self.left_stack.addWidget(left)
             self.right_stack.addWidget(right)
@@ -244,6 +244,7 @@ class MainWindow(QMainWindow):
             (self._build_validate_left, self._build_validate_right),
             (self._build_convert_left, self._build_convert_right),
             (self._build_train_left, self._build_train_right),
+            (self._build_detect_left, self._build_detect_right),
         ]
         return builders[idx][0](), builders[idx][1]()
 
@@ -652,6 +653,61 @@ class MainWindow(QMainWindow):
                 f"输出：{html.escape(str(result.get('yaml')))}"
             )
 
+    # ---------------- 训练 / 评估 / 检测 执行 ----------------
+
+    def _run_train(self) -> None:
+        model = self.train_model_edit.text().strip() or "yolo11n.pt"
+        data = self.train_data_edit.text().strip() or "det_demo.yaml"
+        tasks.ensure_config("train")
+        self._run_subprocess("训练", tasks.train_args(
+            model, data, self.train_epochs.value(),
+            self.train_imgsz.value(), self.train_device.currentText(),
+        ))
+
+    def _run_val(self) -> None:
+        model = self.train_model_edit.text().strip() or "yolo11n.pt"
+        data = self.train_data_edit.text().strip() or "det_demo.yaml"
+        tasks.ensure_config("val")
+        self._run_subprocess("评估", tasks.val_args(
+            model, data, "val", self.train_imgsz.value(),
+            self.train_device.currentText(),
+        ))
+
+    def _gen_config(self) -> None:
+        for kind in ("train", "val", "infer"):
+            tasks.ensure_config(kind)
+        self._log_plain("配置文件已就绪: configs/runtime/{train,val,infer}.yaml")
+
+    def _run_detect(self) -> None:
+        model = self.detect_model_edit.text().strip() or "yolo11n.pt"
+        source = self.detect_source_edit.text().strip()
+        if not source:
+            self._log_plain("请先选择检测源(图片/文件夹)")
+            return
+        self.detect_result_label.setText("检测中...")
+        self._run_inprocess("检测", tasks.detect_images, model, source,
+                            self.detect_conf.value(), on_done=self._on_detect_done)
+
+    def _on_detect_done(self, result) -> None:
+        if result.get("success"):
+            self.detect_result_label.setText(
+                f"✓ 检测完成：{result['images']} 张图，共 {result['detections']} 个目标\n"
+                f"结果保存在：{result['save_dir']}"
+            )
+        else:
+            self.detect_result_label.setText(f"✗ 检测失败：{result.get('error')}")
+
+    def _pick_detect_image(self) -> None:
+        f, _ = QFileDialog.getOpenFileName(
+            self, "选择图片", "", "图片 (*.jpg *.jpeg *.png *.bmp)")
+        if f:
+            self.detect_source_edit.setText(f)
+
+    def _pick_detect_dir(self) -> None:
+        d = QFileDialog.getExistingDirectory(self, "选择文件夹")
+        if d:
+            self.detect_source_edit.setText(d)
+
     # ---------------- 训练实验 ----------------
     def _build_train_left(self) -> QWidget:
         w = QWidget()
@@ -659,10 +715,50 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(12, 12, 12, 12)
         lay.setSpacing(8)
 
-        title = QLabel("训练实验")
+        title = QLabel("训练")
         title.setStyleSheet("font-size: 17px; font-weight: 700;")
         lay.addWidget(title)
 
+        run_group = QGroupBox("启动训练 / 评估")
+        rg = QVBoxLayout(run_group)
+        self.train_model_edit = QLineEdit("yolo11n.pt")
+        self.train_data_edit = QLineEdit("det_demo.yaml")
+        rg.addWidget(_row("模型", self.train_model_edit))
+        rg.addWidget(_row("数据(yaml)", self.train_data_edit))
+        grid = QGridLayout()
+        self.train_epochs = QSpinBox()
+        self.train_epochs.setRange(1, 10000)
+        self.train_epochs.setValue(50)
+        self.train_imgsz = QSpinBox()
+        self.train_imgsz.setRange(32, 2000)
+        self.train_imgsz.setValue(320)
+        self.train_device = QComboBox()
+        self.train_device.addItems(["mps", "cpu"])
+        grid.addWidget(QLabel("epochs"), 0, 0)
+        grid.addWidget(self.train_epochs, 0, 1)
+        grid.addWidget(QLabel("imgsz"), 0, 2)
+        grid.addWidget(self.train_imgsz, 0, 3)
+        rg.addLayout(grid)
+        rg.addWidget(_row("设备", self.train_device))
+        btns = QHBoxLayout()
+        self.train_btn = QPushButton("开始训练")
+        self.train_btn.setProperty("role", "primary")
+        self.train_btn.clicked.connect(self._run_train)
+        self.val_btn = QPushButton("开始评估")
+        self.val_btn.setProperty("role", "secondary")
+        self.val_btn.clicked.connect(self._run_val)
+        btns.addWidget(self.train_btn)
+        btns.addWidget(self.val_btn)
+        rg.addLayout(btns)
+        self.gencfg_btn = QPushButton("生成配置文件")
+        self.gencfg_btn.setProperty("role", "secondary")
+        self.gencfg_btn.clicked.connect(self._gen_config)
+        rg.addWidget(self.gencfg_btn)
+        lay.addWidget(run_group)
+
+        lab = QLabel("实验列表")
+        lab.setStyleSheet("font-weight: 600;")
+        lay.addWidget(lab)
         self.exp_list = QListWidget()
         self.exp_list.currentRowChanged.connect(self._on_exp_selected)
         lay.addWidget(self.exp_list, 1)
@@ -676,6 +772,64 @@ class MainWindow(QMainWindow):
         self.del_exp_btn.setProperty("role", "danger")
         self.del_exp_btn.clicked.connect(self._delete_experiment)
         lay.addWidget(self.del_exp_btn)
+
+        scroll = QScrollArea()
+        scroll.setWidget(w)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        return scroll
+
+    def _build_detect_left(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(8)
+
+        title = QLabel("检测")
+        title.setStyleSheet("font-size: 17px; font-weight: 700;")
+        lay.addWidget(title)
+
+        self.detect_model_edit = QLineEdit("yolo11n.pt")
+        lay.addWidget(_row("模型", self.detect_model_edit))
+
+        self.detect_source_edit = QLineEdit()
+        self.detect_source_edit.setPlaceholderText("图片/视频/文件夹路径")
+        lay.addWidget(_row("检测源", self.detect_source_edit))
+
+        src_btns = QHBoxLayout()
+        pick_img = QPushButton("选图片")
+        pick_img.setProperty("role", "secondary")
+        pick_img.clicked.connect(self._pick_detect_image)
+        pick_dir = QPushButton("选文件夹")
+        pick_dir.setProperty("role", "secondary")
+        pick_dir.clicked.connect(self._pick_detect_dir)
+        src_btns.addWidget(pick_img)
+        src_btns.addWidget(pick_dir)
+        lay.addLayout(src_btns)
+
+        self.detect_conf = QDoubleSpinBox()
+        self.detect_conf.setRange(0.0, 1.0)
+        self.detect_conf.setSingleStep(0.05)
+        self.detect_conf.setValue(0.25)
+        lay.addWidget(_row("置信度阈值", self.detect_conf))
+
+        lay.addStretch(1)
+        self.detect_btn = QPushButton("开始检测")
+        self.detect_btn.setProperty("role", "primary")
+        self.detect_btn.clicked.connect(self._run_detect)
+        lay.addWidget(self.detect_btn)
+        return w
+
+    def _build_detect_right(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(14, 14, 14, 14)
+        self.detect_result_label = QLabel("检测结果将显示在这里")
+        self.detect_result_label.setWordWrap(True)
+        self.detect_result_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self.detect_result_label.setStyleSheet("font-size: 14px;")
+        lay.addWidget(self.detect_result_label)
+        lay.addStretch(1)
         return w
 
     def _build_train_right(self) -> QWidget:

@@ -407,3 +407,40 @@ def list_experiments() -> list[dict[str, Any]]:
             "confusion_png": str(audit.parent / "confusion_matrix.png"),
         })
     return exps
+
+
+def ensure_config(kind: str) -> str:
+    """确保 configs/runtime/<kind>.yaml 存在, 不存在则生成. 返回 yaml 绝对路径."""
+    from pathlib import Path
+
+    from odp_platform.common.paths import RUNTIME_CONFIGS_DIR
+    from odp_platform.runtime_config import (
+        ConfigGenerator, YOLOTrainConfig, YOLOValConfig, YOLOInferConfig,
+    )
+    mapping = {"train": YOLOTrainConfig, "val": YOLOValConfig, "infer": YOLOInferConfig}
+    out = RUNTIME_CONFIGS_DIR / f"{kind}.yaml"
+    if not out.exists():
+        ConfigGenerator().generate(mapping[kind], out)
+    return str(Path(out))
+
+
+def detect_images(model: str, source: str, conf: float = 0.25) -> dict[str, Any]:
+    """检测目标: 直接调 ultralytics predict 出框并保存, 返回统计.
+
+    (D8 推理子系统的 frame_source/visualization 前置模块未落地, 这里走
+    ultralytics 原生 predict 作为可用的检测路径.)
+    """
+    from ultralytics import YOLO
+
+    m = YOLO(model)
+    results = m.predict(source=source, conf=conf, save=True, verbose=False)
+    total = sum(r.boxes.shape[0] if r.boxes is not None else 0 for r in results)
+    save_dir = getattr(results[0], "save_dir", None) if results else None
+    return {
+        "kind": "detect",
+        "success": True,
+        "images": len(results),
+        "detections": total,
+        "save_dir": str(save_dir) if save_dir else None,
+        "source": source,
+    }
