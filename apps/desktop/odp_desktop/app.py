@@ -643,7 +643,7 @@ class MainWindow(QMainWindow):
         train_rate = 0.8 if self.opt_split.isChecked() else 1.0
         val_rate = 0.1 if self.opt_split.isChecked() else 0.0
         self._run_inprocess("格式转换", tasks.transform_dataset, name, fmt, train_rate, val_rate,
-                            on_done=self._on_convert_done)
+                            classes, on_done=self._on_convert_done)
 
     def _on_convert_done(self, result) -> None:
         if result.get("kind") == "transform":
@@ -660,6 +660,8 @@ class MainWindow(QMainWindow):
         model = self.train_model_edit.text().strip() or "yolo11n.pt"
         data = self.train_data_edit.text().strip() or "det_demo.yaml"
         tasks.ensure_config("train")
+        if not self._transform_now(data):
+            return
         self._run_subprocess("训练", tasks.train_args(
             model, data, self.train_epochs.value(),
             self.train_imgsz.value(), self.train_device.currentText(),
@@ -669,10 +671,55 @@ class MainWindow(QMainWindow):
         model = self.train_model_edit.text().strip() or "yolo11n.pt"
         data = self.train_data_edit.text().strip() or "det_demo.yaml"
         tasks.ensure_config("val")
+        if not self._transform_now(data):
+            return
         self._run_subprocess("评估", tasks.val_args(
             model, data, "val", self.train_imgsz.value(),
             self.train_device.currentText(),
         ))
+
+    def _transform_now(self, data_field: str) -> bool:
+        """训练/评估前同步重新转换目标数据集, 保证 data/ 里是它的划分.
+
+        因为 data/train-val-test 是所有数据集共享的, 若之前转换过别的数据集,
+        这里的数据就不匹配当前要训练的数据集了. 训练前重转一遍最保险.
+        """
+        from pathlib import Path
+
+        import yaml as _yaml
+
+        from odp_platform.common.paths import dataset_yaml_path
+
+        name = Path(data_field).stem
+        info = tasks.detect_dataset_info(name)
+        if not info.get("exists"):
+            self._log_plain(f"数据集 {name} 不存在")
+            return False
+        fmt = info.get("format")
+        if fmt == "unknown":
+            self._log_plain(f"数据集 {name} 格式未知, 请先在转换页转换")
+            return False
+        classes = None
+        if fmt == "yolo":
+            yp = dataset_yaml_path(name)
+            if yp.exists():
+                try:
+                    doc = _yaml.safe_load(yp.read_text(encoding="utf-8")) or {}
+                    names = doc.get("names") or {}
+                    classes = list(names.values()) if isinstance(names, dict) else (
+                        names if isinstance(names, list) else None)
+                except Exception:
+                    classes = None
+            if not classes:
+                self._log_plain(f"YOLO 数据集 {name} 缺少类别信息, 请先在转换页填写类别转换一次")
+                return False
+        self._log_plain(f"训练前自动转换数据集 {name} ...")
+        try:
+            tasks.transform_dataset(name, fmt, 0.8, 0.1, classes=classes)
+            return True
+        except Exception as e:
+            self._log_plain(f"训练前转换失败: {e}")
+            return False
 
     def _gen_config(self) -> None:
         for kind in ("train", "val", "infer"):

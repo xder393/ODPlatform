@@ -16,6 +16,7 @@ def transform_dataset(
     fmt: str,
     train_rate: float,
     val_rate: float,
+    classes: list[str] | None = None,
 ) -> dict[str, Any]:
     """格式转换 + 划分 (D3)."""
     from odp_platform.data_pipeline import DatasetPipeline
@@ -24,6 +25,7 @@ def transform_dataset(
         annotation_format=fmt,
         train_rate=train_rate,
         val_rate=val_rate,
+        classes=classes,
     ).run()
     return {
         "kind": "transform",
