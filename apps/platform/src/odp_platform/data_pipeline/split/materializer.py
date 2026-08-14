@@ -41,6 +41,21 @@ class SplitOutputDirs:
         ):
             p.mkdir(parents=True, exist_ok=True)
 
+    def clear(self) -> None:
+        """清空所有目标目录 — 每次转换前先清, 防止上一个数据集的文件残留.
+
+        否则连续转换两个数据集时, 后者的划分会跟前者混在同一批目录里,
+        类别 id / 文件名互相污染 (D4 质检会报越界).
+        """
+        import shutil
+        for p in (
+            self.train_images, self.train_labels,
+            self.val_images,   self.val_labels,
+            self.test_images,  self.test_labels,
+        ):
+            if p.exists():
+                shutil.rmtree(p, ignore_errors=True)
+
 
 def materialize(
     manifest: SplitManifest,
@@ -51,6 +66,7 @@ def materialize(
     Returns:
         {split: 实际复制成功的样本数} 的字典
     """
+    output_dirs.clear()      # 先清空旧划分, 再落盘
     output_dirs.mkdir_all()
 
     counts = {}

@@ -112,12 +112,27 @@ def _row(label: str, value: QWidget) -> QWidget:
     return box
 
 
+def _warmup_heavy_imports() -> None:
+    """主线程预 import 重依赖.
+
+    torch 首次 import 不能在 Qt 线程池的 worker 线程里做(会触发
+    'can't register atexit after shutdown'), 所以启动时在主线程先 import 一次,
+    之后 worker 里的 `import torch` 就只是命中缓存, 不再走初始化.
+    """
+    for mod in ("torch", "ultralytics"):
+        try:
+            __import__(mod)
+        except Exception:
+            pass
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Dataset Converter & Validator")
         self.resize(1180, 800)
         self.setMinimumSize(1000, 660)
+        _warmup_heavy_imports()
 
         self._signals = install_log_bridge()
         self._pool = QThreadPool.globalInstance()
@@ -498,13 +513,23 @@ class MainWindow(QMainWindow):
 
     def _on_validate_done(self, result) -> None:
         self.val_progress.setVisible(False)
-        self.val_progress_label.setText("检查完成")
         counts = {"PASS": 0, "INFO": 0, "WARNING": 0, "ERROR": 0}
         for r in result.get("results", []):
             counts[r["severity"]] = counts.get(r["severity"], 0) + 1
-        self.val_card_pass.findChild(QLabel).setText(str(counts.get("PASS", 0) + counts.get("INFO", 0)))
+        passed = counts.get("PASS", 0) + counts.get("INFO", 0)
+        self.val_card_pass.findChild(QLabel).setText(str(passed))
         self.val_card_warn.findChild(QLabel).setText(str(counts.get("WARNING", 0)))
         self.val_card_err.findChild(QLabel).setText(str(counts.get("ERROR", 0)))
+        # 明确的总体结论
+        if counts.get("ERROR", 0):
+            self.val_progress_label.setText(f"✗ 检查完成：{counts['ERROR']} 个错误")
+            self.val_progress_label.setStyleSheet("color:#FF3B30;")
+        elif counts.get("WARNING", 0):
+            self.val_progress_label.setText(f"⚠ 检查完成：{counts['WARNING']} 个警告")
+            self.val_progress_label.setStyleSheet("color:#FF9500;")
+        else:
+            self.val_progress_label.setText(f"✓ 检查通过（{passed} 项）")
+            self.val_progress_label.setStyleSheet("color:#34C759;")
         # 更新左侧检查项状态色
         for r in result.get("results", []):
             cb = self.check_labels.get(r["name"])
@@ -761,11 +786,11 @@ class MainWindow(QMainWindow):
         if self._busy:
             return
         self._set_busy(True, task_name)
-        worker = Worker(fn, *args, log_signals=self._signals)
+        self._worker = Worker(fn, *args, log_signals=self._signals)  # 持引用防 GC
         self._cancel_fn = None  # 快任务不支持取消
-        worker.signals.finished.connect(lambda r: self._on_inprocess_done(r, on_done))
-        worker.signals.error.connect(lambda e: self._on_inprocess_error(e))
-        self._pool.start(worker)
+        self._worker.signals.finished.connect(lambda r: self._on_inprocess_done(r, on_done))
+        self._worker.signals.error.connect(lambda e: self._on_inprocess_error(e))
+        self._pool.start(self._worker)
 
     def _on_inprocess_done(self, result, on_done) -> None:
         self._set_busy(False)
@@ -774,6 +799,9 @@ class MainWindow(QMainWindow):
 
     def _on_inprocess_error(self, msg: str) -> None:
         self._set_busy(False)
+        self.val_progress.setVisible(False)
+        self.val_progress_label.setText("检查出错")
+        self.val_progress_label.setStyleSheet("color:#FF3B30;")
         self._log_plain(f"[错误] {msg}")
 
     def _run_subprocess(self, task_name: str, args: list[str]) -> None:
