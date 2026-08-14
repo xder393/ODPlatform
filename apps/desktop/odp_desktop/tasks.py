@@ -50,6 +50,14 @@ def validate_dataset_checked(dataset_name: str) -> dict[str, Any]:
             "classes": list(report.snapshot.class_names),
             "total_images": report.snapshot.total_images,
         },
+        "stats_per_split": {
+            split: {
+                "image_count": stat.image_count,
+                "annotated_count": stat.annotated_count,
+                "total_instances": stat.total_instances,
+            }
+            for split, stat in report.snapshot.stats_per_split.items()
+        },
         "report_path": str(report.report_path) if report.report_path else None,
     }
 

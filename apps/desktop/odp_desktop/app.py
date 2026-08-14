@@ -3,11 +3,11 @@
 
 布局:
   左栏  数据集选择 / 格式转换 / 质量检查 / 配置生成 / 任务执行
-  右栏  日志页(实时) + 结果页(结构化 HTML)
+  右栏  日志页(实时) + 结果页(结构化 HTML) + 图表页(matplotlib)
 
 设计纪律 (跟 CLI 层一致):
   - 业务全在 odp_platform 服务层, 这里只做"取参数 → 后台跑 → 展示"
-  - 长任务走 QThreadPool, UI 不冻结
+  - 长任务走 QThreadPool, UI 不冻结; 运行时有进度条 + 状态提示
 """
 from __future__ import annotations
 
@@ -18,11 +18,12 @@ from PySide6.QtCore import QThreadPool
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QComboBox, QDoubleSpinBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
-    QLineEdit, QMainWindow, QPlainTextEdit, QPushButton, QSpinBox,
-    QStackedWidget, QTextBrowser, QVBoxLayout, QWidget,
+    QLineEdit, QMainWindow, QPlainTextEdit, QProgressBar, QPushButton,
+    QSpinBox, QStackedWidget, QTabWidget, QTextBrowser, QVBoxLayout, QWidget,
 )
 
 from . import tasks
+from .charts import ChartWidget
 from .log_bridge import install_log_bridge
 from .workers import Worker
 
@@ -33,7 +34,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("ODPlatform — 目标检测开发平台")
-        self.resize(1040, 700)
+        self.resize(1080, 720)
 
         # 日志桥 (单例) + 线程池
         self._signals = install_log_bridge()
@@ -42,6 +43,7 @@ class MainWindow(QMainWindow):
         self._busy = False
 
         self._build_ui()
+        self._build_status_bar()
         self._refresh_datasets()
 
     # ====================================================================
@@ -66,8 +68,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self._build_task_group())
         left_layout.addStretch(1)
 
-        # ---- 右栏: 日志 + 结果 ----
-        from PySide6.QtWidgets import QTabWidget
+        # ---- 右栏: 日志 + 结果 + 图表 ----
         self.tabs = QTabWidget()
 
         self.log_view = QPlainTextEdit()
@@ -80,8 +81,21 @@ class MainWindow(QMainWindow):
         self.result_view.setOpenExternalLinks(True)
         self.tabs.addTab(self.result_view, "结果")
 
+        self.chart_view = ChartWidget()
+        self.tabs.addTab(self.chart_view, "图表")
+
         root.addWidget(left)
         root.addWidget(self.tabs, 1)
+
+    def _build_status_bar(self) -> None:
+        self._status_label = QLabel("就绪")
+        self.statusBar().addWidget(self._status_label, 1)
+
+        self._progress = QProgressBar()
+        self._progress.setRange(0, 0)          # 不确定进度 (滚动条)
+        self._progress.setFixedWidth(160)
+        self._progress.setVisible(False)
+        self.statusBar().addPermanentWidget(self._progress)
 
     def _build_dataset_group(self) -> QGroupBox:
         group = QGroupBox("数据集")
@@ -201,7 +215,6 @@ class MainWindow(QMainWindow):
         if raw.is_dir():
             names = sorted(p.name for p in raw.iterdir() if p.is_dir())
             self.dataset_combo.addItems(names)
-        # 尽量恢复之前的选择
         if current:
             idx = self.dataset_combo.findText(current)
             if idx >= 0:
@@ -218,31 +231,39 @@ class MainWindow(QMainWindow):
     # 后台任务调度
     # ====================================================================
 
-    def _start_task(self, fn, *args) -> None:
+    def _start_task(self, task_name: str, fn, *args) -> None:
         if self._busy:
             return
-        self._set_busy(True)
+        self._set_busy(True, task_name)
         self.tabs.setCurrentWidget(self.log_view)
         worker = Worker(fn, *args)
         worker.signals.finished.connect(self._on_task_done)
         worker.signals.error.connect(self._on_task_error)
         self._pool.start(worker)
 
-    def _set_busy(self, busy: bool) -> None:
+    def _set_busy(self, busy: bool, task_name: str = "") -> None:
         self._busy = busy
         for btn in (
             self.transform_btn, self.validate_btn,
             self.genconfig_btn, self.task_btn,
         ):
             btn.setEnabled(not busy)
+        if busy:
+            self._status_label.setText(f"运行中: {task_name} ...")
+            self._progress.setVisible(True)
+        else:
+            self._progress.setVisible(False)
 
     def _on_task_done(self, result) -> None:
         self._set_busy(False)
+        self._status_label.setText("完成")
         self._render_result(result)
+        self.chart_view.set_result(result)
         self.tabs.setCurrentWidget(self.result_view)
 
     def _on_task_error(self, message: str) -> None:
         self._set_busy(False)
+        self._status_label.setText("出错")
         self._render_result({"kind": "error", "message": message})
         self.tabs.setCurrentWidget(self.result_view)
 
@@ -256,7 +277,8 @@ class MainWindow(QMainWindow):
             self._render_result({"kind": "error", "message": "请先选择数据集(或把数据集放进 data/raw/ 后刷新)"})
             return
         self._start_task(
-            tasks.transform_dataset, name, self.format_combo.currentText(),
+            "格式转换", tasks.transform_dataset, name,
+            self.format_combo.currentText(),
             self.train_rate.value(), self.val_rate.value(),
         )
 
@@ -265,22 +287,22 @@ class MainWindow(QMainWindow):
         if not name:
             self._render_result({"kind": "error", "message": "请先选择数据集"})
             return
-        self._start_task(tasks.validate_dataset_checked, name)
+        self._start_task("质量检查", tasks.validate_dataset_checked, name)
 
     def _run_genconfig(self) -> None:
-        self._start_task(tasks.generate_config, self.genconfig_combo.currentText())
+        self._start_task("配置生成", tasks.generate_config, self.genconfig_combo.currentText())
 
     def _run_task(self) -> None:
         model = self.model_edit.text().strip()
         data = self.data_edit.text().strip()
         kind = self.task_combo.currentText()
         if kind == "train":
-            self._start_task(tasks.run_train, model, data, self.epochs_spin.value())
+            self._start_task("训练", tasks.run_train, model, data, self.epochs_spin.value())
         elif kind == "val":
-            self._start_task(tasks.run_val, model, data, self.split_combo.currentText())
+            self._start_task("评估", tasks.run_val, model, data, self.split_combo.currentText())
         else:
             source = self.source_edit.text().strip()
-            self._start_task(tasks.run_infer, model, source)
+            self._start_task("推理", tasks.run_infer, model, source)
 
     # ====================================================================
     # 日志 / 结果渲染
@@ -335,6 +357,11 @@ def _result_to_html(result: dict) -> str:
             ("图像总数", ds.get("total_images")),
             ("报告", result.get("report_path") or "(未写盘)"),
         ])
+        split_rows = "".join(
+            f"<tr><td>{_esc(s)}</td><td>{_esc(st['image_count'])}</td>"
+            f"<td>{_esc(st['annotated_count'])}</td><td>{_esc(st['total_instances'])}</td></tr>"
+            for s, st in result.get("stats_per_split", {}).items()
+        )
         check_rows = "".join(
             f"<tr><td>{_esc(r['severity'])}</td><td>{_esc(r['name'])}</td>"
             f"<td>{_esc(r['summary'])}</td></tr>"
@@ -343,6 +370,11 @@ def _result_to_html(result: dict) -> str:
         return (
             "<h3>质量检查结果</h3>"
             f"<table>{rows}</table>"
+            "<h4>各 split 数据量</h4>"
+            "<table border='0' cellspacing='0' cellpadding='4'>"
+            "<tr><th style='text-align:left'>split</th><th style='text-align:left'>图像</th>"
+            "<th style='text-align:left'>有标注</th><th style='text-align:left'>实例</th></tr>"
+            f"{split_rows}</table>"
             "<h4>检查项</h4>"
             "<table border='0' cellspacing='0' cellpadding='4'>"
             "<tr><th style='text-align:left'>级别</th><th style='text-align:left'>检查项</th>"

@@ -9,9 +9,10 @@
 apps/desktop/
 ├── main.py                 开发入口 (python apps/desktop/main.py)
 ├── odp_desktop/
-│   ├── app.py              主窗口
+│   ├── app.py              主窗口 (左控制面板 + 日志/结果/图表三页)
 │   ├── log_bridge.py       把 logging 流接到 Qt 信号 (日志面板实时滚动)
-│   ├── workers.py          后台线程跑任务 (UI 不冻结)
+│   ├── workers.py          后台线程跑任务 (UI 不冻结, 状态栏进度条)
+│   ├── charts.py           结果图表 (matplotlib, 验证/评估指标可视化)
 │   └── tasks.py            服务层 → 普通 dict 的薄封装
 └── packaging/
     ├── odp-desktop.spec    PyInstaller 打包配置
