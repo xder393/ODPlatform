@@ -59,6 +59,7 @@ odp-init       = "odp_platform.cli.init_project:initialize_project"
 odp-reset      = "odp_platform.cli.reset_project:main"
 odp-transform  = "odp_platform.cli.transform_data:main"
 odp-validate   = "odp_platform.cli.validate_data:main"
+odp-gen-config = "odp_platform.runtime_config.generator:main"
 
 
 # =============================================================================

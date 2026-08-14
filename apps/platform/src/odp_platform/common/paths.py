@@ -155,6 +155,8 @@ def get_dirs_to_initialize() -> List[Path]:
 
         # 数据集配置目录(D3 数据流水线产出 <name>.yaml)
         DATASET_CONFIGS_DIR,
+        # 运行配置目录(D5 runtime_config 子系统产出 train/val/infer.yaml)
+        RUNTIME_CONFIGS_DIR,
     ]
 
 
@@ -266,6 +268,31 @@ def validation_run_dir(run_id: str) -> Path:
         (run_dir / "report.json").write_text(...)
     """
     return VALIDATION_RUNS_DIR / run_id
+
+
+# ============================================================
+# D5 增量: 运行配置目录 (跟 D3 立的 DATASET_CONFIGS_DIR 语义完全不同)
+#   DATASET_CONFIGS_DIR: 描述【数据】的 yaml (odp-transform 产出)
+#   RUNTIME_CONFIGS_DIR: 描述【跑法】的 yaml (runtime_config 子系统产出)
+# 两类 yaml 物理分目录, 语义不会互相污染.
+# ============================================================
+RUNTIME_CONFIGS_DIR: Path = CONFIGS_DIR / "runtime"
+
+
+def runtime_config_path(name: str) -> Path:
+    """返回某个运行配置文件路径: <CONFIGS_DIR>/runtime/<name>.yaml
+
+    Args:
+        name: 配置名 (如 "train" / "val"), 不带 .yaml 后缀
+
+    Returns:
+        Path 对象 (尚未创建, 调用方自己 mkdir)
+
+    用法:
+        train_yaml = runtime_config_path("train")
+        # → <APP_DIR>/configs/runtime/train.yaml
+    """
+    return RUNTIME_CONFIGS_DIR / f"{name}.yaml"
 
 
 if __name__ == "__main__":
