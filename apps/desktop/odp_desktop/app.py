@@ -139,6 +139,7 @@ class MainWindow(QMainWindow):
         self._busy = False
         self._cancel_fn = None
         self._current_dataset = ""
+        self._detect_result = None
 
         self._build_ui()
         self._refresh_datasets()
@@ -679,23 +680,23 @@ class MainWindow(QMainWindow):
         self._log_plain("配置文件已就绪: configs/runtime/{train,val,infer}.yaml")
 
     def _run_detect(self) -> None:
-        model = self.detect_model_edit.text().strip() or "yolo11n.pt"
+        model = self.detect_model_edit.text().strip() or tasks.latest_checkpoint()
         source = self.detect_source_edit.text().strip()
         if not source:
             self._log_plain("请先选择检测源(图片/文件夹)")
             return
         self.detect_result_label.setText("检测中...")
-        self._run_inprocess("检测", tasks.detect_images, model, source,
-                            self.detect_conf.value(), on_done=self._on_detect_done)
+        self._detect_result = None
+        self._run_subprocess("检测", tasks.detect_args(model, source, self.detect_conf.value()),
+                             on_line=self._on_detect_line)
 
-    def _on_detect_done(self, result) -> None:
-        if result.get("success"):
-            self.detect_result_label.setText(
-                f"✓ 检测完成：{result['images']} 张图，共 {result['detections']} 个目标\n"
-                f"结果保存在：{result['save_dir']}"
-            )
-        else:
-            self.detect_result_label.setText(f"✗ 检测失败：{result.get('error')}")
+    def _on_detect_line(self, line: str) -> None:
+        if line.startswith("ODP_RESULT "):
+            try:
+                import json
+                self._detect_result = json.loads(line[len("ODP_RESULT "):])
+            except Exception:
+                pass
 
     def _pick_detect_image(self) -> None:
         f, _ = QFileDialog.getOpenFileName(
@@ -789,7 +790,7 @@ class MainWindow(QMainWindow):
         title.setStyleSheet("font-size: 17px; font-weight: 700;")
         lay.addWidget(title)
 
-        self.detect_model_edit = QLineEdit("yolo11n.pt")
+        self.detect_model_edit = QLineEdit(tasks.latest_checkpoint())
         lay.addWidget(_row("模型", self.detect_model_edit))
 
         self.detect_source_edit = QLineEdit()
@@ -931,15 +932,15 @@ class MainWindow(QMainWindow):
     def _log_plain(self, msg: str) -> None:
         self._signals.message.emit(msg)
 
-    def _set_busy(self, busy: bool, task_name: str = "") -> None:
+    def _set_busy(self, busy: bool, task_name: str = "", cancelable: bool = False) -> None:
         self._busy = busy
-        self.stop_btn.setVisible(busy)
-        self.stop_btn.setText(f"停止{' · ' + task_name if busy else ''}")
+        self.stop_btn.setVisible(busy and cancelable)   # 只有可取消的任务才显示停止
+        self.stop_btn.setText(f"停止 · {task_name}" if (busy and cancelable) else "停止")
 
     def _run_inprocess(self, task_name: str, fn, *args, on_done=None) -> None:
         if self._busy:
             return
-        self._set_busy(True, task_name)
+        self._set_busy(True, task_name, cancelable=False)
         self._worker = Worker(fn, *args, log_signals=self._signals)  # 持引用防 GC
         self._cancel_fn = None  # 快任务不支持取消
         self._worker.signals.finished.connect(lambda r: self._on_inprocess_done(r, on_done))
@@ -958,15 +959,20 @@ class MainWindow(QMainWindow):
         self.val_progress_label.setStyleSheet("color:#FF3B30;")
         self._log_plain(f"[错误] {msg}")
 
-    def _run_subprocess(self, task_name: str, args: list[str]) -> None:
+    def _run_subprocess(self, task_name: str, args: list[str], on_line=None) -> None:
         if self._busy:
             return
-        self._set_busy(True, task_name)
+        self._set_busy(True, task_name, cancelable=True)
         self._worker = SubprocessWorker(args, log_signals=self._signals)
         self._cancel_fn = self._worker.cancel
+        self._worker.signals.line.connect(lambda l: self._on_subprocess_line(l, on_line))
         self._worker.signals.finished.connect(self._on_subprocess_done)
         self._worker.signals.error.connect(lambda e: self._log_plain(f"[错误] {e}"))
         self._pool.start(self._worker)
+
+    def _on_subprocess_line(self, line: str, on_line) -> None:
+        if on_line:
+            on_line(line)
 
     def _on_subprocess_done(self, code: int) -> None:
         self._set_busy(False)
@@ -976,6 +982,12 @@ class MainWindow(QMainWindow):
         else:
             self._log_plain(f"✗ 进程退出码 {code}")
         self._refresh_experiments()
+        if self._detect_result is not None:
+            r = self._detect_result
+            self.detect_result_label.setText(
+                f"✓ 检测完成：{r['images']} 张图，共 {r['detections']} 个目标\n"
+                f"结果保存在：{r['save_dir']}")
+            self._detect_result = None
 
     def _cancel(self) -> None:
         if self._cancel_fn:

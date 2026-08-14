@@ -432,7 +432,9 @@ def detect_images(model: str, source: str, conf: float = 0.25) -> dict[str, Any]
     """
     from ultralytics import YOLO
 
-    m = YOLO(model)
+    from odp_platform.common.model_path import resolve_model_path
+
+    m = YOLO(str(resolve_model_path(model)))
     results = m.predict(source=source, conf=conf, save=True, verbose=False)
     total = sum(r.boxes.shape[0] if r.boxes is not None else 0 for r in results)
     save_dir = getattr(results[0], "save_dir", None) if results else None
@@ -444,3 +446,24 @@ def detect_images(model: str, source: str, conf: float = 0.25) -> dict[str, Any]
         "save_dir": str(save_dir) if save_dir else None,
         "source": source,
     }
+
+
+def detect_args(model: str, source: str, conf: float) -> list[str]:
+    """检测 → 子进程参数 (可取消)."""
+    import sys
+    return [sys.executable, "-m", "odp_platform.cli.detect",
+            "--model", model, "--source", source, "--conf", str(conf)]
+
+
+def latest_checkpoint() -> str:
+    """返回最新的 best 权重; 没有则回退到 yolo11n.pt."""
+    from pathlib import Path
+
+    from odp_platform.common.paths import CHECKPOINTS_DIR
+
+    pts = sorted(
+        Path(CHECKPOINTS_DIR).glob("*-best.pt"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return str(pts[0]) if pts else "yolo11n.pt"
