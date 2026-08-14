@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 
 from odp_platform.common.logging_utils import get_logger
+from odp_platform.common.paths import LOGGING_DIR
 from odp_platform.inference import infer_yolo
 
 
@@ -88,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # ★ 纪律 B: 整个进程里【唯一】装 handler 的地方
     get_logger(
-        base_path=Path("logs"),
+        base_path=LOGGING_DIR,
         log_type="infer",
         log_level=getattr(logging, ns.log_level),
     )
