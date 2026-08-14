@@ -67,3 +67,15 @@ COVERAGE_HARD_THRESHOLD: float = 0.5
 
 COVERAGE_SOFT_THRESHOLD: float = 0.9
 """图像-标注覆盖率软阈值: 低于此值仅警告。"""
+
+
+# ============================================================
+# D4 增量: 数据验证 (data_validation 子系统)
+# ============================================================
+
+# ---- pair_existence 缺失比例分级 ----
+PAIR_MISSING_ERROR_RATIO: float = 0.5
+"""缺标签比例 >= 50% 时 pair_existence 触发 ERROR (流程崩了)"""
+
+PAIR_MISSING_WARN_RATIO: float = 0.05
+"""缺标签比例 >= 5% (但 < 50%) 时触发 WARNING; 低于此值仅 INFO"""

@@ -245,6 +245,29 @@ def dataset_yaml_path(dataset_name: str) -> Path:
     return DATASET_CONFIGS_DIR / f"{dataset_name}.yaml"
 
 
+# ============================================================
+# D4 增量: 数据验证运行目录
+# ============================================================
+VALIDATION_RUNS_DIR: Path = RUNS_DIR / "data_validation"
+
+
+def validation_run_dir(run_id: str) -> Path:
+    """返回某次验证运行的产出目录: runs/data_validation/<run_id>/
+
+    Args:
+        run_id: 形如 "20260516_184523" 的时间戳 ID (由 validate_dataset 生成)
+
+    Returns:
+        Path 对象 (尚未创建, 调用方自己 mkdir)
+
+    用法:
+        run_dir = validation_run_dir("20260516_184523")
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "report.json").write_text(...)
+    """
+    return VALIDATION_RUNS_DIR / run_id
+
+
 if __name__ == "__main__":
     print(f"ROOT_DIR (workspace) = {ROOT_DIR}")
     print(f"APP_DIR  (platform)  = {APP_DIR}")
