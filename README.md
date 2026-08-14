@@ -8,9 +8,9 @@ Monorepo,核心在 `apps/platform/`,其他端是占位:
 
 ```
 apps/platform/         核心引擎(src 布局)
+apps/desktop/          PySide6 桌面端(GUI)
 apps/web-backend/      Web 后端(占位, V1.1)
 apps/web-frontend/     Web 前端(占位, V1.1)
-apps/desktop/          桌面端(占位, V2.0)
 packages/shared-schemas/ 共享 Pydantic 模型(占位, V1.1)
 docs/architecture/     架构决策记录(ADR)
 ```
@@ -28,6 +28,15 @@ pip install -e ./apps/platform
 ```bash
 pip install torch ultralytics
 ```
+
+## 桌面端
+
+```bash
+pip install PySide6
+python apps/desktop/main.py
+```
+
+GUI 封装了数据集选择、格式转换、质量检查、配置生成、训练/评估/推理任务执行与结果展示。Windows 打包见 `apps/desktop/packaging/build_windows.md`。
 
 ## 命令
 
