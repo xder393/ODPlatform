@@ -3,9 +3,14 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
+from odp_api.modules.cases.errors import InvalidCaseStatus
+
 from odp_schemas.events import InspectionAlert
 
 CaseStatus = Literal["PENDING_CONFIRMATION", "IN_REVIEW", "RESOLVED", "FALSE_POSITIVE"]
+CASE_STATUSES: frozenset[CaseStatus] = frozenset(
+    {"PENDING_CONFIRMATION", "IN_REVIEW", "RESOLVED", "FALSE_POSITIVE"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +65,8 @@ class DefectCase:
     last_transition_actor_id: UUID | None = None
 
     def __post_init__(self) -> None:
+        if self.status not in CASE_STATUSES:
+            raise InvalidCaseStatus(self.status)
         if not self.inspection_events:
             raise ValueError("A defect case requires at least one inspection event.")
         if any(event.organization_id != self.organization_id for event in self.inspection_events):
