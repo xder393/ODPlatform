@@ -1,0 +1,14 @@
+[build-system]
+requires = ["hatchling>=1.18.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "odp-shared-schemas"
+version = "0.1.0"
+description = "Shared schemas for ODPlatform services"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["pydantic>=2.0.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/odp_schemas"]

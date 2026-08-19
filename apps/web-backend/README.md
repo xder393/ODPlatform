@@ -1,12 +1,19 @@
-# apps/web-backend — Web 后端服务(占位)
+# apps/web-backend
 
-> 状态: 占位,V1.1 启动开发
+FastAPI service foundation for the ODPlatform quality-inspection platform.
 
-本子项目将提供 ODPlatform 的 Web 后端服务,基于:
+## Run locally
 
-- FastAPI(REST API)
-- 复用 `apps/platform/` 的核心引擎(数据转换、验证、训练、推理)
-- 共享 `packages/shared-schemas/` 的 Pydantic 数据模型
+Install this package and start the app with:
 
-现在留好位置,V1.1 启动时 backend 团队知道往哪建,platform 一行代码不用动。
-参考 `docs/architecture/ADR-001-monorepo.md`。
+```bash
+uvicorn odp_api.main:create_app --factory --reload
+```
+
+The service exposes `GET /healthz`, returning `{"status": "ok"}`. Runtime
+configuration is provided by `Settings` and reads `ODP_`-prefixed environment
+variables.
+
+The Web service remains separate from `apps/platform`, which continues to be
+the independent visual inspection core. Shared event contracts live in
+`packages/shared-schemas`.

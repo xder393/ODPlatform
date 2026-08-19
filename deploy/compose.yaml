@@ -1,0 +1,53 @@
+services:
+  api:
+    image: python:3.12-slim
+    working_dir: /app
+    volumes:
+      - ../apps/web-backend:/app
+    command: ["sh", "-c", "sleep infinity"]
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: odp
+      POSTGRES_USER: odp
+      POSTGRES_PASSWORD: odp
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U odp -d odp"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+
+  prometheus:
+    image: prom/prometheus:latest
+
+  grafana:
+    image: grafana/grafana:latest
+
+  alertmanager:
+    image: prom/alertmanager:latest
