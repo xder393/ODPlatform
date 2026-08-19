@@ -1,7 +1,5 @@
 from fastapi import APIRouter, FastAPI
-
 from odp_api.settings import Settings
-
 
 health_router = APIRouter()
 
