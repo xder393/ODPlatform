@@ -3,11 +3,15 @@ from uuid import UUID
 
 from fastapi import APIRouter, FastAPI
 from odp_api.adapters.auth.jwt import ActorRepository, InMemoryActorRepository, JwtAuthenticator
+from odp_api.adapters.generation.mock import MockLLMAdapter
 from odp_api.adapters.notifications.redis_stream import RedisStreamInspectionAlertFeed
 from odp_api.adapters.redis_stream import RedisSocketStreamClient, SQLiteStreamClient
+from odp_api.adapters.retrieval.pgvector import PgVectorRetrievalAdapter
 from odp_api.adapters.tasks.redis_stream import RedisStreamTaskAlertPublisher, RedisStreamTaskQueue
 from odp_api.adapters.tasks.sqlite import SQLiteTaskRepository
 from odp_api.adapters.vision.mock import MockVisionAdapter
+from odp_api.modules.ai_orchestration.router import create_advice_router
+from odp_api.modules.ai_orchestration.service import AdviceService
 from odp_api.modules.audit.service import AuditService, InMemoryAuditRepository
 from odp_api.modules.audit.verify import AuditVerificationMonitor, ManagedDailyAuditVerification
 from odp_api.modules.cases.router import InMemoryCaseRepository, create_cases_router
@@ -84,18 +88,22 @@ def create_app(
         event_id=UUID("00000000-0000-0000-0000-000000000003"),
     )
     reauthentication_service = ReauthenticationService(InMemoryReauthenticationStore())
+    case_repository = InMemoryCaseRepository((fixture_case,))
+    advice_service = AdviceService(PgVectorRetrievalAdapter(), MockLLMAdapter())
     app.state.audit_service = audit_service
     app.state.audit_verification_monitor = audit_verification_monitor
     app.state.daily_audit_verification = daily_audit_verification
     app.state.task_service = task_service
+    app.state.advice_service = advice_service
 
     app.include_router(
         create_cases_router(
-            InMemoryCaseRepository((fixture_case,)),
+            case_repository,
             reauthentication_service=reauthentication_service,
             audit_service=audit_service,
         )
     )
+    app.include_router(create_advice_router(case_repository, advice_service))
     for event in fixture_case.inspection_events:
         inspection_alert_feed.publish(event.to_alert(), event.line_id)
     app.include_router(
