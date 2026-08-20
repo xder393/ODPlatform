@@ -329,4 +329,66 @@ def test_retry_queue_depth_metric_uses_the_queue_transport(
     asyncio.run(service.process_vision(task.task_id, inference_fails, now))
 
     assert dependencies[1].depth() == 2
-    assert dependencies[2].task_queue_depth == 2
+    assert dependencies[2].task_queue_depth == 1
+
+
+def test_completed_and_retried_work_do_not_inflate_outstanding_queue_depth(
+    dependencies: tuple[
+        InMemoryTaskRepository,
+        InMemoryTaskQueue,
+        InMemoryTaskMetrics,
+        InMemoryTaskAlertPublisher,
+    ],
+    now: datetime,
+) -> None:
+    """Using stream history as depth would keep completed and retried work counted forever."""
+    service = make_service(dependencies)
+    retrying = service.enqueue("vision_inference", "frame-010:model-v3", {"frame_id": "frame-010"})
+    succeeding = service.enqueue("vision_inference", "frame-011:model-v3", {"frame_id": "frame-011"})
+
+    async def fails(_: dict[str, object]) -> None:
+        raise RuntimeError("retry me")
+
+    async def succeeds(_: dict[str, object]) -> None:
+        return None
+
+    asyncio.run(service.process_vision(retrying.task_id, fails, now))
+    asyncio.run(service.process_vision(succeeding.task_id, succeeds, now))
+
+    assert dependencies[1].depth() == 3
+    assert dependencies[2].task_queue_depth == 1
+
+
+def test_duplicate_enqueue_recovers_a_task_stranded_by_a_transient_publish_failure() -> None:
+    """A queue outage after persistence must not strand a pending task forever."""
+    class FailingOnceQueue:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.messages: list[object] = []
+
+        def enqueue(self, task) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise OSError("Redis temporarily unavailable")
+            self.messages.append(task)
+
+        def depth(self) -> int:
+            return len(self.messages)
+
+    repository = InMemoryTaskRepository()
+    queue = FailingOnceQueue()
+    service = TaskService(
+        repository,
+        queue,
+        InMemoryTaskMetrics(),
+        InMemoryTaskAlertPublisher(),
+    )
+
+    first = service.enqueue("vision_inference", "frame-012:model-v3", {"frame_id": "frame-012"})
+    recovered = service.enqueue("vision_inference", "frame-012:model-v3", {"frame_id": "frame-012"})
+
+    assert first.task_id == recovered.task_id
+    assert first.published_at is None
+    assert recovered.published_at is not None
+    assert queue.calls == 2
+    assert [task.task_id for task in queue.messages] == [first.task_id]

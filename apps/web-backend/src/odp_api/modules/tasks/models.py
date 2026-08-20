@@ -23,6 +23,7 @@ class TaskRecord:
     next_attempt_at: datetime | None = None
     last_error: str | None = None
     frame_status: FrameStatus | None = None
+    published_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

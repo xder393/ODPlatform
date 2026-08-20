@@ -3,6 +3,7 @@ from uuid import UUID, uuid4
 
 from odp_api.modules.inspection.models import DefectCase, InspectionEvent
 from odp_api.ports.vision import FrameInput, VisionInferencePort
+
 from odp_schemas.events import InspectionAlert
 
 
@@ -13,11 +14,15 @@ class InspectionService:
         self._vision = vision
 
     def inspect_fixture(
-        self, frame: FrameInput, organization_id: UUID, camera_id: UUID
+        self,
+        frame: FrameInput,
+        organization_id: UUID,
+        camera_id: UUID,
+        event_id: UUID | None = None,
     ) -> DefectCase:
         result = self._vision.inspect(frame)
         alert = InspectionAlert(
-            event_id=uuid4(),
+            event_id=event_id or uuid4(),
             organization_id=organization_id,
             camera_id=camera_id,
             occurred_at=datetime.now(UTC),

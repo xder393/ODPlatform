@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -11,6 +12,7 @@ SHARED_SCHEMAS_SRC = Path(__file__).parents[4] / "packages" / "shared-schemas" /
 sys.path[:0] = [str(WEB_BACKEND_SRC), str(SHARED_SCHEMAS_SRC)]
 
 from odp_api.adapters.notifications.redis_stream import RedisStreamInspectionAlertFeed
+from odp_api.adapters.redis_stream import RedisSocketStreamClient
 from odp_api.adapters.tasks.redis_stream import RedisStreamTaskQueue
 from odp_api.main import create_app
 from odp_api.modules.identity.models import Actor, Role
@@ -133,3 +135,82 @@ def test_runtime_composes_redis_stream_for_notification_reconciliation_and_task_
 
     assert isinstance(app.state.task_service._queue, RedisStreamTaskQueue)
     assert any(entry[0] == "odp:inspection-alerts" for entry in stream.entries)
+
+
+def test_runtime_fixture_alert_is_idempotent_across_app_restarts() -> None:
+    """A new app composition must not emit another copy of the stable demo alert."""
+    class FakeRedisStream:
+        def __init__(self) -> None:
+            self.entries: list[tuple[str, dict[str, str]]] = []
+            self.keys: set[str] = set()
+
+        def xadd(self, stream: str, fields: dict[str, str]) -> str:
+            self.entries.append((stream, fields))
+            return f"{len(self.entries)}-0"
+
+        def xlen(self, stream: str) -> int:
+            return len([entry for entry in self.entries if entry[0] == stream])
+
+        def xrange(self, stream: str) -> list[tuple[str, dict[str, str]]]:
+            return [entry for entry in self.entries if entry[0] == stream]
+
+        def setnx(self, key: str, value: str) -> bool:
+            if key in self.keys:
+                return False
+            self.keys.add(key)
+            return True
+
+    stream = FakeRedisStream()
+
+    create_app(stream_client=stream)
+    create_app(stream_client=stream)
+
+    assert len([entry for entry in stream.entries if entry[0] == "odp:inspection-alerts"]) == 1
+
+
+def test_rediss_stream_client_selects_tls_for_the_parsed_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Treating rediss as plain Redis would expose credentials and stream contents."""
+    import io
+
+    class FakeStream:
+        def __init__(self) -> None:
+            self.responses = io.BytesIO(b"+OK\r\n+OK\r\n:0\r\n")
+
+        def write(self, _: bytes) -> int:
+            return 0
+
+        def flush(self) -> None:
+            return None
+
+        def read(self, size: int = -1) -> bytes:
+            return self.responses.read(size)
+
+        def readline(self) -> bytes:
+            return self.responses.readline()
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def makefile(self, _: str) -> FakeStream:
+            return FakeStream()
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.server_hostname: str | None = None
+
+        def wrap_socket(self, connection: FakeConnection, *, server_hostname: str) -> FakeConnection:
+            self.server_hostname = server_hostname
+            return connection
+
+    context = FakeContext()
+    from odp_api.adapters import redis_stream
+
+    monkeypatch.setattr(redis_stream.socket, "create_connection", lambda address, timeout: FakeConnection())
+    monkeypatch.setattr(redis_stream.ssl, "create_default_context", lambda: context)
+
+    assert RedisSocketStreamClient("rediss://:secret@example.test:6380/4").xlen("odp:tasks") == 0
+    assert context.server_hostname == "example.test"

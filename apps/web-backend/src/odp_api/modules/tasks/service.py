@@ -41,12 +41,15 @@ class InMemoryTaskRepository:
         self._ids_by_key[task.idempotency_key] = task.task_id
         return task
 
-    def active(self) -> Sequence[TaskRecord]:
+    def outstanding(self) -> Sequence[TaskRecord]:
         return tuple(
             record
             for record in self._records.values()
             if record.status in {"PENDING", "RETRYING"}
         )
+
+    def unpublished(self) -> Sequence[TaskRecord]:
+        return tuple(record for record in self.outstanding() if record.published_at is None)
 
 
 class InMemoryTaskQueue:
@@ -106,7 +109,7 @@ class TaskService:
     ) -> TaskRecord:
         existing = self._repository.get_by_idempotency_key(idempotency_key)
         if existing is not None:
-            return existing
+            return self._publish_if_needed(existing)
         created_at = _payload_timestamp(payload.get("enqueued_at")) or datetime.now(UTC)
         record = TaskRecord(
             task_id=uuid4(),
@@ -119,10 +122,11 @@ class TaskService:
             frame_status="PENDING" if task_type == "vision_inference" else None,
         )
         persisted = self._repository.save(record)
-        if persisted.task_id == record.task_id:
-            self._queue.enqueue(persisted)
-        self._update_queue_depth()
-        return persisted
+        return self._publish_if_needed(persisted)
+
+    def recover_unpublished(self) -> list[TaskRecord]:
+        """Republish persisted work left behind when a prior queue write failed."""
+        return [self._publish_if_needed(task) for task in self._repository.unpublished()]
 
     def get(self, task_id: UUID) -> TaskRecord:
         record = self._repository.get(task_id)
@@ -161,7 +165,7 @@ class TaskService:
         """Mark queued vision frames older than two seconds as skipped work."""
         current_time = now or datetime.now(UTC)
         skipped: list[TaskRecord] = []
-        for task in self._repository.active():
+        for task in self._repository.outstanding():
             if task.task_type != "vision_inference" or task.frame_status != "PENDING":
                 continue
             if current_time - task.created_at <= timedelta(seconds=STALE_FRAME_CUTOFF_SECONDS):
@@ -210,11 +214,20 @@ class TaskService:
                 attempt_count=attempt_count,
                 last_error=error,
                 next_attempt_at=now + timedelta(seconds=2 ** (attempt_count - 1)),
+                published_at=None,
             )
         )
-        self._queue.enqueue(retry)
-        self._update_queue_depth()
-        return retry
+        return self._publish_if_needed(retry)
+
+    def _publish_if_needed(self, task: TaskRecord) -> TaskRecord:
+        if task.status not in {"PENDING", "RETRYING"} or task.published_at is not None:
+            self._update_queue_depth()
+            return task
+        try:
+            self._queue.enqueue(task)
+        except OSError as error:
+            return self._save(replace(task, last_error=f"queue publication pending: {error}"))
+        return self._save(replace(task, published_at=datetime.now(UTC)))
 
     def _save(self, task: TaskRecord) -> TaskRecord:
         saved = self._repository.save(task)
@@ -222,7 +235,7 @@ class TaskService:
         return saved
 
     def _update_queue_depth(self) -> None:
-        self._metrics.set_queue_depth(self._queue.depth())
+        self._metrics.set_queue_depth(len(self._repository.outstanding()))
 
 
 def _payload_timestamp(value: object) -> datetime | None:

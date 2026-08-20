@@ -3,6 +3,7 @@
 import json
 import socket
 import sqlite3
+import ssl
 from collections.abc import Sequence
 from pathlib import Path
 from threading import RLock
@@ -22,6 +23,13 @@ class SQLiteStreamClient:
                     entry_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     stream_name TEXT NOT NULL,
                     fields_json TEXT NOT NULL
+                )
+                """
+            )
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS stream_idempotency (
+                    idempotency_key TEXT PRIMARY KEY
                 )
                 """
             )
@@ -49,6 +57,13 @@ class SQLiteStreamClient:
             ).fetchall()
         return [(f"{entry_id}-0", json.loads(fields_json)) for entry_id, fields_json in rows]
 
+    def setnx(self, key: str, value: str) -> bool:
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                "INSERT OR IGNORE INTO stream_idempotency (idempotency_key) VALUES (?)", (key,)
+            )
+        return cursor.rowcount == 1
+
     def close(self) -> None:
         with self._lock:
             self._connection.close()
@@ -66,6 +81,7 @@ class RedisSocketStreamClient:
         self._password = unquote(parsed.password) if parsed.password else None
         self._database = int(parsed.path.lstrip("/") or "0")
         self._timeout_seconds = timeout_seconds
+        self._use_tls = parsed.scheme == "rediss"
 
     def xadd(self, stream: str, fields: dict[str, str]) -> str:
         command = ["XADD", stream, "*"]
@@ -84,8 +100,16 @@ class RedisSocketStreamClient:
             for entry_id, fields in response
         ]
 
+    def setnx(self, key: str, value: str) -> bool:
+        return self._execute("SET", key, value, "NX") is not None
+
     def _execute(self, *command: str) -> object:
-        with socket.create_connection((self._host, self._port), self._timeout_seconds) as connection:
+        connection = socket.create_connection((self._host, self._port), self._timeout_seconds)
+        if self._use_tls:
+            connection = ssl.create_default_context().wrap_socket(
+                connection, server_hostname=self._host
+            )
+        with connection:
             stream = connection.makefile("rwb")
             if self._password is not None:
                 _write_command(stream, "AUTH", self._password)

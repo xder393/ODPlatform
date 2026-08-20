@@ -34,10 +34,16 @@ class SQLiteTaskRepository:
                     created_at TEXT NOT NULL,
                     next_attempt_at TEXT,
                     last_error TEXT,
-                    frame_status TEXT
+                    frame_status TEXT,
+                    published_at TEXT
                 )
                 """
             )
+            columns = {
+                row[1] for row in self._connection.execute("PRAGMA table_info(task_records)")
+            }
+            if "published_at" not in columns:
+                self._connection.execute("ALTER TABLE task_records ADD COLUMN published_at TEXT")
 
     def get(self, task_id: UUID) -> TaskRecord | None:
         with self._lock:
@@ -69,8 +75,8 @@ class SQLiteTaskRepository:
                     """
                     INSERT INTO task_records (
                         task_id, task_type, idempotency_key, payload, status, attempt_count,
-                        created_at, next_attempt_at, last_error, frame_status
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        created_at, next_attempt_at, last_error, frame_status, published_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(task_id) DO UPDATE SET
                         task_type = excluded.task_type,
                         payload = excluded.payload,
@@ -79,7 +85,8 @@ class SQLiteTaskRepository:
                         created_at = excluded.created_at,
                         next_attempt_at = excluded.next_attempt_at,
                         last_error = excluded.last_error,
-                        frame_status = excluded.frame_status
+                        frame_status = excluded.frame_status,
+                        published_at = excluded.published_at
                     """,
                     values,
                 )
@@ -89,10 +96,20 @@ class SQLiteTaskRepository:
             self._connection.execute("COMMIT")
         return task
 
-    def active(self) -> Sequence[TaskRecord]:
+    def outstanding(self) -> Sequence[TaskRecord]:
         with self._lock:
             rows = self._connection.execute(
                 "SELECT * FROM task_records WHERE status IN ('PENDING', 'RETRYING')"
+            ).fetchall()
+        return tuple(_task_from_row(row) for row in rows)
+
+    def unpublished(self) -> Sequence[TaskRecord]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT * FROM task_records
+                WHERE status IN ('PENDING', 'RETRYING') AND published_at IS NULL
+                """
             ).fetchall()
         return tuple(_task_from_row(row) for row in rows)
 
@@ -114,6 +131,7 @@ def _task_values(task: TaskRecord) -> tuple[object, ...]:
         values["next_attempt_at"].isoformat() if values["next_attempt_at"] else None,
         values["last_error"],
         values["frame_status"],
+        values["published_at"].isoformat() if values["published_at"] else None,
     )
 
 
@@ -133,6 +151,11 @@ def _task_from_row(row: sqlite3.Row) -> TaskRecord:
         ),
         last_error=row["last_error"],
         frame_status=row["frame_status"],
+        published_at=(
+            datetime.fromisoformat(row["published_at"])
+            if row["published_at"] is not None
+            else None
+        ),
     )
 
 

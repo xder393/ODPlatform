@@ -54,6 +54,7 @@ def create_app(
         InMemoryTaskMetrics(),
         RedisStreamTaskAlertPublisher(runtime_stream_client),
     )
+    task_service.recover_unpublished()
     inspection_alert_feed = RedisStreamInspectionAlertFeed(runtime_stream_client)
 
     @asynccontextmanager
@@ -80,6 +81,7 @@ def create_app(
         FrameInput(fixture_name="scratch-frame-001", content=b"scratch-frame-001"),
         organization_id=UUID("00000000-0000-0000-0000-000000000001"),
         camera_id=UUID("00000000-0000-0000-0000-000000000002"),
+        event_id=UUID("00000000-0000-0000-0000-000000000003"),
     )
     reauthentication_service = ReauthenticationService(InMemoryReauthenticationStore())
     app.state.audit_service = audit_service

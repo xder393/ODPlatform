@@ -17,6 +17,8 @@ class RedisInspectionAlertClient(Protocol):
         self, stream: str
     ) -> Sequence[tuple[str, Mapping[str | bytes, str | bytes]]]: ...
 
+    def setnx(self, key: str, value: str) -> bool: ...
+
 
 class RedisStreamInspectionAlertFeed:
     """Uses an append-only stream while keeping router reads provider-neutral."""
@@ -28,6 +30,9 @@ class RedisStreamInspectionAlertFeed:
         self._stream_name = stream_name
 
     def publish(self, alert: InspectionAlert, line_id: UUID | None) -> None:
+        claim = getattr(self._client, "setnx", None)
+        if claim is not None and not claim(f"{self._stream_name}:event:{alert.event_id}", "1"):
+            return
         self._client.xadd(
             self._stream_name,
             {

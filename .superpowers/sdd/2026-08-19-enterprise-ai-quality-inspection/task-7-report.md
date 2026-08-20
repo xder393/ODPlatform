@@ -47,3 +47,29 @@ exit 0
 ```
 
 `docker compose -f deploy/compose.yaml config` could not run in this environment because the `docker` executable is not installed; YAML parsing above confirmed the Compose file is syntactically valid.
+
+## Fix round 2
+
+- Queue depth now uses the durable task-state outstanding-work ledger (`PENDING` and `RETRYING`) instead of Redis Stream `XLEN` history. Retries remain one outstanding unit; successful and completed work no longer inflate the metric.
+- `TaskRecord.published_at` provides an outbox marker. A queue publication failure leaves the durable record unpublished, and duplicate enqueue plus runtime startup reconciliation republishes it safely when the transport recovers.
+- The demo inspection fixture uses a stable event UUID. Stream clients expose atomic `SET NX`-style event claims, making fixture publication idempotent across app compositions and restarts.
+- The direct Redis Stream client now applies `ssl.create_default_context().wrap_socket(..., server_hostname=host)` for `rediss://` URLs.
+
+### Fix-round verification
+
+```text
+apps/web-backend/.venv/bin/pytest apps/web-backend/tests/modules/tasks/test_service.py apps/web-backend/tests/integration/test_notification_api.py -v
+17 passed, 1 warning
+
+apps/web-backend/.venv/bin/pytest apps/web-backend/tests -v
+48 passed, 1 warning
+
+apps/web-backend/.venv/bin/python -m compileall -q apps/web-backend/src/odp_api
+exit 0
+
+uvx ruff check --select F,I,UP <changed task/runtime files>
+All checks passed!
+
+git diff --check
+exit 0
+```
