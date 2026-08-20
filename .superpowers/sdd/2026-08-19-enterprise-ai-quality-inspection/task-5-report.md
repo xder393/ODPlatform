@@ -38,3 +38,17 @@ $ uv run --project apps/web-backend pytest apps/web-backend/tests -q
 collected 18 items
 18 passed, 1 warning in 0.17s
 ```
+
+## P1/P2 review follow-up — WebSocket and malformed JWT handling
+
+The inspection-event WebSocket no longer tries to run `HTTPBearer(Request)` during its handshake. It extracts a Bearer credential from the WebSocket authorization header, verifies it through the same runtime JWT authenticator and actor resolver, and closes missing or invalid connections with policy-violation code `1008`. Test-only FastAPI dependency overrides remain supported for the deterministic notification fixture.
+
+JWT verification now requires both decoded header and payload JSON values to be objects. Array-shaped signed sections and other malformed structures are normalized to `InvalidJwtSubject`, so HTTP authentication returns `401` rather than propagating a server error.
+
+Exact covering command and output:
+
+```text
+$ uv run --project apps/web-backend pytest apps/web-backend/tests/integration/test_runtime_authentication.py apps/web-backend/tests/integration/test_notification_api.py -q
+collected 7 items
+7 passed, 1 warning in 0.16s
+```

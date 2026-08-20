@@ -3,7 +3,7 @@ from hmac import compare_digest
 from typing import Callable, Protocol
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
@@ -83,6 +83,24 @@ def get_current_actor(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials"
         ) from error
+
+
+class WebSocketAuthenticationError(ValueError):
+    """Raised when a WebSocket handshake lacks a valid Bearer credential."""
+
+
+def get_current_websocket_actor(websocket: WebSocket) -> Actor:
+    """Authenticate a WebSocket's Authorization header without HTTPBearer(Request)."""
+    authorization = websocket.headers.get("authorization")
+    if authorization is None:
+        raise WebSocketAuthenticationError("Authentication required")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token or " " in token:
+        raise WebSocketAuthenticationError("Invalid credentials")
+    try:
+        return websocket.app.state.jwt_authenticator.authenticate(token)
+    except ValueError as error:
+        raise WebSocketAuthenticationError("Invalid credentials") from error
 
 
 class ReauthenticateRequest(BaseModel):

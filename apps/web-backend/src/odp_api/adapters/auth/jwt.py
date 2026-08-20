@@ -55,11 +55,22 @@ def extract_subject(token: str, secret: str) -> UUID:
         if not compare_digest(supplied_signature, expected_signature):
             raise InvalidJwtSubject("JWT signature is invalid.")
         header = json.loads(_decode_segment(encoded_header))
+        if not isinstance(header, dict):
+            raise InvalidJwtSubject("JWT header must be an object.")
         if header.get("alg") != "HS256":
             raise InvalidJwtSubject("JWT algorithm is not allowed.")
         payload = json.loads(_decode_segment(encoded_payload))
+        if not isinstance(payload, dict):
+            raise InvalidJwtSubject("JWT payload must be an object.")
         return UUID(payload["sub"])
-    except (KeyError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
+    except (
+        AttributeError,
+        KeyError,
+        TypeError,
+        ValueError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ) as error:
         if isinstance(error, InvalidJwtSubject):
             raise
         raise InvalidJwtSubject("JWT must contain a UUID subject claim.") from error

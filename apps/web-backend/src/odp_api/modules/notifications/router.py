@@ -9,7 +9,11 @@ from fastapi import APIRouter, Depends, Query, WebSocket
 
 from odp_api.modules.identity.models import Actor
 from odp_api.modules.identity.policies import AuthorizationDenied, authorize
-from odp_api.modules.identity.service import get_current_actor
+from odp_api.modules.identity.service import (
+    WebSocketAuthenticationError,
+    get_current_actor,
+    get_current_websocket_actor,
+)
 from odp_schemas.events import InspectionAlert
 
 
@@ -70,9 +74,12 @@ def create_notifications_router(
         ]
 
     @router.websocket("/ws/inspection-events")
-    async def inspection_events_socket(
-        websocket: WebSocket, actor: Actor = Depends(actor_provider)
-    ) -> None:
+    async def inspection_events_socket(websocket: WebSocket) -> None:
+        try:
+            actor = _websocket_actor(websocket, actor_provider)
+        except WebSocketAuthenticationError:
+            await websocket.close(code=1008)
+            return
         await websocket.accept()
         # The server emits each available event once per connection.  Recovery is
         # intentionally REST-based; there is no delivery acknowledgement protocol.
@@ -81,6 +88,15 @@ def create_notifications_router(
                 await websocket.send_json(stored.alert.model_dump(mode="json"))
 
     return router
+
+
+def _websocket_actor(websocket: WebSocket, actor_provider: Callable[[], Actor]) -> Actor:
+    if actor_provider is not get_current_actor:
+        return actor_provider()
+    test_override = websocket.app.dependency_overrides.get(get_current_actor)
+    if test_override is not None:
+        return test_override()
+    return get_current_websocket_actor(websocket)
 
 
 def _is_authorized(actor: Actor, stored: StoredInspectionAlert) -> bool:
