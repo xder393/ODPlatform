@@ -4,6 +4,10 @@ from uuid import UUID
 from odp_api.adapters.vision.mock import MockVisionAdapter
 from odp_api.modules.cases.router import InMemoryCaseRepository, create_cases_router
 from odp_api.modules.inspection.service import InspectionService
+from odp_api.modules.notifications.router import (
+    InMemoryInspectionAlertRepository,
+    create_notifications_router,
+)
 from odp_api.ports.vision import FrameInput
 from odp_api.settings import Settings
 
@@ -27,4 +31,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         camera_id=UUID("00000000-0000-0000-0000-000000000002"),
     )
     app.include_router(create_cases_router(InMemoryCaseRepository((fixture_case,))))
+    fixture_alerts = tuple(
+        event.to_alert() for event in fixture_case.inspection_events
+    )
+    app.include_router(create_notifications_router(InMemoryInspectionAlertRepository(fixture_alerts)))
     return app

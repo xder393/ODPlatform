@@ -52,6 +52,17 @@ class InspectionEvent:
             input_frame_sha256=input_frame_sha256,
         )
 
+    def to_alert(self) -> InspectionAlert:
+        """Return the shared realtime contract for this immutable event."""
+        return InspectionAlert(
+            event_id=self.event_id,
+            organization_id=self.organization_id,
+            camera_id=self.camera_id,
+            occurred_at=self.occurred_at,
+            defect_class=self.defect_class,
+            confidence=self.confidence,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class DefectCase:
