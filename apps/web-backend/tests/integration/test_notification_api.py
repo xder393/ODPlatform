@@ -16,6 +16,7 @@ from odp_api.modules.notifications.router import (
     create_notifications_router,
 )
 from odp_api.modules.identity.models import Actor, Role
+from odp_api.modules.identity.service import get_current_actor
 from odp_schemas.events import InspectionAlert
 
 
@@ -31,9 +32,8 @@ def test_reconnect_returns_unseen_alert_and_websocket_emits_alert_contract() -> 
     )
     app = FastAPI()
     actor = Actor(uuid4(), alert.organization_id, Role.ADMINISTRATOR, frozenset())
-    app.include_router(
-        create_notifications_router(InMemoryInspectionAlertRepository((alert,)), lambda: actor)
-    )
+    app.dependency_overrides[get_current_actor] = lambda: actor
+    app.include_router(create_notifications_router(InMemoryInspectionAlertRepository((alert,))))
     client = TestClient(app)
 
     reconciled = client.get("/api/v1/inspection-events?updated_after=2026-08-18T00:00:00Z")

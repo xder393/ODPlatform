@@ -1,7 +1,7 @@
 from pathlib import Path
 import sys
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -14,13 +14,21 @@ sys.path[:0] = [str(WEB_BACKEND_SRC), str(SHARED_SCHEMAS_SRC)]
 from odp_api.main import create_app
 from odp_api.modules.cases.router import InMemoryCaseRepository, create_cases_router
 from odp_api.modules.identity.models import Actor, Role
+from odp_api.modules.identity.service import get_current_actor
 from odp_api.modules.inspection.models import DefectCase, InspectionEvent
 from odp_schemas.events import InspectionAlert
 
 
 def test_fixture_case_can_be_listed_with_reproducible_detection_metadata_and_reviewed() -> None:
     """A missing fixture-to-case workflow or transition route makes this fail."""
-    client = TestClient(create_app())
+    app = create_app()
+    app.dependency_overrides[get_current_actor] = lambda: Actor(
+        UUID("00000000-0000-0000-0000-000000000003"),
+        UUID("00000000-0000-0000-0000-000000000001"),
+        Role.ADMINISTRATOR,
+        frozenset(),
+    )
+    client = TestClient(app)
 
     listed = client.get("/api/v1/cases")
 
@@ -78,7 +86,8 @@ def test_cases_filter_accepts_timezone_less_updated_after_and_returns_newest_fir
     repository.save(newer_case)
     actor = Actor(uuid4(), older_case.organization_id, Role.ADMINISTRATOR, frozenset())
     app = FastAPI()
-    app.include_router(create_cases_router(repository, lambda: actor))
+    app.dependency_overrides[get_current_actor] = lambda: actor
+    app.include_router(create_cases_router(repository))
     client = TestClient(app, raise_server_exceptions=False)
 
     response = client.get("/api/v1/cases?updated_after=2000-01-01T00:00:00")

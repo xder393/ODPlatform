@@ -24,3 +24,17 @@ Reviewed tenant filtering, exact line authorization, actor dependency injection,
 ## Notes
 
 Pre-existing untracked `.venv-runtime/` and `apps/web-backend/uv.lock` were not included.
+
+## P0 security follow-up — runtime authentication
+
+Removed the global runtime dependency override that supplied a fixed administrator. Runtime protected routes now require an HS256-verified Bearer JWT, resolve its UUID subject through the configured actor repository, and return `401` for missing, malformed, invalidly signed, unconfigured, or unknown-subject credentials. The runtime contains no demo administrator and no public password verifier; reauthentication receives its actor solely through the authenticated JWT dependency. Deterministic actors are limited to FastAPI dependency overrides in test application composition.
+
+Added integration coverage for missing and invalid credentials, distinct authenticated tenant callers, and password reauthentication for the verified JWT subject.
+
+Exact covering command and output:
+
+```text
+$ uv run --project apps/web-backend pytest apps/web-backend/tests -q
+collected 18 items
+18 passed, 1 warning in 0.17s
+```

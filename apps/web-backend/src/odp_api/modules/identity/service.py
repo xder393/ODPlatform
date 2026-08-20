@@ -3,7 +3,8 @@ from hmac import compare_digest
 from typing import Callable, Protocol
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 from odp_api.modules.identity.models import Actor
@@ -66,9 +67,22 @@ class ReauthenticationService:
             raise RecentReauthenticationRequired("Recent reauthentication is required.")
 
 
-def get_current_actor() -> Actor:
-    """Dependency intentionally overridden by an authentication adapter or tests."""
-    raise HTTPException(status_code=401, detail="Authentication required")
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def get_current_actor(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+) -> Actor:
+    """Authenticate a Bearer JWT using the runtime-configured actor resolver."""
+    if credentials is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    try:
+        return request.app.state.jwt_authenticator.authenticate(credentials.credentials)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials"
+        ) from error
 
 
 class ReauthenticateRequest(BaseModel):
