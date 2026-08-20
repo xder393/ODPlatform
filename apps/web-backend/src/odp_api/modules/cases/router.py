@@ -92,6 +92,8 @@ def create_cases_router(repository: InMemoryCaseRepository) -> APIRouter:
 
     @router.get("", response_model=list[CaseSummary])
     def list_cases(updated_after: datetime | None = Query(default=None)) -> list[CaseSummary]:
+        if updated_after is not None and updated_after.tzinfo is None:
+            updated_after = updated_after.replace(tzinfo=UTC)
         return [CaseSummary.from_case(case) for case in repository.list(updated_after)]
 
     @router.post("/{case_id}/transitions", response_model=CaseSummary)
