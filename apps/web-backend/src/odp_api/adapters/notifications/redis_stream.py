@@ -13,20 +13,13 @@ from odp_schemas.events import InspectionAlert
 class RedisInspectionAlertClient(Protocol):
     def xadd(self, stream: str, fields: dict[str, str]) -> object: ...
 
+    def xadd_once(
+        self, stream: str, claim_key: str, fields: dict[str, str]
+    ) -> object: ...
+
     def xrange(
         self, stream: str
     ) -> Sequence[tuple[str, Mapping[str | bytes, str | bytes]]]: ...
-
-    def setnx(self, key: str, value: str) -> bool: ...
-
-    def eval(self, script: str, keys: list[str], args: list[str]) -> object: ...
-
-
-_CLAIM_AND_APPEND = """
-local claimed = redis.call('SET', KEYS[1], '1', 'NX')
-if not claimed then return nil end
-return redis.call('XADD', KEYS[2], '*', unpack(ARGV))
-"""
 
 
 class RedisStreamInspectionAlertFeed:
@@ -44,16 +37,13 @@ class RedisStreamInspectionAlertFeed:
             "updated_at": alert.occurred_at.isoformat(),
             "line_id": str(line_id) if line_id is not None else "",
         }
-        evaluate = getattr(self._client, "eval", None)
-        if evaluate is not None:
-            evaluate(
-                _CLAIM_AND_APPEND,
-                [f"{self._stream_name}:event:{alert.event_id}", self._stream_name],
-                [item for pair in fields.items() for item in pair],
+        append_once = getattr(self._client, "xadd_once", None)
+        if append_once is not None:
+            append_once(
+                self._stream_name,
+                f"{self._stream_name}:event:{alert.event_id}",
+                fields,
             )
-            return
-        claim = getattr(self._client, "setnx", None)
-        if claim is not None and not claim(f"{self._stream_name}:event:{alert.event_id}", "1"):
             return
         self._client.xadd(self._stream_name, fields)
 

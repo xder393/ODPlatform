@@ -9,6 +9,20 @@ from pathlib import Path
 from threading import RLock
 from urllib.parse import unquote, urlparse
 
+_RECOVERABLE_XADD_ONCE = """
+local state = redis.call('GET', KEYS[1])
+if state == 'published' or state == '1' then return nil end
+if not state then
+    redis.call('SET', KEYS[1], 'pending', 'NX')
+end
+local appended = redis.pcall('XADD', KEYS[2], '*', unpack(ARGV))
+if type(appended) == 'table' and appended.err then
+    return redis.error_reply(appended.err)
+end
+redis.call('SET', KEYS[1], 'published', 'XX')
+return appended
+"""
+
 
 class SQLiteStreamClient:
     """Durable stream command surface used only outside the Redis-backed runtime."""
@@ -42,6 +56,20 @@ class SQLiteStreamClient:
             )
         return f"{cursor.lastrowid}-0"
 
+    def xadd_once(self, stream: str, claim_key: str, fields: dict[str, str]) -> str | None:
+        """Claim and append in one SQLite transaction."""
+        with self._lock, self._connection:
+            claim = self._connection.execute(
+                "INSERT OR IGNORE INTO stream_idempotency (idempotency_key) VALUES (?)", (claim_key,)
+            )
+            if claim.rowcount != 1:
+                return None
+            cursor = self._connection.execute(
+                "INSERT INTO stream_entries (stream_name, fields_json) VALUES (?, ?)",
+                (stream, json.dumps(fields, sort_keys=True)),
+            )
+        return f"{cursor.lastrowid}-0"
+
     def xlen(self, stream: str) -> int:
         with self._lock:
             row = self._connection.execute(
@@ -68,17 +96,7 @@ class SQLiteStreamClient:
         """Atomically claim an event key and append its serialized stream payload."""
         claim_key, stream = keys
         fields = dict(zip(args[::2], args[1::2], strict=True))
-        with self._lock, self._connection:
-            claim = self._connection.execute(
-                "INSERT OR IGNORE INTO stream_idempotency (idempotency_key) VALUES (?)", (claim_key,)
-            )
-            if claim.rowcount != 1:
-                return None
-            cursor = self._connection.execute(
-                "INSERT INTO stream_entries (stream_name, fields_json) VALUES (?, ?)",
-                (stream, json.dumps(fields, sort_keys=True)),
-            )
-        return f"{cursor.lastrowid}-0"
+        return self.xadd_once(stream, claim_key, fields)
 
     def close(self) -> None:
         with self._lock:
@@ -105,6 +123,12 @@ class RedisSocketStreamClient:
             command.extend((key, value))
         result = self._execute(*command)
         return _decode(result)
+
+    def xadd_once(self, stream: str, claim_key: str, fields: dict[str, str]) -> str | None:
+        """Retry a pending append while suppressing completed event publications."""
+        args = [item for pair in fields.items() for item in pair]
+        result = self.eval(_RECOVERABLE_XADD_ONCE, [claim_key, stream], args)
+        return None if result is None else _decode(result)
 
     def xlen(self, stream: str) -> int:
         return int(self._execute("XLEN", stream))

@@ -154,11 +154,13 @@ def test_runtime_fixture_alert_is_idempotent_across_app_restarts() -> None:
         def xrange(self, stream: str) -> list[tuple[str, dict[str, str]]]:
             return [entry for entry in self.entries if entry[0] == stream]
 
-        def setnx(self, key: str, value: str) -> bool:
-            if key in self.keys:
-                return False
-            self.keys.add(key)
-            return True
+        def xadd_once(
+            self, stream: str, claim_key: str, fields: dict[str, str]
+        ) -> str | None:
+            if claim_key in self.keys:
+                return None
+            self.keys.add(claim_key)
+            return self.xadd(stream, fields)
 
     stream = FakeRedisStream()
 
@@ -168,37 +170,38 @@ def test_runtime_fixture_alert_is_idempotent_across_app_restarts() -> None:
     assert len([entry for entry in stream.entries if entry[0] == "odp:inspection-alerts"]) == 1
 
 
-def test_atomic_alert_claim_recovers_after_a_pre_append_failure_without_duplication() -> None:
-    """Persisting a SET NX claim before XADD would lose this alert on retry."""
-    class AtomicFakeRedisStream:
+def test_alert_publication_recovers_a_persisted_claim_after_xadd_fails() -> None:
+    """A restart must finish a pending claim without duplicating the stream event."""
+    class RecoverableRedisStream:
         def __init__(self) -> None:
-            self.claims: set[str] = set()
+            self.claims: dict[str, str] = {}
             self.entries: list[tuple[str, dict[str, str]]] = []
             self.fail_after_claim = True
 
         def setnx(self, key: str, value: str) -> bool:
             if key in self.claims:
                 return False
-            self.claims.add(key)
+            self.claims[key] = value
             return True
 
         def xadd(self, stream: str, fields: dict[str, str]) -> str:
             if self.fail_after_claim:
                 self.fail_after_claim = False
-                raise OSError("failure after SET NX and before XADD")
+                raise OSError("XADD failed after Redis preserved the claim")
             self.entries.append((stream, fields))
             return "1-0"
 
-        def eval(self, script: str, keys: list[str], args: list[str]) -> str | None:
-            claim_key, stream = keys
-            if claim_key in self.claims:
+        def xadd_once(
+            self, stream: str, claim_key: str, fields: dict[str, str]
+        ) -> str | None:
+            if self.claims.get(claim_key) in {"1", "published"}:
                 return None
-            self.claims.add(claim_key)
+            self.claims.setdefault(claim_key, "pending")
             if self.fail_after_claim:
                 self.fail_after_claim = False
-                self.claims.remove(claim_key)
-                raise OSError("atomic operation rolled back before XADD")
-            self.entries.append((stream, dict(zip(args[::2], args[1::2], strict=True))))
+                raise OSError("XADD failed while the pending claim remained")
+            self.entries.append((stream, fields))
+            self.claims[claim_key] = "published"
             return "1-0"
 
         def xrange(self, stream: str) -> list[tuple[str, dict[str, str]]]:
@@ -212,14 +215,18 @@ def test_atomic_alert_claim_recovers_after_a_pre_append_failure_without_duplicat
         defect_class="scratch",
         confidence=0.964,
     )
-    redis = AtomicFakeRedisStream()
-    feed = RedisStreamInspectionAlertFeed(redis)
+    redis = RecoverableRedisStream()
+    claim_key = f"odp:inspection-alerts:event:{alert.event_id}"
 
-    with pytest.raises(OSError, match="rolled back"):
-        feed.publish(alert, line_id=None)
-    feed.publish(alert, line_id=None)
-    feed.publish(alert, line_id=None)
+    with pytest.raises(OSError, match="claim"):
+        RedisStreamInspectionAlertFeed(redis).publish(alert, line_id=None)
+    assert redis.claims[claim_key] == "pending"
+    assert redis.entries == []
 
+    RedisStreamInspectionAlertFeed(redis).publish(alert, line_id=None)
+    RedisStreamInspectionAlertFeed(redis).publish(alert, line_id=None)
+
+    assert redis.claims[claim_key] == "published"
     assert len(redis.entries) == 1
 
 

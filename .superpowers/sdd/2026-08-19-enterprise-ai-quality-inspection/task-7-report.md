@@ -98,3 +98,33 @@ All checks passed!
 git diff --check
 exit 0
 ```
+
+## Fix round 4
+
+- Replaced the Redis alert feed's terminal `SET NX` claim with a recoverable append-once client boundary. Redis claims now move through `pending` and `published` states; an `XADD` command error leaves `pending` durable, and a retry or a newly composed feed completes the append. A `published` marker continues to suppress successful duplicates, while the legacy `"1"` marker remains treated as already published to avoid duplicating previously successful events during upgrade.
+- `RedisSocketStreamClient.xadd_once` uses `redis.pcall` so the script records `pending`, returns the `XADD` error without assuming script rollback, and marks the event `published` only after `XADD` succeeds. `SQLiteStreamClient.xadd_once` retains the equivalent claim-plus-append SQLite transaction.
+- Removed the unsafe alert-feed fallback that performed `SET NX` followed by a separate `XADD`. Clients without the runtime append-once capability receive an ordinary append; both configured runtime clients implement append-once.
+- Replaced the rollback-assuming regression fake with a Redis-like failure injector. The test asserts that the first failure leaves the claim intact as `pending` and leaves the stream empty, reconstructs the feed to model a restart, then proves retry plus duplicate retry produce exactly one stream event and a `published` marker.
+
+### Fix-round verification
+
+```text
+apps/web-backend/.venv/bin/pytest apps/web-backend/tests/integration/test_notification_api.py::test_alert_publication_recovers_a_persisted_claim_after_xadd_fails -v
+RED: 1 failed; persisted claim was "1" instead of the required recoverable "published" result after retry
+GREEN: 1 passed, 1 warning
+
+apps/web-backend/.venv/bin/pytest apps/web-backend/tests/modules/tasks/test_service.py apps/web-backend/tests/integration/test_notification_api.py -v
+18 passed, 1 warning
+
+apps/web-backend/.venv/bin/pytest apps/web-backend/tests -v
+49 passed, 1 warning
+
+apps/web-backend/.venv/bin/python -m compileall -q apps/web-backend/src/odp_api
+exit 0
+
+uvx ruff check --select F,I,UP apps/web-backend/src/odp_api/adapters/notifications/redis_stream.py apps/web-backend/src/odp_api/adapters/redis_stream.py apps/web-backend/tests/integration/test_notification_api.py
+All checks passed!
+
+git diff --check
+exit 0
+```
