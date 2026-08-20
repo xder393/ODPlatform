@@ -1,42 +1,58 @@
 import sys
+from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 from uuid import uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
+from pypdf import PdfWriter
+from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 WEB_BACKEND_SRC = Path(__file__).parents[3] / "src"
 sys.path.insert(0, str(WEB_BACKEND_SRC))
 
-from odp_api.adapters.retrieval.pgvector import PgVectorRetrievalAdapter
+from odp_api.adapters.retrieval.pgvector import (
+    PgVectorPostgresAdapter,
+    PgVectorRetrievalAdapter,
+)
 from odp_api.modules.knowledge.ingest import KnowledgeIngestionService
-from odp_api.modules.knowledge.models import KnowledgeDocumentStatus
+from odp_api.modules.knowledge.models import (
+    KnowledgeChunk,
+    KnowledgeDocument,
+    KnowledgeDocumentStatus,
+    KnowledgeParentChunk,
+)
 from odp_api.ports.retrieval import RetrievalFilters
 
 
 def make_two_page_pdf() -> bytes:
-    """Create a small, valid PDF with two text paragraphs on each page."""
-    objects = [
-        "<< /Type /Catalog /Pages 2 0 R >>",
-        "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>",
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>",
-        "<< /Length 94 >>\nstream\nBT /F1 12 Tf 72 720 Td (Page one pressure limit is 20 bar.) Tj 0 -24 Td (Paragraph two requires inspection.) Tj ET\nendstream",
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 6 0 R >>",
-        "<< /Length 89 >>\nstream\nBT /F1 12 Tf 72 720 Td (Page two requires protective gloves.) Tj 0 -24 Td (Escalate leaks immediately.) Tj ET\nendstream",
-    ]
-    output = bytearray(b"%PDF-1.4\n")
-    offsets = [0]
-    for number, body in enumerate(objects, start=1):
-        offsets.append(len(output))
-        output.extend(f"{number} 0 obj\n{body}\nendobj\n".encode())
-    xref = len(output)
-    output.extend(f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode())
-    output.extend(b"".join(f"{offset:010d} 00000 n \n".encode() for offset in offsets[1:]))
-    output.extend(
-        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+    """Create a realistic filtered PDF that requires a full PDF parser."""
+    writer = PdfWriter()
+    font = writer._add_object(
+        DictionaryObject(
+            {
+                NameObject("/Type"): NameObject("/Font"),
+                NameObject("/Subtype"): NameObject("/Type1"),
+                NameObject("/BaseFont"): NameObject("/Helvetica"),
+            }
+        )
     )
-    return bytes(output)
+    page_texts = (
+        b"BT /F1 12 Tf 72 720 Td (Page one pressure limit is 20 bar.) Tj 0 -24 Td (Paragraph two requires inspection.) Tj ET",
+        b"BT /F1 12 Tf 72 720 Td (Page two requires protective gloves.) Tj 0 -24 Td (Escalate leaks immediately.) Tj ET",
+    )
+    for text in page_texts:
+        page = writer.add_blank_page(width=612, height=792)
+        stream = DecodedStreamObject()
+        stream.set_data(text)
+        page[NameObject("/Contents")] = writer._add_object(stream.flate_encode())
+        page[NameObject("/Resources")] = DictionaryObject(
+            {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})}
+        )
+    output = BytesIO()
+    writer.write(output)
+    return output.getvalue()
 
 
 def make_service() -> tuple[KnowledgeIngestionService, PgVectorRetrievalAdapter]:
@@ -44,7 +60,7 @@ def make_service() -> tuple[KnowledgeIngestionService, PgVectorRetrievalAdapter]
     return KnowledgeIngestionService(index, chunk_size_words=4, overlap_words=2), index
 
 
-def make_docx() -> bytes:
+def make_docx(*, include_package_relationship: bool = True) -> bytes:
     output = BytesIO()
     with ZipFile(output, "w", ZIP_DEFLATED) as archive:
         archive.writestr(
@@ -55,7 +71,39 @@ def make_docx() -> bytes:
             "word/document.xml",
             """<?xml version=\"1.0\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>Wear safety gloves.</w:t></w:r></w:p><w:p><w:r><w:t>Record every pressure deviation.</w:t></w:r></w:p></w:body></w:document>""",
         )
+        if include_package_relationship:
+            archive.writestr(
+                "_rels/.rels",
+                """<?xml version=\"1.0\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>""",
+            )
     return output.getvalue()
+
+
+class RecordingPostgresExecutor:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def fetch_all(self, sql: str, parameters: dict[str, object]) -> list[dict[str, object]]:
+        self.calls.append((sql, parameters))
+        return [
+            {
+                "chunk_id": str(uuid4()),
+                "parent_chunk_id": str(uuid4()),
+                "document_id": str(uuid4()),
+                "organization_id": str(parameters["organization_id"]),
+                "document_version": 2,
+                "source_name": "press rules",
+                "text": "Pressure limit is 20 bar.",
+                "page_number": 1,
+                "paragraph_number": 1,
+                "vector_score": 0.75,
+                "bm25_score": 1.0,
+                "combined_score": 0.875,
+            }
+        ]
+
+    def execute(self, sql: str, parameters: dict[str, object]) -> None:
+        self.calls.append((sql, parameters))
 
 
 def test_ingests_a_two_page_pdf_with_parent_child_overlap_and_provenance() -> None:
@@ -82,6 +130,20 @@ def test_ingests_a_two_page_pdf_with_parent_child_overlap_and_provenance() -> No
     ]
     assert all(chunk.parent_chunk_id is not None for chunk in chunks)
     assert chunks[0].text.split()[-2:] == chunks[1].text.split()[:2]
+
+
+def test_records_a_failed_document_when_pypdf_rejects_malformed_pdf() -> None:
+    service, _ = make_service()
+
+    document = service.ingest(
+        organization_id=uuid4(),
+        source_name="corrupt rules",
+        filename="corrupt-rules.pdf",
+        content=b"%PDF-1.7\nthis is not a PDF object graph\n%%EOF",
+    )
+
+    assert document.status == "FAILED"
+    assert document.failure_reason == "Invalid PDF document."
 
 
 def test_new_source_version_supersedes_the_previous_document() -> None:
@@ -122,6 +184,20 @@ def test_ingests_a_valid_docx_and_retains_paragraph_provenance() -> None:
         (1, 1),
         (1, 2),
     ]
+
+
+def test_rejects_docx_zip_without_office_document_relationship() -> None:
+    service, _ = make_service()
+
+    document = service.ingest(
+        organization_id=uuid4(),
+        source_name="spoofed rules",
+        filename="spoofed-rules.docx",
+        content=make_docx(include_package_relationship=False),
+    )
+
+    assert document.status == "FAILED"
+    assert document.failure_reason == "Invalid DOCX document."
 
 
 def test_search_never_returns_another_tenants_chunk() -> None:
@@ -167,3 +243,77 @@ def test_rejects_unsupported_content_as_a_failed_document() -> None:
     assert document.status == "FAILED"
     assert document.failure_reason == "Unsupported document type: text/plain"
     assert KnowledgeDocumentStatus.__args__ == ("INDEXED", "SUPERSEDED", "FAILED")
+
+
+def test_postgres_retrieval_executes_tenant_scoped_normalized_hybrid_query() -> None:
+    executor = RecordingPostgresExecutor()
+    adapter = PgVectorPostgresAdapter(executor, embed=lambda _: [0.25, -0.25])
+    organization_id = uuid4()
+    line_id = uuid4()
+
+    results = adapter.search(
+        "pressure limit",
+        organization_id,
+        RetrievalFilters(line_id=line_id, product_category="widget", limit=3),
+    )
+
+    assert [result.score for result in results] == [0.875]
+    sql, parameters = executor.calls[-1]
+    assert "WHERE c.organization_id = %(organization_id)s" in sql
+    assert "vector_score" in sql and "bm25_score" in sql and "combined_score" in sql
+    assert parameters == {
+        "query": "pressure limit",
+        "query_embedding": "[0.25,-0.25]",
+        "organization_id": organization_id,
+        "document_status": "INDEXED",
+        "line_id": line_id,
+        "product_category": "widget",
+        "limit": 3,
+    }
+
+
+def test_postgres_index_persists_tenant_scoped_document_parent_and_child_rows() -> None:
+    executor = RecordingPostgresExecutor()
+    adapter = PgVectorPostgresAdapter(executor, embed=lambda _: [0.25, -0.25])
+    organization_id = uuid4()
+    document_id = uuid4()
+    parent_id = uuid4()
+    document = KnowledgeDocument(
+        document_id=document_id,
+        organization_id=organization_id,
+        source_name="press rules",
+        filename="press-rules.pdf",
+        version=1,
+        media_type="application/pdf",
+        content_sha256="a" * 64,
+        status="INDEXED",
+        indexed_at=datetime.now(UTC),
+    )
+    parent = KnowledgeParentChunk(
+        parent_chunk_id=parent_id,
+        document_id=document_id,
+        organization_id=organization_id,
+        text="Pressure limit is 20 bar.",
+        page_number=1,
+        paragraph_number=1,
+    )
+    child = KnowledgeChunk(
+        chunk_id=uuid4(),
+        parent_chunk_id=parent_id,
+        document_id=document_id,
+        organization_id=organization_id,
+        text="Pressure limit is 20 bar.",
+        page_number=1,
+        paragraph_number=1,
+        child_index=0,
+    )
+
+    adapter.index(document, [parent], [child])
+
+    assert len(executor.calls) == 4
+    assert "UPDATE knowledge_documents" in executor.calls[0][0]
+    assert "INSERT INTO knowledge_documents" in executor.calls[1][0]
+    assert "INSERT INTO knowledge_parent_chunks" in executor.calls[2][0]
+    assert "INSERT INTO knowledge_chunk_index" in executor.calls[3][0]
+    assert all(parameters["organization_id"] == organization_id for _, parameters in executor.calls)
+    assert executor.calls[-1][1]["embedding"] == "[0.25,-0.25]"

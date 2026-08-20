@@ -24,3 +24,32 @@ No PostgreSQL migration was runnable: the repository has no Alembic configuratio
 ## Scope
 
 This task intentionally does not implement LLM generation, advice responses, or routes; those belong to Task 9.
+
+## Fix round 1
+
+- Added `apps/web-backend/migrations/0001_knowledge_pgvector.sql`, which enables pgvector and creates tenant-scoped document, parent-chunk, and child-chunk tables. It includes the tenant/document index, HNSW cosine vector index, and lexical GIN index.
+- Replaced the previous SQL documentation constant with `PgVectorPostgresAdapter`: it persists versions and chunks through a parameterized executor port and executes the hybrid retrieval SQL. The query applies the organization filter before both scoring paths, calculates raw cosine and BM25 values, independently normalizes each component, and returns their combined score.
+- Added deterministic adapter-contract tests that invoke the production adapter with a recording executor. They prove bound query parameters contain the requested organization, status, line/product filters, query vector, and limit; they also prove all document/parent/child persistence operations carry the organization ID.
+- Added required `pypdf>=5.0.0` backend dependency and removed the fallback parser. The two-page fixture is now a `pypdf`-written Flate-compressed PDF, and malformed parser input is recorded as a failed upload.
+- Strengthened DOCX validation by parsing `[Content_Types].xml`, package-level `_rels/.rels`, and the WordprocessingML root/body. A ZIP lacking the required office-document relationship is rejected.
+
+### Fix-round verification
+
+```text
+$ apps/web-backend/.venv/bin/pytest apps/web-backend/tests/modules/knowledge/test_ingest.py -v
+9 passed in 0.04s
+
+$ apps/web-backend/.venv/bin/pytest apps/web-backend/tests -v
+58 passed, 1 warning in 0.26s
+
+$ apps/web-backend/.venv/bin/python -m compileall -q apps/web-backend/src/odp_api
+exit 0
+
+$ uvx ruff check --select F,I,UP <Task 8 changed source and tests>
+All checks passed!
+
+$ git diff --check
+exit 0
+```
+
+`psql`, `postgres`, and `initdb` are unavailable in this worktree, so the pgvector migration cannot be executed locally. The executable contract tests cover its adapter boundary; a deployment PostgreSQL 16 + pgvector instance must apply the migration before wiring `PgVectorPostgresAdapter` into runtime composition.

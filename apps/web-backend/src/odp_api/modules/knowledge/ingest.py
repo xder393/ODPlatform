@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import mimetypes
-import re
 from collections.abc import Iterable
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -20,10 +19,15 @@ from odp_api.modules.knowledge.models import (
     KnowledgeParentChunk,
 )
 from odp_api.ports.retrieval import KnowledgeIndexPort
+from pypdf import PdfReader
 
 PDF_MEDIA_TYPE = "application/pdf"
 DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 _WORD_NAMESPACE = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+_CONTENT_TYPES_NAMESPACE = "{http://schemas.openxmlformats.org/package/2006/content-types}"
+_PACKAGE_RELATIONSHIPS_NAMESPACE = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+_OFFICE_DOCUMENT_RELATIONSHIP = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"
+_WORD_DOCUMENT_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
 
 
 class KnowledgeIngestionService:
@@ -158,11 +162,6 @@ def _extract_pdf_paragraphs(content: bytes) -> list[tuple[int, int, str]]:
     if not content.startswith(b"%PDF-") or b"%%EOF" not in content:
         raise ValueError("Invalid PDF document.")
     try:
-        from pypdf import PdfReader  # type: ignore[import-not-found]
-    except ImportError:
-        return _extract_simple_pdf_paragraphs(content)
-
-    try:
         reader = PdfReader(BytesIO(content))
         paragraphs = []
         for page_number, page in enumerate(reader.pages, start=1):
@@ -173,51 +172,36 @@ def _extract_pdf_paragraphs(content: bytes) -> list[tuple[int, int, str]]:
         raise ValueError("Invalid PDF document.") from error
 
 
-def _extract_simple_pdf_paragraphs(content: bytes) -> list[tuple[int, int, str]]:
-    """Fallback for uncompressed text PDFs when an optional parser is absent."""
-    objects = {
-        int(number): body
-        for number, body in re.findall(
-            rb"(?m)^(\d+)\s+\d+\s+obj\s*(.*?)\s*endobj", content, re.DOTALL
-        )
-    }
-    pages = [
-        body
-        for _, body in sorted(objects.items())
-        if re.search(rb"/Type\s*/Page\b", body) and not re.search(rb"/Type\s*/Pages\b", body)
-    ]
-    if not pages:
-        raise ValueError("Invalid PDF document.")
-    extracted: list[tuple[int, int, str]] = []
-    for page_number, page in enumerate(pages, start=1):
-        content_ref = re.search(rb"/Contents\s+(\d+)\s+\d+\s+R", page)
-        stream_owner = objects.get(int(content_ref.group(1))) if content_ref else page
-        if stream_owner is None:
-            raise ValueError("Invalid PDF document.")
-        stream = re.search(rb"stream\r?\n(.*?)\r?\n?endstream", stream_owner, re.DOTALL)
-        if stream is None or b"/Filter" in stream_owner:
-            raise ValueError("PDF extraction requires an installed PDF parser.")
-        literals = re.findall(rb"\(((?:\\.|[^\\()])*)\)\s*Tj", stream.group(1))
-        for paragraph_number, literal in enumerate(literals, start=1):
-            text = _decode_pdf_literal(literal).strip()
-            if text:
-                extracted.append((page_number, paragraph_number, text))
-    return extracted
-
-
-def _decode_pdf_literal(value: bytes) -> str:
-    escaped = re.sub(rb"\\([nrtbf()\\])", lambda match: {b"n": b"\n", b"r": b"\r", b"t": b"\t", b"b": b"\b", b"f": b"\f"}.get(match.group(1), match.group(1)), value)
-    return escaped.decode("latin-1")
-
-
 def _extract_docx_paragraphs(content: bytes) -> list[tuple[int, int, str]]:
     try:
         with ZipFile(BytesIO(content)) as archive:
-            if "[Content_Types].xml" not in archive.namelist() or "word/document.xml" not in archive.namelist():
+            if {
+                "[Content_Types].xml",
+                "_rels/.rels",
+                "word/document.xml",
+            }.difference(archive.namelist()):
                 raise ValueError("Invalid DOCX document.")
+            content_types = ElementTree.fromstring(archive.read("[Content_Types].xml"))
+            relationships = ElementTree.fromstring(archive.read("_rels/.rels"))
             root = ElementTree.fromstring(archive.read("word/document.xml"))
     except (BadZipFile, ElementTree.ParseError, KeyError, ValueError) as error:
         raise ValueError("Invalid DOCX document.") from error
+    if content_types.tag != f"{_CONTENT_TYPES_NAMESPACE}Types" or relationships.tag != f"{_PACKAGE_RELATIONSHIPS_NAMESPACE}Relationships":
+        raise ValueError("Invalid DOCX document.")
+    has_word_document_content_type = any(
+        override.get("PartName") == "/word/document.xml"
+        and override.get("ContentType") == _WORD_DOCUMENT_CONTENT_TYPE
+        for override in content_types.iter(f"{_CONTENT_TYPES_NAMESPACE}Override")
+    )
+    has_office_document_relationship = any(
+        relationship.get("Type") == _OFFICE_DOCUMENT_RELATIONSHIP
+        and relationship.get("Target", "").lstrip("/") == "word/document.xml"
+        for relationship in relationships.iter(f"{_PACKAGE_RELATIONSHIPS_NAMESPACE}Relationship")
+    )
+    if not has_word_document_content_type or not has_office_document_relationship:
+        raise ValueError("Invalid DOCX document.")
+    if root.tag != f"{_WORD_NAMESPACE}document" or root.find(f"{_WORD_NAMESPACE}body") is None:
+        raise ValueError("Invalid DOCX document.")
     paragraphs = []
     for paragraph_number, paragraph in enumerate(root.iter(f"{_WORD_NAMESPACE}p"), start=1):
         text = "".join(paragraph.itertext()).strip()
