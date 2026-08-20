@@ -1,7 +1,11 @@
+from contextlib import asynccontextmanager
+
 from fastapi import APIRouter, FastAPI
 from uuid import UUID
 
 from odp_api.adapters.auth.jwt import ActorRepository, InMemoryActorRepository, JwtAuthenticator
+from odp_api.modules.audit.service import AuditService, InMemoryAuditRepository
+from odp_api.modules.audit.verify import AuditVerificationMonitor
 from odp_api.adapters.vision.mock import MockVisionAdapter
 from odp_api.modules.cases.router import InMemoryCaseRepository, create_cases_router
 from odp_api.modules.identity.service import (
@@ -34,7 +38,15 @@ def create_app(
 ) -> FastAPI:
     """Create the ODPlatform quality inspection API."""
     runtime_settings = settings or Settings()
-    app = FastAPI(title=runtime_settings.app_name)
+    audit_service = AuditService(InMemoryAuditRepository())
+    audit_verification_monitor = AuditVerificationMonitor(audit_service)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        audit_verification_monitor.startup_sample_verify()
+        yield
+
+    app = FastAPI(title=runtime_settings.app_name, lifespan=lifespan)
     app.state.jwt_authenticator = JwtAuthenticator(
         runtime_settings.auth_jwt_secret,
         actor_repository or InMemoryActorRepository({}),
@@ -47,10 +59,14 @@ def create_app(
         camera_id=UUID("00000000-0000-0000-0000-000000000002"),
     )
     reauthentication_service = ReauthenticationService(InMemoryReauthenticationStore())
+    app.state.audit_service = audit_service
+    app.state.audit_verification_monitor = audit_verification_monitor
+
     app.include_router(
         create_cases_router(
             InMemoryCaseRepository((fixture_case,)),
             reauthentication_service=reauthentication_service,
+            audit_service=audit_service,
         )
     )
     fixture_alerts = tuple(

@@ -1,9 +1,11 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Callable, Literal
+import json
+from threading import RLock
+from typing import TYPE_CHECKING, Callable, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from odp_api.modules.cases.errors import InvalidCaseTransition
@@ -17,6 +19,10 @@ from odp_api.modules.identity.service import (
     get_current_actor,
 )
 from odp_api.modules.inspection.models import CaseStatus, DefectCase, InspectionEvent
+
+if TYPE_CHECKING:
+    from odp_api.modules.audit.models import AuditCommand
+    from odp_api.modules.audit.service import AuditService
 
 
 class CaseTransitionRequest(BaseModel):
@@ -74,28 +80,47 @@ class InMemoryCaseRepository:
     def __init__(self, initial_cases: tuple[DefectCase, ...]) -> None:
         now = datetime.now(UTC)
         self._cases = {case.case_id: StoredCase(case, now) for case in initial_cases}
+        self._lock = RLock()
 
     def list(
         self, organization_id: UUID, updated_after: datetime | None
     ) -> list[StoredCase]:
-        return sorted(
-            (
-                stored_case
-                for stored_case in self._cases.values()
-                if stored_case.case.organization_id == organization_id
-                and (updated_after is None or stored_case.updated_at > updated_after)
-            ),
-            key=lambda stored_case: stored_case.updated_at,
-            reverse=True,
-        )
+        with self._lock:
+            return sorted(
+                (
+                    stored_case
+                    for stored_case in self._cases.values()
+                    if stored_case.case.organization_id == organization_id
+                    and (updated_after is None or stored_case.updated_at > updated_after)
+                ),
+                key=lambda stored_case: stored_case.updated_at,
+                reverse=True,
+            )
 
     def get(self, case_id: UUID, organization_id: UUID) -> StoredCase | None:
-        stored_case = self._cases.get(case_id)
-        if stored_case is None or stored_case.case.organization_id != organization_id:
-            return None
-        return stored_case
+        with self._lock:
+            stored_case = self._cases.get(case_id)
+            if stored_case is None or stored_case.case.organization_id != organization_id:
+                return None
+            return stored_case
 
     def save(self, case: DefectCase) -> StoredCase:
+        with self._lock:
+            return self._save_unlocked(case)
+
+    def save_with_audit(
+        self, case: DefectCase, audit_service: "AuditService", audit_command: "AuditCommand"
+    ) -> StoredCase:
+        """Commit the in-memory case mutation only after its audit append succeeds.
+
+        A database-backed repository implements this boundary with the case write
+        and audit head-lock append in the same SQL transaction.
+        """
+        with self._lock:
+            audit_service.append(audit_command)
+            return self._save_unlocked(case)
+
+    def _save_unlocked(self, case: DefectCase) -> StoredCase:
         stored_case = StoredCase(case=case, updated_at=datetime.now(UTC))
         self._cases[case.case_id] = stored_case
         return stored_case
@@ -105,11 +130,15 @@ def create_cases_router(
     repository: InMemoryCaseRepository,
     actor_provider: Callable[[], Actor] = get_current_actor,
     reauthentication_service: ReauthenticationService | None = None,
+    audit_service: "AuditService | None" = None,
 ) -> APIRouter:
+    from odp_api.modules.audit.service import AuditAppendBlocked, AuditService, InMemoryAuditRepository
+
     router = APIRouter(prefix="/api/v1/cases", tags=["cases"])
     reauth_service = reauthentication_service or ReauthenticationService(
         InMemoryReauthenticationStore()
     )
+    case_audit_service = audit_service or AuditService(InMemoryAuditRepository())
 
     @router.get("", response_model=list[CaseSummary])
     def list_cases(
@@ -128,6 +157,7 @@ def create_cases_router(
     def transition_case(
         case_id: UUID,
         request: CaseTransitionRequest,
+        http_request: Request,
         actor: Actor = Depends(actor_provider),
     ) -> CaseSummary:
         stored_case = repository.get(case_id, actor.organization_id)
@@ -138,7 +168,15 @@ def create_cases_router(
             transitioned = CaseService.transition(stored_case.case, request.status, actor)
         except InvalidCaseTransition as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
-        return CaseSummary.from_case(repository.save(transitioned))
+        try:
+            stored_transition = repository.save_with_audit(
+                transitioned,
+                case_audit_service,
+                _transition_audit_command(stored_case.case, transitioned, actor, http_request),
+            )
+        except AuditAppendBlocked as error:
+            raise HTTPException(status_code=503, detail="Audit chain verification recovery is required") from error
+        return CaseSummary.from_case(stored_transition)
 
     @router.post("/{case_id}/pause")
     def simulate_pause(case_id: UUID, actor: Actor = Depends(actor_provider)) -> dict[str, str]:
@@ -168,3 +206,33 @@ def _require_authorized(actor: Actor, permission: str, defect_case: DefectCase) 
         authorize(actor, permission, defect_case.organization_id, defect_case.line_id)
     except AuthorizationDenied as error:
         raise HTTPException(status_code=403, detail=str(error)) from error
+
+
+def _transition_audit_command(
+    before: DefectCase, after: DefectCase, actor: Actor, request: Request | None
+) -> "AuditCommand":
+    from odp_api.modules.audit.models import AuditCommand
+
+    correlation_id = None
+    if request is not None:
+        raw_correlation_id = request.headers.get("X-Correlation-ID")
+        if raw_correlation_id:
+            try:
+                correlation_id = UUID(raw_correlation_id)
+            except ValueError:
+                correlation_id = None
+    return AuditCommand(
+        organization_id=after.organization_id,
+        resource_type="defect_case",
+        resource_id=after.case_id,
+        action="defect_case.transition",
+        change_summary=json.dumps(
+            {"from_status": before.status, "to_status": after.status},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        actor_id=actor.actor_id,
+        occurred_at=datetime.now(UTC),
+        correlation_id=correlation_id,
+        request_ip=request.client.host if request is not None and request.client is not None else None,
+    )
