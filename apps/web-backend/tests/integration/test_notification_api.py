@@ -11,6 +11,8 @@ SHARED_SCHEMAS_SRC = Path(__file__).parents[4] / "packages" / "shared-schemas" /
 sys.path[:0] = [str(WEB_BACKEND_SRC), str(SHARED_SCHEMAS_SRC)]
 
 from odp_api.adapters.notifications.redis_stream import RedisStreamInspectionAlertFeed
+from odp_api.adapters.tasks.redis_stream import RedisStreamTaskQueue
+from odp_api.main import create_app
 from odp_api.modules.identity.models import Actor, Role
 from odp_api.modules.identity.service import get_current_actor
 from odp_api.modules.notifications.router import (
@@ -108,3 +110,26 @@ def test_redis_stream_notification_feed_accepts_redis_byte_fields() -> None:
     assert RedisStreamInspectionAlertFeed(ByteRedisStream()).list(
         UUID("00000000-0000-0000-0000-000000000002")
     )[0].alert.defect_class == "scratch"
+
+
+def test_runtime_composes_redis_stream_for_notification_reconciliation_and_task_work() -> None:
+    """Runtime must not silently fall back to an in-process feed or task queue."""
+    class FakeRedisStream:
+        def __init__(self) -> None:
+            self.entries: list[tuple[str, dict[str, str]]] = []
+
+        def xadd(self, stream: str, fields: dict[str, str]) -> str:
+            self.entries.append((stream, fields))
+            return f"{len(self.entries)}-0"
+
+        def xlen(self, stream: str) -> int:
+            return len([entry for entry in self.entries if entry[0] == stream])
+
+        def xrange(self, stream: str) -> list[tuple[str, dict[str, str]]]:
+            return [entry for entry in self.entries if entry[0] == stream]
+
+    stream = FakeRedisStream()
+    app = create_app(stream_client=stream)
+
+    assert isinstance(app.state.task_service._queue, RedisStreamTaskQueue)
+    assert any(entry[0] == "odp:inspection-alerts" for entry in stream.entries)

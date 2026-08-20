@@ -1,12 +1,15 @@
 from contextlib import asynccontextmanager
-
-from fastapi import APIRouter, FastAPI
 from uuid import UUID
 
+from fastapi import APIRouter, FastAPI
 from odp_api.adapters.auth.jwt import ActorRepository, InMemoryActorRepository, JwtAuthenticator
+from odp_api.adapters.notifications.redis_stream import RedisStreamInspectionAlertFeed
+from odp_api.adapters.redis_stream import RedisSocketStreamClient, SQLiteStreamClient
+from odp_api.adapters.tasks.redis_stream import RedisStreamTaskAlertPublisher, RedisStreamTaskQueue
+from odp_api.adapters.tasks.sqlite import SQLiteTaskRepository
+from odp_api.adapters.vision.mock import MockVisionAdapter
 from odp_api.modules.audit.service import AuditService, InMemoryAuditRepository
 from odp_api.modules.audit.verify import AuditVerificationMonitor, ManagedDailyAuditVerification
-from odp_api.adapters.vision.mock import MockVisionAdapter
 from odp_api.modules.cases.router import InMemoryCaseRepository, create_cases_router
 from odp_api.modules.identity.service import (
     InMemoryPasswordVerifier,
@@ -16,10 +19,8 @@ from odp_api.modules.identity.service import (
     create_auth_router,
 )
 from odp_api.modules.inspection.service import InspectionService
-from odp_api.modules.notifications.router import (
-    InMemoryInspectionAlertRepository,
-    create_notifications_router,
-)
+from odp_api.modules.notifications.router import create_notifications_router
+from odp_api.modules.tasks.service import InMemoryTaskMetrics, TaskService
 from odp_api.ports.vision import FrameInput
 from odp_api.settings import Settings
 
@@ -36,6 +37,7 @@ def create_app(
     actor_repository: ActorRepository | None = None,
     password_verifier: PasswordVerifier | None = None,
     daily_verification_interval_seconds: float = 24 * 60 * 60,
+    stream_client: object | None = None,
 ) -> FastAPI:
     """Create the ODPlatform quality inspection API."""
     runtime_settings = settings or Settings()
@@ -44,6 +46,15 @@ def create_app(
     daily_audit_verification = ManagedDailyAuditVerification(
         audit_verification_monitor, daily_verification_interval_seconds
     )
+    runtime_stream_client = stream_client or _runtime_stream_client(runtime_settings)
+    task_repository = SQLiteTaskRepository(runtime_settings.task_database_path)
+    task_service = TaskService(
+        task_repository,
+        RedisStreamTaskQueue(runtime_stream_client),
+        InMemoryTaskMetrics(),
+        RedisStreamTaskAlertPublisher(runtime_stream_client),
+    )
+    inspection_alert_feed = RedisStreamInspectionAlertFeed(runtime_stream_client)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -53,6 +64,10 @@ def create_app(
             yield
         finally:
             await daily_audit_verification.stop()
+            task_repository.close()
+            close = getattr(runtime_stream_client, "close", None)
+            if close is not None:
+                close()
 
     app = FastAPI(title=runtime_settings.app_name, lifespan=lifespan)
     app.state.jwt_authenticator = JwtAuthenticator(
@@ -70,6 +85,7 @@ def create_app(
     app.state.audit_service = audit_service
     app.state.audit_verification_monitor = audit_verification_monitor
     app.state.daily_audit_verification = daily_audit_verification
+    app.state.task_service = task_service
 
     app.include_router(
         create_cases_router(
@@ -78,16 +94,10 @@ def create_app(
             audit_service=audit_service,
         )
     )
-    fixture_alerts = tuple(
-        event.to_alert() for event in fixture_case.inspection_events
-    )
+    for event in fixture_case.inspection_events:
+        inspection_alert_feed.publish(event.to_alert(), event.line_id)
     app.include_router(
-        create_notifications_router(
-            InMemoryInspectionAlertRepository(
-                fixture_alerts,
-                {event.event_id: event.line_id for event in fixture_case.inspection_events},
-            ),
-        )
+        create_notifications_router(inspection_alert_feed)
     )
     app.include_router(
         create_auth_router(
@@ -96,3 +106,9 @@ def create_app(
         )
     )
     return app
+
+
+def _runtime_stream_client(settings: Settings) -> object:
+    if settings.environment.lower() in {"production", "docker", "staging"}:
+        return RedisSocketStreamClient(settings.redis_url)
+    return SQLiteStreamClient(settings.task_database_path)

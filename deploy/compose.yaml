@@ -4,7 +4,12 @@ services:
     working_dir: /app
     volumes:
       - ../apps/web-backend:/app
+      - task-state:/data
     command: ["sh", "-c", "sleep infinity"]
+    environment:
+      ODP_ENVIRONMENT: docker
+      ODP_REDIS_URL: redis://redis:6379/0
+      ODP_TASK_DATABASE_PATH: /data/odp-tasks.sqlite3
     ports:
       - "8000:8000"
     depends_on:
@@ -51,3 +56,6 @@ services:
 
   alertmanager:
     image: prom/alertmanager:latest
+
+volumes:
+  task-state:

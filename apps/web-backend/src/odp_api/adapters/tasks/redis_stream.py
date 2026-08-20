@@ -7,7 +7,7 @@ tests can supply a deterministic fake and do not need a live Redis server.
 import json
 from typing import Protocol
 
-from odp_api.modules.tasks.models import TaskRecord
+from odp_api.modules.tasks.models import TaskDeadLetterAlert, TaskRecord
 
 
 class RedisStreamClient(Protocol):
@@ -36,6 +36,26 @@ class RedisStreamTaskQueue:
 
     def depth(self) -> int:
         return self._client.xlen(self._stream_name)
+
+
+class RedisStreamTaskAlertPublisher:
+    """Writes final task failures to a Redis Stream for cross-instance alerting."""
+
+    def __init__(self, client: RedisStreamClient, stream_name: str = "odp:task-alerts") -> None:
+        self._client = client
+        self._stream_name = stream_name
+
+    def publish(self, alert: TaskDeadLetterAlert) -> None:
+        self._client.xadd(
+            self._stream_name,
+            {
+                "task_id": str(alert.task_id),
+                "task_type": alert.task_type,
+                "idempotency_key": alert.idempotency_key,
+                "error": alert.error,
+                "occurred_at": alert.occurred_at.isoformat(),
+            },
+        )
 
 
 def _json_default(value: object) -> str:

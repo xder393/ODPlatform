@@ -20,3 +20,30 @@ Implemented idempotent, bounded asynchronous work for the web backend.
 - Syntax check: `apps/web-backend/.venv/bin/python -m compileall -q apps/web-backend/src/odp_api` passed.
 - Scoped lint: `uvx ruff check --select F,I,UP` for the task and notification source files passed.
 - Whitespace check: `git diff --check` passed.
+
+## Review fix round 1
+
+- `create_app` now composes `RedisStreamInspectionAlertFeed` for publishing the fixture alert and for the existing REST reconciliation and WebSocket reads. Docker sets `ODP_ENVIRONMENT=docker`, so this composition uses the dependency-free Redis Socket Stream client against the Compose Redis service; local non-Docker development uses a durable SQLite stream, never an in-memory runtime feed.
+- Runtime task records now use `SQLiteTaskRepository`, whose unique idempotency key is protected by `BEGIN IMMEDIATE`. The Compose `task-state` volume persists `/data/odp-tasks.sqlite3` across API restarts. Runtime work is published through `RedisStreamTaskQueue`, and dead-letter alerts use their own Redis Stream.
+- The task deadline regression intercepts the unavoidable `asyncio.wait_for` boundary and proves the service sends the required 30-second value. The retry metric now reads `TaskQueuePort.depth()` after enqueueing the retry, rather than counting active records before the queue transition.
+
+### Fix-round verification
+
+```text
+apps/web-backend/.venv/bin/pytest apps/web-backend/tests -v
+44 passed, 1 warning
+
+apps/web-backend/.venv/bin/python -m compileall -q apps/web-backend/src/odp_api
+exit 0
+
+uvx ruff check --select F,I,UP <changed task/runtime files>
+All checks passed!
+
+ruby -e 'require "yaml"; YAML.load_file("deploy/compose.yaml")'
+exit 0
+
+git diff --check
+exit 0
+```
+
+`docker compose -f deploy/compose.yaml config` could not run in this environment because the `docker` executable is not installed; YAML parsing above confirmed the Compose file is syntactically valid.

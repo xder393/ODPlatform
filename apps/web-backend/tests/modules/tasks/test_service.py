@@ -1,7 +1,9 @@
 import asyncio
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 
@@ -9,6 +11,7 @@ WEB_BACKEND_SRC = Path(__file__).parents[3] / "src"
 sys.path[:0] = [str(WEB_BACKEND_SRC)]
 
 from odp_api.adapters.tasks.redis_stream import RedisStreamTaskQueue
+from odp_api.adapters.tasks.sqlite import SQLiteTaskRepository
 from odp_api.modules.tasks.service import (
     InMemoryTaskAlertPublisher,
     InMemoryTaskMetrics,
@@ -209,3 +212,121 @@ def test_redis_stream_adapter_publishes_a_serialized_task_reference(
         )
     ]
     assert queue.depth() == 1
+
+
+def test_sqlite_task_repository_retains_idempotency_records_after_restart(tmp_path: Path) -> None:
+    """Replacing the runtime repository must not let a restart duplicate a frame/model task."""
+    database_path = tmp_path / "tasks.sqlite3"
+    first_repository = SQLiteTaskRepository(database_path)
+    first_queue = InMemoryTaskQueue()
+    first_service = TaskService(
+        first_repository,
+        first_queue,
+        InMemoryTaskMetrics(),
+        InMemoryTaskAlertPublisher(),
+    )
+    enqueued = first_service.enqueue(
+        "vision_inference",
+        "frame-007:model-v3",
+        {"frame_id": "frame-007", "model_version": "model-v3"},
+    )
+    first_repository.close()
+
+    restarted_repository = SQLiteTaskRepository(database_path)
+    restarted_service = TaskService(
+        restarted_repository,
+        InMemoryTaskQueue(),
+        InMemoryTaskMetrics(),
+        InMemoryTaskAlertPublisher(),
+    )
+    duplicate = restarted_service.enqueue(
+        "vision_inference",
+        "frame-007:model-v3",
+        {"frame_id": "frame-007", "model_version": "model-v3"},
+    )
+
+    assert duplicate.task_id == enqueued.task_id
+    restarted_repository.close()
+
+
+def test_sqlite_task_repository_uniquely_persists_concurrent_idempotency_keys(tmp_path: Path) -> None:
+    """Two API processes must not race past the durable idempotency constraint."""
+    database_path = tmp_path / "tasks.sqlite3"
+    barrier = Barrier(2)
+
+    class ConcurrentRepository(SQLiteTaskRepository):
+        def get_by_idempotency_key(self, idempotency_key: str):
+            record = super().get_by_idempotency_key(idempotency_key)
+            barrier.wait()
+            return record
+
+    repositories = [ConcurrentRepository(database_path), ConcurrentRepository(database_path)]
+
+    def enqueue(repository: SQLiteTaskRepository):
+        return TaskService(
+            repository,
+            InMemoryTaskQueue(),
+            InMemoryTaskMetrics(),
+            InMemoryTaskAlertPublisher(),
+        ).enqueue(
+            "vision_inference",
+            "frame-007b:model-v3",
+            {"frame_id": "frame-007b", "model_version": "model-v3"},
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        records = list(executor.map(enqueue, repositories))
+
+    assert records[0].task_id == records[1].task_id
+    for repository in repositories:
+        repository.close()
+
+
+def test_vision_processing_invokes_the_30_second_timeout_mechanism(
+    dependencies: tuple[
+        InMemoryTaskRepository,
+        InMemoryTaskQueue,
+        InMemoryTaskMetrics,
+        InMemoryTaskAlertPublisher,
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Removing the deadline from wait_for would allow an inference to run unbounded."""
+    service = make_service(dependencies)
+    task = service.enqueue("vision_inference", "frame-008:model-v3", {"frame_id": "frame-008"})
+    timeouts: list[int] = []
+
+    async def controlled_wait_for(awaitable, *, timeout: int):
+        timeouts.append(timeout)
+        return await awaitable
+
+    async def inference(_: dict[str, object]) -> None:
+        return None
+
+    monkeypatch.setattr("odp_api.modules.tasks.service.asyncio.wait_for", controlled_wait_for)
+
+    asyncio.run(service.process_vision(task.task_id, inference))
+
+    assert timeouts == [30]
+
+
+def test_retry_queue_depth_metric_uses_the_queue_transport(
+    dependencies: tuple[
+        InMemoryTaskRepository,
+        InMemoryTaskQueue,
+        InMemoryTaskMetrics,
+        InMemoryTaskAlertPublisher,
+    ],
+    now: datetime,
+) -> None:
+    """Counting active records hides the additional queued retry message from operations."""
+    service = make_service(dependencies)
+    task = service.enqueue("vision_inference", "frame-009:model-v3", {"frame_id": "frame-009"})
+
+    async def inference_fails(_: dict[str, object]) -> None:
+        raise RuntimeError("transient vision failure")
+
+    asyncio.run(service.process_vision(task.task_id, inference_fails, now))
+
+    assert dependencies[1].depth() == 2
+    assert dependencies[2].task_queue_depth == 2

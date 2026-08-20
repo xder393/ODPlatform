@@ -213,6 +213,7 @@ class TaskService:
             )
         )
         self._queue.enqueue(retry)
+        self._update_queue_depth()
         return retry
 
     def _save(self, task: TaskRecord) -> TaskRecord:
@@ -221,7 +222,7 @@ class TaskService:
         return saved
 
     def _update_queue_depth(self) -> None:
-        self._metrics.set_queue_depth(len(self._repository.active()))
+        self._metrics.set_queue_depth(self._queue.depth())
 
 
 def _payload_timestamp(value: object) -> datetime | None:
