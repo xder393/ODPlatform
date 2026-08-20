@@ -1,12 +1,10 @@
 """Transport adapters for the process-local inspection alert feed."""
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, WebSocket
-
 from odp_api.modules.identity.models import Actor
 from odp_api.modules.identity.policies import AuthorizationDenied, authorize
 from odp_api.modules.identity.service import (
@@ -14,14 +12,9 @@ from odp_api.modules.identity.service import (
     get_current_actor,
     get_current_websocket_actor,
 )
+from odp_api.ports.notifications import InspectionAlertFeedPort, StoredInspectionAlert
+
 from odp_schemas.events import InspectionAlert
-
-
-@dataclass(frozen=True, slots=True)
-class StoredInspectionAlert:
-    alert: InspectionAlert
-    updated_at: datetime
-    line_id: UUID | None
 
 
 class InMemoryInspectionAlertRepository:
@@ -54,7 +47,7 @@ class InMemoryInspectionAlertRepository:
 
 
 def create_notifications_router(
-    repository: InMemoryInspectionAlertRepository,
+    repository: InspectionAlertFeedPort,
     actor_provider: Callable[[], Actor] = get_current_actor,
 ) -> APIRouter:
     """Expose reconciliation and one-delivery websocket views of inspection alerts."""
