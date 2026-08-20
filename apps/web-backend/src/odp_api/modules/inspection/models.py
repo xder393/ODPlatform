@@ -27,6 +27,7 @@ class InspectionEvent:
     preprocessing_parameters: tuple[tuple[str, str], ...]
     threshold: float
     input_frame_sha256: str
+    line_id: UUID | None = None
 
     @classmethod
     def from_alert(
@@ -37,6 +38,7 @@ class InspectionEvent:
         preprocessing_parameters: tuple[tuple[str, str], ...],
         threshold: float,
         input_frame_sha256: str,
+        line_id: UUID | None = None,
     ) -> "InspectionEvent":
         """Snapshot a shared inspection alert with reproducibility metadata."""
         return cls(
@@ -50,6 +52,7 @@ class InspectionEvent:
             preprocessing_parameters=preprocessing_parameters,
             threshold=threshold,
             input_frame_sha256=input_frame_sha256,
+            line_id=line_id,
         )
 
     def to_alert(self) -> InspectionAlert:
@@ -74,6 +77,7 @@ class DefectCase:
     status: CaseStatus = "PENDING_CONFIRMATION"
     assignee_id: UUID | None = None
     last_transition_actor_id: UUID | None = None
+    line_id: UUID | None = None
 
     def __post_init__(self) -> None:
         if self.status not in CASE_STATUSES:

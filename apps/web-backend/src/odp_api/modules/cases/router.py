@@ -1,13 +1,21 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
-from uuid import UUID, uuid4
+from typing import Callable, Literal
+from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from odp_api.modules.cases.errors import InvalidCaseTransition
 from odp_api.modules.cases.service import CaseService
+from odp_api.modules.identity.models import Actor
+from odp_api.modules.identity.policies import AuthorizationDenied, authorize
+from odp_api.modules.identity.service import (
+    InMemoryReauthenticationStore,
+    ReauthenticationService,
+    RecentReauthenticationRequired,
+    get_current_actor,
+)
 from odp_api.modules.inspection.models import CaseStatus, DefectCase, InspectionEvent
 
 
@@ -67,19 +75,25 @@ class InMemoryCaseRepository:
         now = datetime.now(UTC)
         self._cases = {case.case_id: StoredCase(case, now) for case in initial_cases}
 
-    def list(self, updated_after: datetime | None) -> list[StoredCase]:
+    def list(
+        self, organization_id: UUID, updated_after: datetime | None
+    ) -> list[StoredCase]:
         return sorted(
             (
                 stored_case
                 for stored_case in self._cases.values()
-                if updated_after is None or stored_case.updated_at > updated_after
+                if stored_case.case.organization_id == organization_id
+                and (updated_after is None or stored_case.updated_at > updated_after)
             ),
             key=lambda stored_case: stored_case.updated_at,
             reverse=True,
         )
 
-    def get(self, case_id: UUID) -> StoredCase | None:
-        return self._cases.get(case_id)
+    def get(self, case_id: UUID, organization_id: UUID) -> StoredCase | None:
+        stored_case = self._cases.get(case_id)
+        if stored_case is None or stored_case.case.organization_id != organization_id:
+            return None
+        return stored_case
 
     def save(self, case: DefectCase) -> StoredCase:
         stored_case = StoredCase(case=case, updated_at=datetime.now(UTC))
@@ -87,24 +101,70 @@ class InMemoryCaseRepository:
         return stored_case
 
 
-def create_cases_router(repository: InMemoryCaseRepository) -> APIRouter:
+def create_cases_router(
+    repository: InMemoryCaseRepository,
+    actor_provider: Callable[[], Actor] = get_current_actor,
+    reauthentication_service: ReauthenticationService | None = None,
+) -> APIRouter:
     router = APIRouter(prefix="/api/v1/cases", tags=["cases"])
+    reauth_service = reauthentication_service or ReauthenticationService(
+        InMemoryReauthenticationStore()
+    )
 
     @router.get("", response_model=list[CaseSummary])
-    def list_cases(updated_after: datetime | None = Query(default=None)) -> list[CaseSummary]:
+    def list_cases(
+        updated_after: datetime | None = Query(default=None),
+        actor: Actor = Depends(actor_provider),
+    ) -> list[CaseSummary]:
         if updated_after is not None and updated_after.tzinfo is None:
             updated_after = updated_after.replace(tzinfo=UTC)
-        return [CaseSummary.from_case(case) for case in repository.list(updated_after)]
+        return [
+            CaseSummary.from_case(case)
+            for case in repository.list(actor.organization_id, updated_after)
+            if _is_authorized(actor, "defect_case:read:own_line", case.case)
+        ]
 
     @router.post("/{case_id}/transitions", response_model=CaseSummary)
-    def transition_case(case_id: UUID, request: CaseTransitionRequest) -> CaseSummary:
-        stored_case = repository.get(case_id)
+    def transition_case(
+        case_id: UUID,
+        request: CaseTransitionRequest,
+        actor: Actor = Depends(actor_provider),
+    ) -> CaseSummary:
+        stored_case = repository.get(case_id, actor.organization_id)
         if stored_case is None:
             raise HTTPException(status_code=404, detail="Case not found")
+        _require_authorized(actor, "defect_case:update:own_line", stored_case.case)
         try:
-            transitioned = CaseService.transition(stored_case.case, request.status, uuid4())
+            transitioned = CaseService.transition(stored_case.case, request.status, actor)
         except InvalidCaseTransition as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return CaseSummary.from_case(repository.save(transitioned))
 
+    @router.post("/{case_id}/pause")
+    def simulate_pause(case_id: UUID, actor: Actor = Depends(actor_provider)) -> dict[str, str]:
+        stored_case = repository.get(case_id, actor.organization_id)
+        if stored_case is None:
+            raise HTTPException(status_code=404, detail="Case not found")
+        _require_authorized(actor, "defect_case:pause:own_line", stored_case.case)
+        try:
+            reauth_service.require_recent_reauth(actor.actor_id, datetime.now(UTC))
+        except RecentReauthenticationRequired as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
+        return {"status": "SIMULATED", "message": "No production line was paused."}
+
     return router
+
+
+def _is_authorized(actor: Actor, permission: str, defect_case: DefectCase) -> bool:
+    try:
+        authorize(actor, permission, defect_case.organization_id, defect_case.line_id)
+    except AuthorizationDenied:
+        return False
+    return True
+
+
+def _require_authorized(actor: Actor, permission: str, defect_case: DefectCase) -> None:
+    try:
+        authorize(actor, permission, defect_case.organization_id, defect_case.line_id)
+    except AuthorizationDenied as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
