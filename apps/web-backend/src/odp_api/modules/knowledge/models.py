@@ -6,6 +6,10 @@ from typing import Literal
 from uuid import UUID
 
 KnowledgeDocumentStatus = Literal["INDEXED", "SUPERSEDED", "FAILED"]
+EvidenceKind = Literal["CURRENT_SPECIFICATION", "HISTORICAL_CASE"]
+EVIDENCE_KINDS: frozenset[EvidenceKind] = frozenset(
+    {"CURRENT_SPECIFICATION", "HISTORICAL_CASE"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,9 +25,14 @@ class KnowledgeDocument:
     content_sha256: str
     status: KnowledgeDocumentStatus
     indexed_at: datetime
+    evidence_kind: EvidenceKind | None = None
     applicable_line_id: UUID | None = None
     product_category: str | None = None
     failure_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.evidence_kind is not None and self.evidence_kind not in EVIDENCE_KINDS:
+            raise ValueError(f"Unsupported evidence kind: {self.evidence_kind}")
 
 
 @dataclass(frozen=True, slots=True)

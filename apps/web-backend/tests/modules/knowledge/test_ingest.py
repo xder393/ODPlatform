@@ -113,6 +113,9 @@ class RecordingPostgresExecutor:
                 "vector_score": 0.75,
                 "bm25_score": 1.0,
                 "combined_score": 0.875,
+                "evidence_kind": "CURRENT_SPECIFICATION",
+                "applicable_line_id": parameters["line_id"],
+                "product_category": parameters["product_category"],
             }
         ]
 
@@ -282,20 +285,35 @@ def test_postgres_retrieval_executes_tenant_scoped_normalized_hybrid_query() -> 
     results = adapter.search(
         "pressure limit",
         organization_id,
-        RetrievalFilters(line_id=line_id, product_category="widget", limit=3),
+        RetrievalFilters(
+            evidence_kind="CURRENT_SPECIFICATION",
+            line_id=line_id,
+            product_category="widget",
+            require_exact_line_scope=True,
+            require_exact_product_scope=True,
+            limit=3,
+        ),
     )
 
     assert [result.score for result in results] == [0.875]
     sql, parameters = executor.calls[-1]
     assert "WHERE c.organization_id = %(organization_id)s" in sql
+    assert "d.evidence_kind = %(evidence_kind)s" in sql
+    assert "NOT %(require_exact_line_scope)s" in sql
+    assert "NOT %(require_exact_product_scope)s" in sql
     assert "vector_score" in sql and "bm25_score" in sql and "combined_score" in sql
     assert parameters == {
         "query": "pressure limit",
         "query_embedding": "[" + ",".join(["0.25"] * PGVECTOR_EMBEDDING_DIMENSIONS) + "]",
         "organization_id": organization_id,
         "document_status": "INDEXED",
+        "evidence_kind": "CURRENT_SPECIFICATION",
+        "require_evidence_kind": False,
         "line_id": line_id,
+        "require_exact_line_scope": True,
         "product_category": "widget",
+        "require_exact_product_scope": True,
+        "exclude_product_category": None,
         "limit": 3,
     }
 

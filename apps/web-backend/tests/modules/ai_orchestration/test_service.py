@@ -55,10 +55,12 @@ def make_case() -> DefectCase:
         organization_id=organization_id,
         inspection_events=(event,),
         line_id=line_id,
+        product_category="widget",
     )
 
 
 def chunk(case: DefectCase, record: dict[str, object]) -> RetrievedChunk:
+    scope = record["scope"]
     return RetrievedChunk(
         chunk_id=uuid4(),
         parent_chunk_id=uuid4(),
@@ -72,6 +74,11 @@ def chunk(case: DefectCase, record: dict[str, object]) -> RetrievedChunk:
         vector_score=1.0,
         bm25_score=1.0,
         score=1.0,
+        evidence_kind=(
+            "HISTORICAL_CASE" if scope == "same_line" else "CURRENT_SPECIFICATION"
+        ),
+        applicable_line_id=case.line_id if scope != "cross_product" else uuid4(),
+        product_category="widget" if scope != "cross_product" else "gadget",
     )
 
 
@@ -80,6 +87,7 @@ class GoldenRetrieval:
         self.case = case
         self.record = record
         self.calls: list[RetrievalFilters] = []
+        self.result = None if record["scope"] == "unavailable" else chunk(case, record)
 
     def search(
         self, query: str, organization_id: UUID, filters: RetrievalFilters
@@ -88,12 +96,30 @@ class GoldenRetrieval:
         assert query == "scratch inspection guidance"
         assert organization_id == self.case.organization_id
         scope = self.record["scope"]
-        if scope == "direct" and filters.line_id == self.case.line_id and filters.product_category == "scratch":
-            return [chunk(self.case, self.record)]
-        if scope == "same_line" and filters.line_id == self.case.line_id and filters.product_category is None:
-            return [chunk(self.case, self.record)]
-        if scope == "cross_product" and filters.line_id is None and filters.product_category is None:
-            return [chunk(self.case, self.record)]
+        if (
+            scope == "direct"
+            and filters.evidence_kind == "CURRENT_SPECIFICATION"
+            and filters.line_id == self.case.line_id
+            and filters.product_category == "widget"
+            and filters.require_exact_line_scope
+            and filters.require_exact_product_scope
+        ):
+            return [self.result]
+        if (
+            scope == "same_line"
+            and filters.evidence_kind == "HISTORICAL_CASE"
+            and filters.line_id == self.case.line_id
+            and filters.product_category == "widget"
+            and filters.require_exact_line_scope
+            and filters.require_exact_product_scope
+        ):
+            return [self.result]
+        if (
+            scope == "cross_product"
+            and filters.require_evidence_kind
+            and filters.exclude_product_category == "widget"
+        ):
+            return [self.result]
         return []
 
 

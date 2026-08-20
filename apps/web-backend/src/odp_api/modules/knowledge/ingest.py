@@ -14,6 +14,7 @@ from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
 
 from odp_api.modules.knowledge.models import (
+    EvidenceKind,
     KnowledgeChunk,
     KnowledgeDocument,
     KnowledgeParentChunk,
@@ -56,6 +57,7 @@ class KnowledgeIngestionService:
         filename: str,
         content: bytes,
         content_type: str | None = None,
+        evidence_kind: EvidenceKind | None = None,
         applicable_line_id: UUID | None = None,
         product_category: str | None = None,
     ) -> KnowledgeDocument:
@@ -76,6 +78,7 @@ class KnowledgeIngestionService:
             content_sha256=hashlib.sha256(content).hexdigest(),
             status="INDEXED",
             indexed_at=now,
+            evidence_kind=evidence_kind,
             applicable_line_id=applicable_line_id,
             product_category=product_category,
         )

@@ -18,6 +18,7 @@ from odp_api.ports.retrieval import RetrievalFilters, RetrievedChunk
 POSTGRES_HYBRID_SEARCH_SQL = """
 WITH scoped AS (
     SELECT c.*, d.version AS document_version, d.source_name, d.status AS document_status,
+           d.evidence_kind, d.applicable_line_id, d.product_category,
            1 - (c.embedding <=> CAST(%(query_embedding)s AS vector)) AS vector_raw,
            cardinality(regexp_split_to_array(lower(c.text), '[^[:alnum:]_]+')) AS document_length
     FROM knowledge_chunk_index AS c
@@ -25,8 +26,25 @@ WITH scoped AS (
     WHERE c.organization_id = %(organization_id)s
       AND d.organization_id = %(organization_id)s
       AND d.status = %(document_status)s
-      AND (%(line_id)s IS NULL OR d.applicable_line_id IS NULL OR d.applicable_line_id = %(line_id)s)
-      AND (%(product_category)s IS NULL OR d.product_category IS NULL OR d.product_category = %(product_category)s)
+      AND (%(evidence_kind)s IS NULL OR d.evidence_kind = %(evidence_kind)s)
+      AND (NOT %(require_evidence_kind)s OR d.evidence_kind IS NOT NULL)
+      AND (
+          %(line_id)s IS NULL
+          OR d.applicable_line_id = %(line_id)s
+          OR (NOT %(require_exact_line_scope)s AND d.applicable_line_id IS NULL)
+      )
+      AND (
+          %(product_category)s IS NULL
+          OR d.product_category = %(product_category)s
+          OR (NOT %(require_exact_product_scope)s AND d.product_category IS NULL)
+      )
+      AND (
+          %(exclude_product_category)s IS NULL
+          OR (
+              d.product_category IS NOT NULL
+              AND d.product_category <> %(exclude_product_category)s
+          )
+      )
 ),
 query_terms AS (
     SELECT term, count(*) AS query_frequency
@@ -81,7 +99,8 @@ normalized AS (
     FROM raw_scores CROSS JOIN bounds
 )
 SELECT chunk_id, parent_chunk_id, document_id, organization_id, document_version,
-       source_name, text, page_number, paragraph_number, vector_score, bm25_score,
+       source_name, evidence_kind, applicable_line_id, product_category,
+       text, page_number, paragraph_number, vector_score, bm25_score,
        (vector_score + bm25_score) / 2 AS combined_score
 FROM normalized
 ORDER BY combined_score DESC, chunk_id ASC
@@ -199,8 +218,13 @@ class PgVectorPostgresAdapter:
                 "query_embedding": _vector_parameter(self._embed(query)),
                 "organization_id": organization_id,
                 "document_status": filters.document_status,
+                "evidence_kind": filters.evidence_kind,
+                "require_evidence_kind": filters.require_evidence_kind,
                 "line_id": filters.line_id,
+                "require_exact_line_scope": filters.require_exact_line_scope,
                 "product_category": filters.product_category,
+                "require_exact_product_scope": filters.require_exact_product_scope,
+                "exclude_product_category": filters.exclude_product_category,
                 "limit": filters.limit,
             },
         )
@@ -212,10 +236,12 @@ class PgVectorPostgresAdapter:
         self._executor.execute(
             """INSERT INTO knowledge_documents (
                    document_id, organization_id, source_name, filename, version, media_type,
-                   content_sha256, status, indexed_at, applicable_line_id, product_category, failure_reason
+                   content_sha256, status, indexed_at, evidence_kind, applicable_line_id,
+                   product_category, failure_reason
                ) VALUES (%(document_id)s, %(organization_id)s, %(source_name)s, %(filename)s, %(version)s,
                          %(media_type)s, %(content_sha256)s, %(status)s, %(indexed_at)s,
-                         %(applicable_line_id)s, %(product_category)s, %(failure_reason)s)""",
+                         %(evidence_kind)s, %(applicable_line_id)s, %(product_category)s,
+                         %(failure_reason)s)""",
             parameters,
         )
 
@@ -231,6 +257,7 @@ def _document_parameters(document: KnowledgeDocument) -> dict[str, object]:
         "content_sha256": document.content_sha256,
         "status": document.status,
         "indexed_at": document.indexed_at,
+        "evidence_kind": document.evidence_kind,
         "applicable_line_id": document.applicable_line_id,
         "product_category": document.product_category,
         "failure_reason": document.failure_reason,
@@ -259,6 +286,17 @@ def _retrieved_chunk_from_row(row: Mapping[str, object]) -> RetrievedChunk:
         vector_score=float(row["vector_score"]),
         bm25_score=float(row["bm25_score"]),
         score=float(row["combined_score"]),
+        evidence_kind=row["evidence_kind"],
+        applicable_line_id=(
+            UUID(str(row["applicable_line_id"]))
+            if row["applicable_line_id"] is not None
+            else None
+        ),
+        product_category=(
+            str(row["product_category"])
+            if row["product_category"] is not None
+            else None
+        ),
     )
 
 
@@ -350,10 +388,33 @@ class PgVectorRetrievalAdapter:
             and chunk.organization_id == organization_id
             and document.organization_id == organization_id
             and document.status == filters.document_status
-            and (filters.line_id is None or document.applicable_line_id in {None, filters.line_id})
+            and (
+                filters.evidence_kind is None
+                or document.evidence_kind == filters.evidence_kind
+            )
+            and (not filters.require_evidence_kind or document.evidence_kind is not None)
+            and (
+                filters.line_id is None
+                or document.applicable_line_id == filters.line_id
+                or (
+                    not filters.require_exact_line_scope
+                    and document.applicable_line_id is None
+                )
+            )
             and (
                 filters.product_category is None
-                or document.product_category in {None, filters.product_category}
+                or document.product_category == filters.product_category
+                or (
+                    not filters.require_exact_product_scope
+                    and document.product_category is None
+                )
+            )
+            and (
+                filters.exclude_product_category is None
+                or (
+                    document.product_category is not None
+                    and document.product_category != filters.exclude_product_category
+                )
             )
         )
 
@@ -378,6 +439,9 @@ class PgVectorRetrievalAdapter:
             vector_score=vector_score,
             bm25_score=bm25_score,
             score=score,
+            evidence_kind=document.evidence_kind,
+            applicable_line_id=document.applicable_line_id,
+            product_category=document.product_category,
         )
 
     @staticmethod

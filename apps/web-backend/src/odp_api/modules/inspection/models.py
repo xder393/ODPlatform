@@ -78,6 +78,7 @@ class DefectCase:
     assignee_id: UUID | None = None
     last_transition_actor_id: UUID | None = None
     line_id: UUID | None = None
+    product_category: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in CASE_STATUSES:

@@ -95,3 +95,4 @@ temp/
 # 运行时生成的配置(odp-gen-config / odp-transform 产出, 可随时重新生成)
 apps/platform/configs/runtime/
 apps/platform/configs/datasets/
+.venv-runtime/

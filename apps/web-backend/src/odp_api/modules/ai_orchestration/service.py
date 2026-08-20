@@ -1,7 +1,7 @@
 """Tenant-scoped, confidence-tiered advice orchestration."""
 
-import re
 from typing import Literal
+from uuid import UUID
 
 from odp_api.modules.inspection.models import DefectCase
 from odp_api.ports.generation import GenerationRequest, LLMGenerationPort
@@ -9,10 +9,15 @@ from odp_api.ports.retrieval import RAGRetrievalPort, RetrievalFilters, Retrieve
 from pydantic import BaseModel
 
 HUMAN_REVIEW_MESSAGE = "AI advice unavailable. Please use human review."
+LOW_CONFIDENCE_ANSWER = (
+    "Only cross-product evidence is available. Request human review before disposition."
+)
 AdviceConfidence = Literal["HIGH", "MEDIUM", "LOW", "UNAVAILABLE"]
 
 
 class Citation(BaseModel):
+    chunk_id: UUID
+    document_id: UUID
     source_name: str
     document_version: int
     page_number: int
@@ -35,23 +40,24 @@ class AdviceService:
 
     def advise(self, defect_case: DefectCase) -> AdviceResponse:
         defect_class = defect_case.inspection_events[0].defect_class
-        product_category = _product_category(defect_case, defect_class)
+        product_category = defect_case.product_category
         query = f"{defect_class} inspection guidance"
-        evidence_tiers: tuple[tuple[Literal["HIGH", "MEDIUM", "LOW"], RetrievalFilters], ...] = (
-            (
-                "HIGH",
-                RetrievalFilters(
-                    line_id=defect_case.line_id,
-                    product_category=product_category,
-                ),
-            ),
-            ("MEDIUM", RetrievalFilters(line_id=defect_case.line_id)),
-            ("LOW", RetrievalFilters()),
-        )
+        evidence_tiers = _evidence_tiers(defect_case.line_id, product_category)
         for confidence, filters in evidence_tiers:
             chunks = self._retrieval.search(query, defect_case.organization_id, filters)
-            if chunks:
-                return self._render(defect_class, confidence, chunks)
+            applicable_chunks = [
+                chunk
+                for chunk in chunks
+                if _is_applicable(
+                    chunk,
+                    confidence,
+                    defect_case.organization_id,
+                    defect_case.line_id,
+                    product_category,
+                )
+            ]
+            if applicable_chunks:
+                return self._render(defect_class, confidence, applicable_chunks)
         return AdviceResponse(
             answer=HUMAN_REVIEW_MESSAGE,
             citations=[],
@@ -64,43 +70,111 @@ class AdviceService:
         confidence: Literal["HIGH", "MEDIUM", "LOW"],
         chunks: list[RetrievedChunk],
     ) -> AdviceResponse:
+        ordered_chunks = sorted(
+            chunks,
+            key=lambda chunk: (
+                -chunk.score,
+                chunk.source_name,
+                chunk.document_version,
+                chunk.page_number,
+                chunk.paragraph_number,
+                str(chunk.chunk_id),
+            ),
+        )
+        if confidence == "LOW":
+            return AdviceResponse(
+                answer=LOW_CONFIDENCE_ANSWER,
+                citations=_citations(ordered_chunks),
+                confidence=confidence,
+            )
         generated = self._generator.generate(
             GenerationRequest(
                 defect_class=defect_class,
                 confidence=confidence,
-                retrieved_chunks=chunks,
+                retrieved_chunks=ordered_chunks,
             )
         )
-        answer = generated.answer
-        if confidence == "LOW":
-            answer = _remove_pause_recommendations(answer)
         return AdviceResponse(
-            answer=answer,
-            citations=[
-                Citation(
-                    source_name=citation.source_name,
-                    document_version=citation.document_version,
-                    page_number=citation.page_number,
-                    paragraph_number=citation.paragraph_number,
-                    snippet=citation.snippet,
-                )
-                for citation in generated.citations
-            ],
+            answer=generated.answer,
+            citations=_citations(ordered_chunks),
             confidence=confidence,
         )
 
 
-def _product_category(defect_case: DefectCase, default: str) -> str:
-    """Read optional product context without changing the immutable case contract."""
-    metadata = dict(defect_case.inspection_events[0].preprocessing_parameters)
-    return metadata.get("product_category", default)
-
-
-def _remove_pause_recommendations(answer: str) -> str:
-    """Defence in depth for low-confidence generations from any future adapter."""
-    sanitized = re.sub(
-        r"(?i)\b(?:pause|stop)\b[^.!?]*[.!?]?",
-        "Request human review.",
-        answer,
+def _evidence_tiers(
+    line_id: UUID | None,
+    product_category: str | None,
+) -> tuple[tuple[Literal["HIGH", "MEDIUM", "LOW"], RetrievalFilters], ...]:
+    if product_category is None:
+        return ()
+    tiers: list[tuple[Literal["HIGH", "MEDIUM", "LOW"], RetrievalFilters]] = []
+    if line_id is not None:
+        for confidence, evidence_kind in (
+            ("HIGH", "CURRENT_SPECIFICATION"),
+            ("MEDIUM", "HISTORICAL_CASE"),
+        ):
+            tiers.append(
+                (
+                    confidence,
+                    RetrievalFilters(
+                        evidence_kind=evidence_kind,
+                        line_id=line_id,
+                        product_category=product_category,
+                        require_exact_line_scope=True,
+                        require_exact_product_scope=True,
+                    ),
+                )
+            )
+    tiers.append(
+        (
+            "LOW",
+            RetrievalFilters(
+                require_evidence_kind=True,
+                exclude_product_category=product_category,
+            ),
+        )
     )
-    return sanitized or "Request human review."
+    return tuple(tiers)
+
+
+def _is_applicable(
+    chunk: RetrievedChunk,
+    confidence: Literal["HIGH", "MEDIUM", "LOW"],
+    organization_id: UUID,
+    line_id: UUID | None,
+    product_category: str | None,
+) -> bool:
+    if chunk.organization_id != organization_id or product_category is None:
+        return False
+    if confidence == "HIGH":
+        return (
+            chunk.evidence_kind == "CURRENT_SPECIFICATION"
+            and chunk.applicable_line_id == line_id
+            and chunk.product_category == product_category
+        )
+    if confidence == "MEDIUM":
+        return (
+            chunk.evidence_kind == "HISTORICAL_CASE"
+            and chunk.applicable_line_id == line_id
+            and chunk.product_category == product_category
+        )
+    return (
+        chunk.evidence_kind is not None
+        and chunk.product_category is not None
+        and chunk.product_category != product_category
+    )
+
+
+def _citations(chunks: list[RetrievedChunk]) -> list[Citation]:
+    return [
+        Citation(
+            chunk_id=chunk.chunk_id,
+            document_id=chunk.document_id,
+            source_name=chunk.source_name,
+            document_version=chunk.document_version,
+            page_number=chunk.page_number,
+            paragraph_number=chunk.paragraph_number,
+            snippet=chunk.text,
+        )
+        for chunk in chunks
+    ]

@@ -6,6 +6,7 @@ from typing import Literal, Protocol
 from uuid import UUID
 
 from odp_api.modules.knowledge.models import (
+    EvidenceKind,
     KnowledgeChunk,
     KnowledgeDocument,
     KnowledgeParentChunk,
@@ -17,13 +18,24 @@ class RetrievalFilters:
     """Required scope constraints in addition to the calling organization."""
 
     document_status: Literal["INDEXED", "SUPERSEDED", "FAILED"] = "INDEXED"
+    evidence_kind: EvidenceKind | None = None
+    require_evidence_kind: bool = False
     line_id: UUID | None = None
+    require_exact_line_scope: bool = False
     product_category: str | None = None
+    require_exact_product_scope: bool = False
+    exclude_product_category: str | None = None
     limit: int = 8
 
     def __post_init__(self) -> None:
         if self.limit < 1:
             raise ValueError("Retrieval limit must be positive.")
+        if self.require_exact_line_scope and self.line_id is None:
+            raise ValueError("Exact line scope requires a line_id.")
+        if self.require_exact_product_scope and self.product_category is None:
+            raise ValueError("Exact product scope requires a product_category.")
+        if self.product_category is not None and self.exclude_product_category is not None:
+            raise ValueError("Product scope cannot include and exclude a category together.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +54,9 @@ class RetrievedChunk:
     vector_score: float
     bm25_score: float
     score: float
+    evidence_kind: EvidenceKind | None = None
+    applicable_line_id: UUID | None = None
+    product_category: str | None = None
 
 
 class RAGRetrievalPort(Protocol):
