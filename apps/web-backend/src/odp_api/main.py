@@ -5,7 +5,7 @@ from uuid import UUID
 
 from odp_api.adapters.auth.jwt import ActorRepository, InMemoryActorRepository, JwtAuthenticator
 from odp_api.modules.audit.service import AuditService, InMemoryAuditRepository
-from odp_api.modules.audit.verify import AuditVerificationMonitor
+from odp_api.modules.audit.verify import AuditVerificationMonitor, ManagedDailyAuditVerification
 from odp_api.adapters.vision.mock import MockVisionAdapter
 from odp_api.modules.cases.router import InMemoryCaseRepository, create_cases_router
 from odp_api.modules.identity.service import (
@@ -35,16 +35,24 @@ def create_app(
     settings: Settings | None = None,
     actor_repository: ActorRepository | None = None,
     password_verifier: PasswordVerifier | None = None,
+    daily_verification_interval_seconds: float = 24 * 60 * 60,
 ) -> FastAPI:
     """Create the ODPlatform quality inspection API."""
     runtime_settings = settings or Settings()
     audit_service = AuditService(InMemoryAuditRepository())
     audit_verification_monitor = AuditVerificationMonitor(audit_service)
+    daily_audit_verification = ManagedDailyAuditVerification(
+        audit_verification_monitor, daily_verification_interval_seconds
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         audit_verification_monitor.startup_sample_verify()
-        yield
+        daily_audit_verification.start()
+        try:
+            yield
+        finally:
+            await daily_audit_verification.stop()
 
     app = FastAPI(title=runtime_settings.app_name, lifespan=lifespan)
     app.state.jwt_authenticator = JwtAuthenticator(
@@ -61,6 +69,7 @@ def create_app(
     reauthentication_service = ReauthenticationService(InMemoryReauthenticationStore())
     app.state.audit_service = audit_service
     app.state.audit_verification_monitor = audit_verification_monitor
+    app.state.daily_audit_verification = daily_audit_verification
 
     app.include_router(
         create_cases_router(

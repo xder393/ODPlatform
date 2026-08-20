@@ -2,22 +2,29 @@
 
 from collections import defaultdict
 from dataclasses import replace
-from threading import Lock, RLock
+from threading import Event, Lock, RLock
 from typing import Callable, Protocol
 from uuid import UUID
 
 from odp_api.modules.audit.models import (
     AuditChainHead,
+    AuditChainSnapshot,
     AuditCommand,
     AuditLog,
     GENESIS_HASH,
     VerificationResult,
     audit_log_from_command,
 )
+from odp_api.modules.identity.models import Actor
+from odp_api.modules.identity.policies import authorize
 
 
 class AuditAppendBlocked(RuntimeError):
     """Raised while a failed verification puts an organization in P0 hold."""
+
+
+class AuditRecoveryRejected(RuntimeError):
+    """Raised when recovery is requested before the organization chain is valid."""
 
 
 class AuditRepository(Protocol):
@@ -33,9 +40,7 @@ class AuditRepository(Protocol):
         self, command: AuditCommand, make_entry: Callable[[int, str], AuditLog]
     ) -> AuditLog: ...
 
-    def entries_for_organization(self, organization_id: UUID) -> tuple[AuditLog, ...]: ...
-
-    def chain_head_for_organization(self, organization_id: UUID) -> AuditChainHead: ...
+    def read_consistent_chain(self, organization_id: UUID) -> AuditChainSnapshot: ...
 
     def organization_ids(self) -> tuple[UUID, ...]: ...
 
@@ -48,6 +53,8 @@ class InMemoryAuditRepository:
         self._entries: dict[UUID, list[AuditLog]] = defaultdict(list)
         self._organization_locks: dict[UUID, RLock] = {}
         self._locks_guard = Lock()
+        self._snapshot_started: Event | None = None
+        self._release_snapshot: Event | None = None
 
     def append_under_head_lock(
         self, command: AuditCommand, make_entry: Callable[[int, str], AuditLog]
@@ -69,6 +76,20 @@ class InMemoryAuditRepository:
         with self._lock_for(organization_id):
             return self._heads.get(organization_id, AuditChainHead(organization_id))
 
+    def read_consistent_chain(self, organization_id: UUID) -> AuditChainSnapshot:
+        """Read entries and head under exactly one organization lock."""
+        with self._lock_for(organization_id):
+            if self._snapshot_started is not None and self._release_snapshot is not None:
+                self._snapshot_started.set()
+                if not self._release_snapshot.wait(timeout=5):
+                    raise TimeoutError("Test snapshot pause was not released.")
+                self._snapshot_started = None
+                self._release_snapshot = None
+            return AuditChainSnapshot(
+                entries=tuple(self._entries[organization_id]),
+                head=self._heads.get(organization_id, AuditChainHead(organization_id)),
+            )
+
     def organization_ids(self) -> tuple[UUID, ...]:
         with self._locks_guard:
             return tuple(self._heads)
@@ -83,6 +104,12 @@ class InMemoryAuditRepository:
                         entries[index] = replace(entry, change_summary=value)
                         return
         raise KeyError(audit_id)
+
+    def pause_consistent_snapshot_for_test(self, started: Event, release: Event) -> None:
+        """Inject an append interleaving point while the chain lock remains held."""
+        with self._locks_guard:
+            self._snapshot_started = started
+            self._release_snapshot = release
 
     def _lock_for(self, organization_id: UUID) -> RLock:
         with self._locks_guard:
@@ -117,7 +144,16 @@ class AuditService:
         with self._health_lock:
             self._blocked_organizations.add(organization_id)
 
-    def explicit_administrator_recovery(self, organization_id: UUID) -> None:
-        """Clear the P0 hold after an administrator has investigated the incident."""
+    def explicit_administrator_recovery(
+        self, organization_id: UUID, actor: Actor
+    ) -> VerificationResult:
+        """Allow recovery only for an administrator after a fresh valid verification."""
         with self._health_lock:
+            authorize(actor, "audit:recover", organization_id, None)
+            result = self.verify_organization_chain(organization_id)
+            if not result.is_valid:
+                raise AuditRecoveryRejected(
+                    f"Audit chain for organization {organization_id} remains invalid: {result.reason}."
+                )
             self._blocked_organizations.discard(organization_id)
+            return result

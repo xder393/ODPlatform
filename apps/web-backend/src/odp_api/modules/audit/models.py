@@ -64,6 +64,14 @@ class AuditChainHead:
 
 
 @dataclass(frozen=True, slots=True)
+class AuditChainSnapshot:
+    """Entries and head read together while the organization chain is locked."""
+
+    entries: tuple[AuditLog, ...]
+    head: AuditChainHead
+
+
+@dataclass(frozen=True, slots=True)
 class VerificationResult:
     organization_id: UUID
     is_valid: bool

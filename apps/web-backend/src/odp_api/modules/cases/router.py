@@ -120,6 +120,28 @@ class InMemoryCaseRepository:
             audit_service.append(audit_command)
             return self._save_unlocked(case)
 
+    def transition_with_audit(
+        self,
+        case_id: UUID,
+        organization_id: UUID,
+        to_status: CaseStatus,
+        actor: Actor,
+        audit_service: "AuditService",
+        make_audit_command: Callable[[DefectCase, DefectCase], "AuditCommand"],
+    ) -> StoredCase | None:
+        """Lock/load/transition/audit/save as one in-memory mutation transaction.
+
+        The production persistence adapter implements this port using one database
+        transaction that locks the case row and the organization's audit-chain head.
+        """
+        with self._lock:
+            stored_case = self._cases.get(case_id)
+            if stored_case is None or stored_case.case.organization_id != organization_id:
+                return None
+            transitioned = CaseService.transition(stored_case.case, to_status, actor)
+            audit_service.append(make_audit_command(stored_case.case, transitioned))
+            return self._save_unlocked(transitioned)
+
     def _save_unlocked(self, case: DefectCase) -> StoredCase:
         stored_case = StoredCase(case=case, updated_at=datetime.now(UTC))
         self._cases[case.case_id] = stored_case
@@ -160,22 +182,23 @@ def create_cases_router(
         http_request: Request,
         actor: Actor = Depends(actor_provider),
     ) -> CaseSummary:
-        stored_case = repository.get(case_id, actor.organization_id)
-        if stored_case is None:
-            raise HTTPException(status_code=404, detail="Case not found")
-        _require_authorized(actor, "defect_case:update:own_line", stored_case.case)
         try:
-            transitioned = CaseService.transition(stored_case.case, request.status, actor)
+            stored_transition = repository.transition_with_audit(
+                case_id,
+                actor.organization_id,
+                request.status,
+                actor,
+                case_audit_service,
+                lambda before, after: _transition_audit_command(before, after, actor, http_request),
+            )
+        except AuthorizationDenied as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
         except InvalidCaseTransition as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
-        try:
-            stored_transition = repository.save_with_audit(
-                transitioned,
-                case_audit_service,
-                _transition_audit_command(stored_case.case, transitioned, actor, http_request),
-            )
         except AuditAppendBlocked as error:
             raise HTTPException(status_code=503, detail="Audit chain verification recovery is required") from error
+        if stored_transition is None:
+            raise HTTPException(status_code=404, detail="Case not found")
         return CaseSummary.from_case(stored_transition)
 
     @router.post("/{case_id}/pause")

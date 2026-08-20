@@ -1,5 +1,6 @@
 """Verification and operational health checks for audit chains."""
 
+import asyncio
 from dataclasses import dataclass
 import logging
 from typing import Protocol
@@ -11,7 +12,12 @@ from odp_api.modules.audit.models import (
     VerificationResult,
     calculate_entry_hash,
 )
-from odp_api.modules.audit.service import AuditAppendBlocked, AuditRepository, AuditService
+from odp_api.modules.audit.service import (
+    AuditAppendBlocked,
+    AuditRecoveryRejected,
+    AuditRepository,
+    AuditService,
+)
 
 
 def verify_organization_chain(
@@ -20,7 +26,8 @@ def verify_organization_chain(
     """Recalculate every entry and linkage in one organization's immutable chain."""
     expected_previous_hash = GENESIS_HASH
     expected_sequence = 1
-    entries = repository.entries_for_organization(organization_id)
+    snapshot = repository.read_consistent_chain(organization_id)
+    entries = snapshot.entries
     for entry in entries:
         if entry.organization_id != organization_id:
             return VerificationResult(
@@ -53,7 +60,7 @@ def verify_organization_chain(
             )
         expected_previous_hash = entry.entry_hash
         expected_sequence += 1
-    head = repository.chain_head_for_organization(organization_id)
+    head = snapshot.head
     if head.last_sequence != expected_sequence - 1 or head.head_hash != expected_previous_hash:
         return VerificationResult(
             organization_id,
@@ -119,9 +126,47 @@ class AuditVerificationMonitor:
         return results
 
 
+class ManagedDailyAuditVerification:
+    """Lifecycle-managed background task that runs the full audit check daily."""
+
+    def __init__(self, monitor: AuditVerificationMonitor, interval_seconds: float = 24 * 60 * 60) -> None:
+        if interval_seconds <= 0:
+            raise ValueError("The verification interval must be positive.")
+        self._monitor = monitor
+        self._interval_seconds = interval_seconds
+        self._stop_requested = asyncio.Event()
+        self._task: asyncio.Task[None] | None = None
+
+    @property
+    def is_running(self) -> bool:
+        return self._task is not None and not self._task.done()
+
+    def start(self) -> None:
+        if self.is_running:
+            return
+        self._stop_requested.clear()
+        self._task = asyncio.create_task(self._run(), name="audit-daily-full-verification")
+
+    async def stop(self) -> None:
+        if self._task is None:
+            return
+        self._stop_requested.set()
+        await self._task
+        self._task = None
+
+    async def _run(self) -> None:
+        while not self._stop_requested.is_set():
+            try:
+                await asyncio.wait_for(self._stop_requested.wait(), timeout=self._interval_seconds)
+            except TimeoutError:
+                self._monitor.daily_full_verify()
+
+
 __all__ = [
     "AuditAppendBlocked",
+    "AuditRecoveryRejected",
     "AuditVerificationMonitor",
     "InMemoryP0FailureReporter",
+    "ManagedDailyAuditVerification",
     "verify_organization_chain",
 ]
