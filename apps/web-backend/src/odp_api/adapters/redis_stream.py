@@ -64,6 +64,22 @@ class SQLiteStreamClient:
             )
         return cursor.rowcount == 1
 
+    def eval(self, script: str, keys: list[str], args: list[str]) -> str | None:
+        """Atomically claim an event key and append its serialized stream payload."""
+        claim_key, stream = keys
+        fields = dict(zip(args[::2], args[1::2], strict=True))
+        with self._lock, self._connection:
+            claim = self._connection.execute(
+                "INSERT OR IGNORE INTO stream_idempotency (idempotency_key) VALUES (?)", (claim_key,)
+            )
+            if claim.rowcount != 1:
+                return None
+            cursor = self._connection.execute(
+                "INSERT INTO stream_entries (stream_name, fields_json) VALUES (?, ?)",
+                (stream, json.dumps(fields, sort_keys=True)),
+            )
+        return f"{cursor.lastrowid}-0"
+
     def close(self) -> None:
         with self._lock:
             self._connection.close()
@@ -102,6 +118,9 @@ class RedisSocketStreamClient:
 
     def setnx(self, key: str, value: str) -> bool:
         return self._execute("SET", key, value, "NX") is not None
+
+    def eval(self, script: str, keys: list[str], args: list[str]) -> object:
+        return self._execute("EVAL", script, str(len(keys)), *keys, *args)
 
     def _execute(self, *command: str) -> object:
         connection = socket.create_connection((self._host, self._port), self._timeout_seconds)

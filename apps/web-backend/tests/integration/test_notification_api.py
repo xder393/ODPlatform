@@ -168,6 +168,61 @@ def test_runtime_fixture_alert_is_idempotent_across_app_restarts() -> None:
     assert len([entry for entry in stream.entries if entry[0] == "odp:inspection-alerts"]) == 1
 
 
+def test_atomic_alert_claim_recovers_after_a_pre_append_failure_without_duplication() -> None:
+    """Persisting a SET NX claim before XADD would lose this alert on retry."""
+    class AtomicFakeRedisStream:
+        def __init__(self) -> None:
+            self.claims: set[str] = set()
+            self.entries: list[tuple[str, dict[str, str]]] = []
+            self.fail_after_claim = True
+
+        def setnx(self, key: str, value: str) -> bool:
+            if key in self.claims:
+                return False
+            self.claims.add(key)
+            return True
+
+        def xadd(self, stream: str, fields: dict[str, str]) -> str:
+            if self.fail_after_claim:
+                self.fail_after_claim = False
+                raise OSError("failure after SET NX and before XADD")
+            self.entries.append((stream, fields))
+            return "1-0"
+
+        def eval(self, script: str, keys: list[str], args: list[str]) -> str | None:
+            claim_key, stream = keys
+            if claim_key in self.claims:
+                return None
+            self.claims.add(claim_key)
+            if self.fail_after_claim:
+                self.fail_after_claim = False
+                self.claims.remove(claim_key)
+                raise OSError("atomic operation rolled back before XADD")
+            self.entries.append((stream, dict(zip(args[::2], args[1::2], strict=True))))
+            return "1-0"
+
+        def xrange(self, stream: str) -> list[tuple[str, dict[str, str]]]:
+            return [entry for entry in self.entries if entry[0] == stream]
+
+    alert = InspectionAlert(
+        event_id=uuid4(),
+        organization_id=uuid4(),
+        camera_id=uuid4(),
+        occurred_at=datetime(2026, 8, 19, tzinfo=UTC),
+        defect_class="scratch",
+        confidence=0.964,
+    )
+    redis = AtomicFakeRedisStream()
+    feed = RedisStreamInspectionAlertFeed(redis)
+
+    with pytest.raises(OSError, match="rolled back"):
+        feed.publish(alert, line_id=None)
+    feed.publish(alert, line_id=None)
+    feed.publish(alert, line_id=None)
+
+    assert len(redis.entries) == 1
+
+
 def test_rediss_stream_client_selects_tls_for_the_parsed_host(monkeypatch: pytest.MonkeyPatch) -> None:
     """Treating rediss as plain Redis would expose credentials and stream contents."""
     import io

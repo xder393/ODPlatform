@@ -46,6 +46,31 @@ git diff --check
 exit 0
 ```
 
+## Fix round 3
+
+- Inspection-alert publication no longer performs a durable claim before a separate append. Redis runtime clients execute one Lua `EVAL` script that performs `SET ... NX` and `XADD` atomically; the durable local SQLite stream client executes the equivalent claim-plus-insert in one transaction.
+- The alert adapter retains its simple-client fallback only for deterministic unit-test doubles. Both configured runtime clients support the atomic operation.
+- The failure-injection regression models a crash/error at the former post-claim/pre-append boundary. The atomic operation rolls back the claim, and retry/restart produces exactly one stream event; repeated publication remains deduplicated.
+
+### Fix-round verification
+
+```text
+apps/web-backend/.venv/bin/pytest apps/web-backend/tests/integration/test_notification_api.py -v
+7 passed, 1 warning
+
+apps/web-backend/.venv/bin/pytest apps/web-backend/tests -v
+49 passed, 1 warning
+
+apps/web-backend/.venv/bin/python -m compileall -q apps/web-backend/src/odp_api
+exit 0
+
+uvx ruff check --select F,I,UP <changed notification stream files>
+All checks passed!
+
+git diff --check
+exit 0
+```
+
 `docker compose -f deploy/compose.yaml config` could not run in this environment because the `docker` executable is not installed; YAML parsing above confirmed the Compose file is syntactically valid.
 
 ## Fix round 2
