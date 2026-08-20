@@ -18,6 +18,7 @@ from odp_api.modules.audit.service import (
     AuditRepository,
     AuditService,
 )
+from odp_api.observability.metrics import DEFAULT_REGISTRY, MetricRegistry
 
 
 def verify_organization_chain(
@@ -103,9 +104,15 @@ class InMemoryP0FailureReporter:
 class AuditVerificationMonitor:
     """Runs startup sampling and daily full checks, holding unsafe chains at P0."""
 
-    def __init__(self, service: AuditService, reporter: P0FailureReporter | None = None) -> None:
+    def __init__(
+        self,
+        service: AuditService,
+        reporter: P0FailureReporter | None = None,
+        metric_registry: MetricRegistry | None = None,
+    ) -> None:
         self._service = service
         self._reporter = reporter or LoggingP0FailureReporter()
+        self._metrics = metric_registry or DEFAULT_REGISTRY
 
     def startup_sample_verify(self, sample_size: int = 10) -> dict[UUID, VerificationResult]:
         organization_ids = sorted(self._service.repository.organization_ids(), key=str)[:sample_size]
@@ -121,6 +128,7 @@ class AuditVerificationMonitor:
         }
         for organization_id, result in results.items():
             if not result.is_valid:
+                self._metrics.inc("audit_chain_verification_failure_total")
                 self._service.block_appends(organization_id)
                 self._reporter.emit(AuditP0Failure(organization_id, result))
         return results

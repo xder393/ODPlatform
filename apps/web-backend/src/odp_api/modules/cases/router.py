@@ -19,6 +19,7 @@ from odp_api.modules.identity.service import (
     get_current_actor,
 )
 from odp_api.modules.inspection.models import CaseStatus, DefectCase, InspectionEvent
+from odp_api.observability.metrics import DEFAULT_REGISTRY, MetricRegistry
 
 if TYPE_CHECKING:
     from odp_api.modules.audit.models import AuditCommand
@@ -153,6 +154,7 @@ def create_cases_router(
     actor_provider: Callable[[], Actor] = get_current_actor,
     reauthentication_service: ReauthenticationService | None = None,
     audit_service: "AuditService | None" = None,
+    metric_registry: MetricRegistry | None = None,
 ) -> APIRouter:
     from odp_api.modules.audit.service import AuditAppendBlocked, AuditService, InMemoryAuditRepository
 
@@ -161,6 +163,7 @@ def create_cases_router(
         InMemoryReauthenticationStore()
     )
     case_audit_service = audit_service or AuditService(InMemoryAuditRepository())
+    case_metrics = metric_registry or DEFAULT_REGISTRY
 
     @router.get("", response_model=list[CaseSummary])
     def list_cases(
@@ -199,6 +202,8 @@ def create_cases_router(
             raise HTTPException(status_code=503, detail="Audit chain verification recovery is required") from error
         if stored_transition is None:
             raise HTTPException(status_code=404, detail="Case not found")
+        if request.status == "RESOLVED":
+            _observe_case_resolution(stored_transition, case_metrics)
         return CaseSummary.from_case(stored_transition)
 
     @router.post("/{case_id}/pause")
@@ -229,6 +234,17 @@ def _require_authorized(actor: Actor, permission: str, defect_case: DefectCase) 
         authorize(actor, permission, defect_case.organization_id, defect_case.line_id)
     except AuthorizationDenied as error:
         raise HTTPException(status_code=403, detail=str(error)) from error
+
+
+def _observe_case_resolution(stored_case: StoredCase, registry: MetricRegistry) -> None:
+    """Record the case creation-to-RESOLVED duration in seconds.
+
+    Case creation time is approximated by the first inspection event timestamp,
+    and the resolution time by the repository write that stored the transition.
+    """
+    first_event = stored_case.case.inspection_events[0]
+    resolution_seconds = (stored_case.updated_at - first_event.occurred_at).total_seconds()
+    registry.observe("case_resolution_seconds", max(resolution_seconds, 0.0))
 
 
 def _transition_audit_command(

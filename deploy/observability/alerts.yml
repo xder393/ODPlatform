@@ -1,0 +1,41 @@
+groups:
+  - name: odp-quality-inspection
+    rules:
+      - alert: InspectionTaskQueueBacklog
+        expr: task_queue_depth > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Inspection task queue depth exceeds 1,000 outstanding tasks"
+          description: "The task queue holds {{ $value }} outstanding tasks. Frames older than the 2-second cutoff are being shed."
+
+      - alert: TaskDeadLetterDetected
+        expr: increase(task_dead_letter_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A task entered the dead-letter state"
+          description: "{{ $value }} tasks exhausted their retry budget in the last 5 minutes."
+
+      - alert: AuditChainVerificationFailed
+        expr: increase(audit_chain_verification_failure_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Audit hash-chain verification failed"
+          description: "{{ $value }} organizations failed audit chain verification in the last 5 minutes. Appends are blocked at P0 pending explicit recovery."
+
+      - alert: VisionInferenceErrorRateHigh
+        expr: |
+          rate(vision_inference_errors_total[5m])
+            /
+          clamp_min(rate(vision_inference_seconds_count[5m]), 1e-9) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Vision inference error rate exceeds 10%"
+          description: "The 5-minute vision inference error rate is {{ $value | humanizePercentage }}."

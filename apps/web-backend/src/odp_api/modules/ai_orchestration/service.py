@@ -4,6 +4,7 @@ from typing import Literal
 from uuid import UUID
 
 from odp_api.modules.inspection.models import DefectCase
+from odp_api.observability.metrics import DEFAULT_REGISTRY, MetricRegistry
 from odp_api.ports.generation import GenerationRequest, LLMGenerationPort
 from odp_api.ports.retrieval import RAGRetrievalPort, RetrievalFilters, RetrievedChunk
 from pydantic import BaseModel
@@ -34,11 +35,18 @@ class AdviceResponse(BaseModel):
 class AdviceService:
     """Chooses the strongest safely scoped evidence tier for one defect case."""
 
-    def __init__(self, retrieval: RAGRetrievalPort, generator: LLMGenerationPort) -> None:
+    def __init__(
+        self,
+        retrieval: RAGRetrievalPort,
+        generator: LLMGenerationPort,
+        metric_registry: MetricRegistry | None = None,
+    ) -> None:
         self._retrieval = retrieval
         self._generator = generator
+        self._metrics = metric_registry or DEFAULT_REGISTRY
 
     def advise(self, defect_case: DefectCase) -> AdviceResponse:
+        self._metrics.inc("rag_advice_requests_total")
         defect_class = defect_case.inspection_events[0].defect_class
         product_category = defect_case.product_category
         query = f"{defect_class} inspection guidance"
@@ -57,6 +65,7 @@ class AdviceService:
                 )
             ]
             if applicable_chunks:
+                self._metrics.inc("rag_advice_hits_total")
                 return self._render(defect_class, confidence, applicable_chunks)
         return AdviceResponse(
             answer=HUMAN_REVIEW_MESSAGE,

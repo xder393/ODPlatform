@@ -24,7 +24,15 @@ from odp_api.modules.identity.service import (
 )
 from odp_api.modules.inspection.service import InspectionService
 from odp_api.modules.notifications.router import create_notifications_router
-from odp_api.modules.tasks.service import InMemoryTaskMetrics, TaskService
+from odp_api.modules.tasks.service import TaskService
+from odp_api.observability.metrics import (
+    DEFAULT_REGISTRY,
+    MetricRegistry,
+    RegistryTaskMetrics,
+    register_standard_metrics,
+)
+from odp_api.observability.router import create_metrics_router
+from odp_api.observability.tracing import CorrelationIdMiddleware
 from odp_api.ports.vision import FrameInput
 from odp_api.settings import Settings
 
@@ -42,11 +50,18 @@ def create_app(
     password_verifier: PasswordVerifier | None = None,
     daily_verification_interval_seconds: float = 24 * 60 * 60,
     stream_client: object | None = None,
+    metric_registry: MetricRegistry | None = None,
 ) -> FastAPI:
     """Create the ODPlatform quality inspection API."""
     runtime_settings = settings or Settings()
+    registry = metric_registry or DEFAULT_REGISTRY
+    # Pre-register the documented metric set so /metrics always exposes every
+    # series, including gauges that no code path has written yet.
+    register_standard_metrics(registry)
     audit_service = AuditService(InMemoryAuditRepository())
-    audit_verification_monitor = AuditVerificationMonitor(audit_service)
+    audit_verification_monitor = AuditVerificationMonitor(
+        audit_service, metric_registry=registry
+    )
     daily_audit_verification = ManagedDailyAuditVerification(
         audit_verification_monitor, daily_verification_interval_seconds
     )
@@ -55,7 +70,7 @@ def create_app(
     task_service = TaskService(
         task_repository,
         RedisStreamTaskQueue(runtime_stream_client),
-        InMemoryTaskMetrics(),
+        RegistryTaskMetrics(registry),
         RedisStreamTaskAlertPublisher(runtime_stream_client),
     )
     task_service.recover_unpublished()
@@ -75,12 +90,14 @@ def create_app(
                 close()
 
     app = FastAPI(title=runtime_settings.app_name, lifespan=lifespan)
+    app.add_middleware(CorrelationIdMiddleware)
     app.state.jwt_authenticator = JwtAuthenticator(
         runtime_settings.auth_jwt_secret,
         actor_repository or InMemoryActorRepository({}),
     )
     app.include_router(health_router)
-    inspection_service = InspectionService(MockVisionAdapter())
+    app.include_router(create_metrics_router(registry))
+    inspection_service = InspectionService(MockVisionAdapter(), metric_registry=registry)
     fixture_case = inspection_service.inspect_fixture(
         FrameInput(fixture_name="scratch-frame-001", content=b"scratch-frame-001"),
         organization_id=UUID("00000000-0000-0000-0000-000000000001"),
@@ -89,18 +106,22 @@ def create_app(
     )
     reauthentication_service = ReauthenticationService(InMemoryReauthenticationStore())
     case_repository = InMemoryCaseRepository((fixture_case,))
-    advice_service = AdviceService(PgVectorRetrievalAdapter(), MockLLMAdapter())
+    advice_service = AdviceService(
+        PgVectorRetrievalAdapter(), MockLLMAdapter(), metric_registry=registry
+    )
     app.state.audit_service = audit_service
     app.state.audit_verification_monitor = audit_verification_monitor
     app.state.daily_audit_verification = daily_audit_verification
     app.state.task_service = task_service
     app.state.advice_service = advice_service
+    app.state.inspection_service = inspection_service
 
     app.include_router(
         create_cases_router(
             case_repository,
             reauthentication_service=reauthentication_service,
             audit_service=audit_service,
+            metric_registry=registry,
         )
     )
     app.include_router(create_advice_router(case_repository, advice_service))
