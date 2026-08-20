@@ -41,3 +41,19 @@ needed.
 
 - The local task runtime created untracked `apps/web-backend/.venv` and
   `apps/web-backend/uv.lock`; neither is part of this task’s commit.
+
+## Review follow-up
+
+- On a reconciliation failure, `useInspectionFeed` now closes the active
+  socket, allowing its normal close handler to schedule the retry. The async
+  continuation checks both cleanup state and connection identity before any
+  post-await state update.
+- The focused frontend test now proves that a message received before REST
+  reconciliation is appended only after reconciliation completes. It also
+  simulates `onclose`, advances the reconnect timer, opens a second socket,
+  and verifies a second reconciliation call after that socket opens.
+- Follow-up verification:
+  `npm test --prefix apps/web-frontend -- --run RealtimeWorkbench.test.tsx`
+  — 3 passed; `npm run build --prefix apps/web-frontend` — passed;
+  `PYTHONPATH="apps/web-backend/src:packages/shared-schemas/src" .venv-runtime/bin/pytest apps/web-backend/tests/integration/test_notification_api.py -v`
+  — 1 passed (with the existing FastAPI/TestClient deprecation warning).

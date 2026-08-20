@@ -28,29 +28,38 @@ export function useInspectionFeed(
     };
 
     const connect = () => {
-      socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/inspection-events`);
+      const connection = new WebSocket(
+        `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/inspection-events`,
+      );
+      socket = connection;
       const queued: InspectionAlert[] = [];
       let reconciled = false;
 
-      socket.onopen = async () => {
+      connection.onopen = async () => {
         try {
           const response = await fetch(`/api/v1/inspection-events?updated_after=${encodeURIComponent(since)}`);
           if (!response.ok) throw new Error("Inspection event reconciliation failed");
-          append(await response.json() as InspectionAlert[]);
+          const recovered = await response.json() as InspectionAlert[];
+          if (stopped || socket !== connection) return;
+          append(recovered);
           reconciled = true;
           append(queued);
           setReconnecting(false);
         } catch {
-          setReconnecting(true);
+          if (!stopped && socket === connection) {
+            setReconnecting(true);
+            connection.close();
+          }
         }
       };
-      socket.onmessage = (event) => {
+      connection.onmessage = (event) => {
+        if (stopped || socket !== connection) return;
         const alert = JSON.parse(event.data) as InspectionAlert;
         if (reconciled) append([alert]);
         else queued.push(alert);
       };
-      socket.onclose = () => {
-        if (!stopped) {
+      connection.onclose = () => {
+        if (!stopped && socket === connection) {
           setReconnecting(true);
           reconnectTimer = window.setTimeout(connect, 1000);
         }

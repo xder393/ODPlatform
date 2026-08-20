@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RealtimeWorkbench } from "./RealtimeWorkbench";
 
@@ -8,6 +8,8 @@ class TestWebSocket {
   static instances: TestWebSocket[] = [];
   onopen: (() => void) | null = null;
   onmessage: ((event: MessageEvent<string>) => void) | null = null;
+  onclose: (() => void) | null = null;
+  close = vi.fn();
 
   constructor() {
     TestWebSocket.instances.push(this);
@@ -30,6 +32,8 @@ describe("RealtimeWorkbench", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => [alert] }));
   });
 
+  afterEach(() => vi.useRealTimers());
+
   it("renders the alert and reconciles unseen events when the socket reconnects", async () => {
     render(<RealtimeWorkbench since="2026-08-19T08:00:00Z" />);
     TestWebSocket.instances[0].onopen?.();
@@ -44,5 +48,40 @@ describe("RealtimeWorkbench", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "确认处置" }));
     expect(screen.getByText("已确认处置")).toBeInTheDocument();
+  });
+
+  it("appends an alert queued before reconciliation completes", async () => {
+    let resolveReconciliation: (value: { ok: boolean; json: () => Promise<Array<typeof alert>> }) => void;
+    const reconciliation = new Promise<{ ok: boolean; json: () => Promise<Array<typeof alert>> }>((resolve) => {
+      resolveReconciliation = resolve;
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(reconciliation));
+    render(<RealtimeWorkbench since="2026-08-19T08:00:00Z" />);
+
+    TestWebSocket.instances[0].onopen?.();
+    TestWebSocket.instances[0].onmessage?.({ data: JSON.stringify(alert) } as MessageEvent<string>);
+    resolveReconciliation!({ ok: true, json: async () => [] });
+
+    expect(await screen.findByText("疑似表面划痕")).toBeInTheDocument();
+  });
+
+  it("reconnects and reconciles after a failed reconciliation closes the socket", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce({ ok: false })
+      .mockResolvedValueOnce({ ok: true, json: async () => [alert] }));
+    render(<RealtimeWorkbench since="2026-08-19T08:00:00Z" />);
+
+    TestWebSocket.instances[0].onopen?.();
+    await Promise.resolve();
+    expect(TestWebSocket.instances[0].close).toHaveBeenCalled();
+
+    TestWebSocket.instances[0].onclose?.();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(TestWebSocket.instances).toHaveLength(2);
+
+    TestWebSocket.instances[1].onopen?.();
+    await Promise.resolve();
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 });
