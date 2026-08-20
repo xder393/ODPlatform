@@ -88,7 +88,8 @@ ORDER BY combined_score DESC, chunk_id ASC
 LIMIT %(limit)s
 """
 
-_VECTOR_DIMENSIONS = 64
+# Keep this synchronized with ``embedding vector(64)`` in migration 0001.
+PGVECTOR_EMBEDDING_DIMENSIONS = 64
 _TOKEN_PATTERN = re.compile(r"[\w]+", re.UNICODE)
 
 
@@ -128,6 +129,20 @@ class PgVectorPostgresAdapter:
         chunks: Sequence[KnowledgeChunk],
     ) -> None:
         PgVectorRetrievalAdapter._validate_index_scope(document, parents, chunks)
+        chunk_parameters = [
+            {
+                "chunk_id": chunk.chunk_id,
+                "parent_chunk_id": chunk.parent_chunk_id,
+                "document_id": chunk.document_id,
+                "organization_id": chunk.organization_id,
+                "text": chunk.text,
+                "page_number": chunk.page_number,
+                "paragraph_number": chunk.paragraph_number,
+                "child_index": chunk.child_index,
+                "embedding": _vector_parameter(self._embed(chunk.text)),
+            }
+            for chunk in chunks
+        ]
         document_parameters = _document_parameters(document)
         self._executor.execute(
             """UPDATE knowledge_documents SET status = 'SUPERSEDED'
@@ -151,7 +166,7 @@ class PgVectorPostgresAdapter:
                     "paragraph_number": parent.paragraph_number,
                 },
             )
-        for chunk in chunks:
+        for parameters in chunk_parameters:
             self._executor.execute(
                 """INSERT INTO knowledge_chunk_index (
                        chunk_id, parent_chunk_id, document_id, organization_id, text, page_number,
@@ -159,17 +174,7 @@ class PgVectorPostgresAdapter:
                    ) VALUES (%(chunk_id)s, %(parent_chunk_id)s, %(document_id)s, %(organization_id)s,
                              %(text)s, %(page_number)s, %(paragraph_number)s, %(child_index)s,
                              CAST(%(embedding)s AS vector))""",
-                {
-                    "chunk_id": chunk.chunk_id,
-                    "parent_chunk_id": chunk.parent_chunk_id,
-                    "document_id": chunk.document_id,
-                    "organization_id": chunk.organization_id,
-                    "text": chunk.text,
-                    "page_number": chunk.page_number,
-                    "paragraph_number": chunk.paragraph_number,
-                    "child_index": chunk.child_index,
-                    "embedding": _vector_parameter(self._embed(chunk.text)),
-                },
+                parameters,
             )
 
     def record_failure(self, document: KnowledgeDocument) -> None:
@@ -233,7 +238,9 @@ def _document_parameters(document: KnowledgeDocument) -> dict[str, object]:
 
 
 def _vector_parameter(vector: Sequence[float]) -> str:
-    if not vector or any(not math.isfinite(value) for value in vector):
+    if len(vector) != PGVECTOR_EMBEDDING_DIMENSIONS:
+        raise ValueError(f"Embeddings must contain exactly {PGVECTOR_EMBEDDING_DIMENSIONS} dimensions.")
+    if any(not math.isfinite(value) for value in vector):
         raise ValueError("Embeddings must contain finite values.")
     return json.dumps(list(vector), separators=(",", ":"))
 
@@ -400,10 +407,10 @@ def _tokens(text: str) -> list[str]:
 
 
 def _vector(tokens: Sequence[str]) -> list[float]:
-    values = [0.0] * _VECTOR_DIMENSIONS
+    values = [0.0] * PGVECTOR_EMBEDDING_DIMENSIONS
     for token in tokens:
         digest = hashlib.sha256(token.encode("utf-8")).digest()
-        index = digest[0] % _VECTOR_DIMENSIONS
+        index = digest[0] % PGVECTOR_EMBEDDING_DIMENSIONS
         values[index] += 1.0 if digest[1] % 2 else -1.0
     return values
 

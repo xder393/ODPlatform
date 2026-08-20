@@ -13,6 +13,7 @@ WEB_BACKEND_SRC = Path(__file__).parents[3] / "src"
 sys.path.insert(0, str(WEB_BACKEND_SRC))
 
 from odp_api.adapters.retrieval.pgvector import (
+    PGVECTOR_EMBEDDING_DIMENSIONS,
     PgVectorPostgresAdapter,
     PgVectorRetrievalAdapter,
 )
@@ -60,7 +61,11 @@ def make_service() -> tuple[KnowledgeIngestionService, PgVectorRetrievalAdapter]
     return KnowledgeIngestionService(index, chunk_size_words=4, overlap_words=2), index
 
 
-def make_docx(*, include_package_relationship: bool = True) -> bytes:
+def make_docx(
+    *,
+    include_package_relationship: bool = True,
+    office_document_target_mode: str | None = None,
+) -> bytes:
     output = BytesIO()
     with ZipFile(output, "w", ZIP_DEFLATED) as archive:
         archive.writestr(
@@ -72,11 +77,20 @@ def make_docx(*, include_package_relationship: bool = True) -> bytes:
             """<?xml version=\"1.0\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>Wear safety gloves.</w:t></w:r></w:p><w:p><w:r><w:t>Record every pressure deviation.</w:t></w:r></w:p></w:body></w:document>""",
         )
         if include_package_relationship:
+            target_mode = (
+                f' TargetMode="{office_document_target_mode}"'
+                if office_document_target_mode is not None
+                else ""
+            )
             archive.writestr(
                 "_rels/.rels",
-                """<?xml version=\"1.0\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>""",
+                f"""<?xml version=\"1.0\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"{target_mode}/></Relationships>""",
             )
     return output.getvalue()
+
+
+def valid_embedding() -> list[float]:
+    return [0.25] * PGVECTOR_EMBEDDING_DIMENSIONS
 
 
 class RecordingPostgresExecutor:
@@ -200,6 +214,20 @@ def test_rejects_docx_zip_without_office_document_relationship() -> None:
     assert document.failure_reason == "Invalid DOCX document."
 
 
+def test_rejects_docx_with_external_office_document_relationship() -> None:
+    service, _ = make_service()
+
+    document = service.ingest(
+        organization_id=uuid4(),
+        source_name="external rules",
+        filename="external-rules.docx",
+        content=make_docx(office_document_target_mode="External"),
+    )
+
+    assert document.status == "FAILED"
+    assert document.failure_reason == "Invalid DOCX document."
+
+
 def test_search_never_returns_another_tenants_chunk() -> None:
     service, index = make_service()
     organization_id = uuid4()
@@ -247,7 +275,7 @@ def test_rejects_unsupported_content_as_a_failed_document() -> None:
 
 def test_postgres_retrieval_executes_tenant_scoped_normalized_hybrid_query() -> None:
     executor = RecordingPostgresExecutor()
-    adapter = PgVectorPostgresAdapter(executor, embed=lambda _: [0.25, -0.25])
+    adapter = PgVectorPostgresAdapter(executor, embed=lambda _: valid_embedding())
     organization_id = uuid4()
     line_id = uuid4()
 
@@ -263,7 +291,7 @@ def test_postgres_retrieval_executes_tenant_scoped_normalized_hybrid_query() -> 
     assert "vector_score" in sql and "bm25_score" in sql and "combined_score" in sql
     assert parameters == {
         "query": "pressure limit",
-        "query_embedding": "[0.25,-0.25]",
+        "query_embedding": "[" + ",".join(["0.25"] * PGVECTOR_EMBEDDING_DIMENSIONS) + "]",
         "organization_id": organization_id,
         "document_status": "INDEXED",
         "line_id": line_id,
@@ -272,9 +300,19 @@ def test_postgres_retrieval_executes_tenant_scoped_normalized_hybrid_query() -> 
     }
 
 
-def test_postgres_index_persists_tenant_scoped_document_parent_and_child_rows() -> None:
+def test_postgres_adapter_rejects_wrong_embedding_dimension_before_database_execution() -> None:
     executor = RecordingPostgresExecutor()
     adapter = PgVectorPostgresAdapter(executor, embed=lambda _: [0.25, -0.25])
+
+    with pytest.raises(ValueError, match="64 dimensions"):
+        adapter.search("pressure limit", uuid4(), RetrievalFilters())
+
+    assert executor.calls == []
+
+
+def test_postgres_index_persists_tenant_scoped_document_parent_and_child_rows() -> None:
+    executor = RecordingPostgresExecutor()
+    adapter = PgVectorPostgresAdapter(executor, embed=lambda _: valid_embedding())
     organization_id = uuid4()
     document_id = uuid4()
     parent_id = uuid4()
@@ -316,4 +354,12 @@ def test_postgres_index_persists_tenant_scoped_document_parent_and_child_rows() 
     assert "INSERT INTO knowledge_parent_chunks" in executor.calls[2][0]
     assert "INSERT INTO knowledge_chunk_index" in executor.calls[3][0]
     assert all(parameters["organization_id"] == organization_id for _, parameters in executor.calls)
-    assert executor.calls[-1][1]["embedding"] == "[0.25,-0.25]"
+    assert executor.calls[-1][1]["embedding"] == "[" + ",".join(["0.25"] * PGVECTOR_EMBEDDING_DIMENSIONS) + "]"
+
+    rejected_executor = RecordingPostgresExecutor()
+    rejected_adapter = PgVectorPostgresAdapter(
+        rejected_executor, embed=lambda _: [0.25, -0.25]
+    )
+    with pytest.raises(ValueError, match="64 dimensions"):
+        rejected_adapter.index(document, [parent], [child])
+    assert rejected_executor.calls == []

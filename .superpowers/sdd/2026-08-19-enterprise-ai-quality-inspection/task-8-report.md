@@ -53,3 +53,28 @@ exit 0
 ```
 
 `psql`, `postgres`, and `initdb` are unavailable in this worktree, so the pgvector migration cannot be executed locally. The executable contract tests cover its adapter boundary; a deployment PostgreSQL 16 + pgvector instance must apply the migration before wiring `PgVectorPostgresAdapter` into runtime composition.
+
+## Fix round 2
+
+- Added `PGVECTOR_EMBEDDING_DIMENSIONS = 64` as the adapter’s single embedding-dimension contract, synchronized with the pgvector migration. Query embeddings must have exactly 64 finite values before database execution; indexing precomputes and validates every child embedding before issuing supersession or insert statements.
+- Updated production-adapter tests to use 64-dimensional vectors. The two-dimensional mismatch regression proves both search and indexing fail with no executor calls.
+- DOCX package validation now accepts an `officeDocument` relationship only when `TargetMode` is absent or exactly `Internal`. The external-target spoof regression is rejected as a failed document.
+
+### Fix-round verification
+
+```text
+$ apps/web-backend/.venv/bin/pytest apps/web-backend/tests/modules/knowledge/test_ingest.py -v
+11 passed in 0.03s
+
+$ apps/web-backend/.venv/bin/pytest apps/web-backend/tests -v
+60 passed, 1 warning in 0.27s
+
+$ apps/web-backend/.venv/bin/python -m compileall -q apps/web-backend/src/odp_api
+exit 0
+
+$ uvx ruff check --select F,I,UP <Task 8 changed source and tests>
+All checks passed!
+
+$ git diff --check
+exit 0
+```

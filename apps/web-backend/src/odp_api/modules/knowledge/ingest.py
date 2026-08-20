@@ -196,6 +196,7 @@ def _extract_docx_paragraphs(content: bytes) -> list[tuple[int, int, str]]:
     has_office_document_relationship = any(
         relationship.get("Type") == _OFFICE_DOCUMENT_RELATIONSHIP
         and relationship.get("Target", "").lstrip("/") == "word/document.xml"
+        and relationship.get("TargetMode") in {None, "Internal"}
         for relationship in relationships.iter(f"{_PACKAGE_RELATIONSHIPS_NAMESPACE}Relationship")
     )
     if not has_word_document_content_type or not has_office_document_relationship:
