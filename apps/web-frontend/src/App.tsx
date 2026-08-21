@@ -35,7 +35,7 @@ export function App({ since }: { since: string }) {
   return (
     <>
       <header className="app-header">
-        <span className="app-title">企业 AI 质检平台</span>
+        <h1 className="app-title">企业 AI 质检平台</h1>
         <button type="button" className="app-logout" onClick={handleLogout}>
           退出登录
         </button>

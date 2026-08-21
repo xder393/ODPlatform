@@ -188,7 +188,7 @@ export function RealtimeWorkbench({ since }: { since: string }) {
 
   return (
     <main>
-      <h1>实时质检工作台</h1>
+      <h2>实时质检工作台</h2>
       <section aria-label="实时视频">
         <div role="img" aria-label="生产线实时视频占位符">视频流待接入</div>
       </section>

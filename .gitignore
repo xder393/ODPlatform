@@ -96,3 +96,4 @@ temp/
 apps/platform/configs/runtime/
 apps/platform/configs/datasets/
 .venv-runtime/
+uv.lock
