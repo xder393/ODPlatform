@@ -20,6 +20,10 @@ class PasswordVerifier(Protocol):
     def verify(self, actor_id: UUID, password: str) -> bool: ...
 
 
+class ActorEmailLookup(Protocol):
+    def get_by_email(self, email: str) -> Actor | None: ...
+
+
 class InMemoryPasswordVerifier:
     """Deterministic password adapter for tests and the local demo only."""
 
@@ -90,13 +94,24 @@ class WebSocketAuthenticationError(ValueError):
 
 
 def get_current_websocket_actor(websocket: WebSocket) -> Actor:
-    """Authenticate a WebSocket's Authorization header without HTTPBearer(Request)."""
+    """Authenticate a WebSocket without HTTPBearer(Request).
+
+    Browser WebSocket APIs cannot attach headers, so when the Authorization
+    header is absent the token is read from the ``?token=<jwt>`` query
+    parameter. The header takes precedence when both are present. Query
+    parameters can leak into proxy and browser history, so production should
+    keep this fallback for short-lived WebSocket connections and prefer
+    first-party-cookie or subprotocol negotiation for long-lived sockets.
+    """
     authorization = websocket.headers.get("authorization")
-    if authorization is None:
-        raise WebSocketAuthenticationError("Authentication required")
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token or " " in token:
-        raise WebSocketAuthenticationError("Invalid credentials")
+    if authorization is not None:
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() != "bearer" or not token or " " in token:
+            raise WebSocketAuthenticationError("Invalid credentials")
+    else:
+        token = websocket.query_params.get("token")
+        if not token:
+            raise WebSocketAuthenticationError("Authentication required")
     try:
         return websocket.app.state.jwt_authenticator.authenticate(token)
     except ValueError as error:
@@ -107,10 +122,16 @@ class ReauthenticateRequest(BaseModel):
     password: str
 
 
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
 def create_auth_router(
     actor_provider: Callable[[], Actor] = get_current_actor,
     reauthentication_service: ReauthenticationService | None = None,
     password_verifier: PasswordVerifier | None = None,
+    actor_repository: ActorEmailLookup | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
     service = reauthentication_service or ReauthenticationService(InMemoryReauthenticationStore())
@@ -125,5 +146,28 @@ def create_auth_router(
             raise HTTPException(status_code=401, detail="Invalid password")
         service.record_success(actor.actor_id, datetime.now(UTC))
         return {"reauthenticated": True}
+
+    @router.post("/login")
+    def login(request: LoginRequest, http_request: Request) -> dict[str, str]:
+        """Exchange demo credentials for a compact JWT access token.
+
+        Unknown email and wrong password deliberately produce the same 401 so
+        the endpoint never discloses which accounts exist.
+        """
+        repository = actor_repository
+        if repository is None:
+            raise HTTPException(status_code=503, detail="Actor lookup is not configured.")
+        actor = repository.get_by_email(request.email.strip().lower())
+        if actor is None or not verifier.verify(actor.actor_id, request.password):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        authenticator = getattr(http_request.app.state, "jwt_authenticator", None)
+        secret = getattr(authenticator, "secret", None)
+        if not secret:
+            raise HTTPException(status_code=503, detail="JWT authentication is not configured.")
+        # Deferred import keeps this module free of adapter imports; the pure
+        # signing function lives next to the verification logic it pairs with.
+        from odp_api.adapters.auth.jwt import issue_token
+
+        return {"access_token": issue_token(actor.actor_id, secret)}
 
     return router

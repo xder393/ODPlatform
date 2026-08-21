@@ -9,5 +9,12 @@ class Settings(BaseSettings):
     auth_jwt_secret: str | None = None
     redis_url: str = "redis://redis:6379/0"
     task_database_path: str = "/tmp/odp-tasks.sqlite3"
+    # "inmemory" keeps local demos and tests fully offline; "pgvector" uses
+    # PostgreSQL with the pgvector extension through a lazily imported driver.
+    retrieval_backend: str = "inmemory"
+    postgres_url: str = "postgresql://odp:odp@postgres:5432/odp"
+    # Load the deterministic demo seed at app creation (used by the Compose
+    # stack so the browser demo can log in with the demo accounts).
+    seed_demo: bool = False
 
     model_config = SettingsConfigDict(env_prefix="ODP_", case_sensitive=False)

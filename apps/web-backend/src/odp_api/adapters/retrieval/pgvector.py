@@ -511,3 +511,35 @@ def _normalize(scores: Sequence[float]) -> list[float]:
     if maximum == minimum:
         return [1.0 if maximum > 0 else 0.0 for _ in scores]
     return [(score - minimum) / (maximum - minimum) for score in scores]
+
+
+class PsycopgPostgresExecutor:
+    """Parameterized executor over one PostgreSQL connection URL."""
+
+    def __init__(self, postgres_url: str) -> None:
+        self._postgres_url = postgres_url
+
+    def execute(self, sql: str, parameters: Mapping[str, object]) -> None:
+        import psycopg  # deferred optional runtime dependency
+
+        with psycopg.connect(self._postgres_url) as connection:
+            connection.execute(sql, parameters)
+
+    def fetch_all(
+        self, sql: str, parameters: Mapping[str, object]
+    ) -> Sequence[Mapping[str, object]]:
+        import psycopg  # deferred optional runtime dependency
+        from psycopg.rows import dict_row
+
+        with psycopg.connect(self._postgres_url, row_factory=dict_row) as connection:
+            return list(connection.execute(sql, parameters))
+
+
+def psycopg_executor(postgres_url: str) -> PostgresExecutorPort:
+    """Build an executor on a PostgreSQL connection URL.
+
+    ``psycopg`` is imported inside the executor methods on purpose: it is only
+    required when the pgvector retrieval backend runs against a real database.
+    Local tests and the in-memory backend never load the driver.
+    """
+    return PsycopgPostgresExecutor(postgres_url)

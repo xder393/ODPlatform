@@ -19,3 +19,6 @@ class Actor:
     organization_id: UUID
     role: Role
     line_ids: frozenset[UUID]
+    # Optional because service accounts created before the login feature exist
+    # without an email; the demo seed always sets one.
+    email: str | None = None

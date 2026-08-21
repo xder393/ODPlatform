@@ -36,8 +36,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install fastapi httpx pytest pydantic pydantic-settings pypdf psycopg
-          pip install -e ./apps/platform --no-deps -e ./packages/shared-schemas --no-deps
+          pip install fastapi httpx pytest pydantic pydantic-settings pypdf "psycopg[binary]"
+          pip install -e ./apps/web-backend --no-deps -e ./apps/platform --no-deps -e ./packages/shared-schemas --no-deps
 
       - name: Run tests
         run: pytest apps/web-backend/tests -q

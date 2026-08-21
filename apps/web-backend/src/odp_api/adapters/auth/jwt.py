@@ -3,6 +3,7 @@
 import base64
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from hashlib import sha256
 from hmac import compare_digest, new
 import json
@@ -10,6 +11,11 @@ from typing import Protocol
 from uuid import UUID
 
 from odp_api.modules.identity.models import Actor
+
+# Matches the 12-hour login grant documented for the demo; expiry validation
+# is not enforced by ``extract_subject`` yet, so tokens without ``exp`` (used
+# by the test suite) remain accepted.
+ACCESS_TOKEN_TTL_SECONDS = 12 * 60 * 60
 
 
 class InvalidJwtSubject(ValueError):
@@ -29,6 +35,13 @@ class InMemoryActorRepository:
     def get(self, actor_id: UUID) -> Actor | None:
         return self._actors.get(actor_id)
 
+    def get_by_email(self, email: str) -> Actor | None:
+        """Return the actor registered under exactly this email address."""
+        for actor in self._actors.values():
+            if actor.email == email:
+                return actor
+        return None
+
 
 @dataclass(frozen=True, slots=True)
 class JwtAuthenticator:
@@ -43,6 +56,35 @@ class JwtAuthenticator:
         if actor is None:
             raise InvalidJwtSubject("JWT subject has no active actor grant.")
         return actor
+
+
+def issue_token(
+    actor_id: UUID,
+    secret: str,
+    *,
+    expires_in_seconds: int = ACCESS_TOKEN_TTL_SECONDS,
+) -> str:
+    """Issue a compact HS256 JWT carrying the actor UUID in its ``sub`` claim.
+
+    The payload also carries ``iat`` and ``exp`` for observability and future
+    expiry enforcement. ``extract_subject`` currently validates only the
+    signature and the ``sub`` claim, so tokens without an ``exp`` (such as the
+    deterministic tokens built by the test suite) remain accepted.
+    """
+    issued_at = int(datetime.now(UTC).timestamp())
+    header = {"alg": "HS256", "typ": "JWT"}
+    payload = {
+        "sub": str(actor_id),
+        "iat": issued_at,
+        "exp": issued_at + expires_in_seconds,
+    }
+    encoded_header = _encode_segment(json.dumps(header, separators=(",", ":")))
+    encoded_payload = _encode_segment(json.dumps(payload, separators=(",", ":")))
+    signing_input = f"{encoded_header}.{encoded_payload}".encode()
+    signature = base64.urlsafe_b64encode(
+        new(secret.encode(), signing_input, sha256).digest()
+    ).rstrip(b"=").decode()
+    return f"{encoded_header}.{encoded_payload}.{signature}"
 
 
 def extract_subject(token: str, secret: str) -> UUID:
@@ -78,3 +120,7 @@ def extract_subject(token: str, secret: str) -> UUID:
 
 def _decode_segment(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def _encode_segment(value: str) -> str:
+    return base64.urlsafe_b64encode(value.encode()).rstrip(b"=").decode()

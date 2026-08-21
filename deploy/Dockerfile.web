@@ -1,0 +1,12 @@
+# Build the inspection workbench frontend and serve it behind nginx,
+# which proxies /api and /ws to the api service on the same origin.
+FROM node:24-alpine AS build
+WORKDIR /build
+COPY apps/web-frontend/package.json apps/web-frontend/package-lock.json ./
+RUN npm ci
+COPY apps/web-frontend/ ./
+RUN npm run build
+
+FROM nginx:1.27-alpine
+COPY deploy/nginx.conf /etc/nginx/nginx.conf
+COPY --from=build /build/dist /usr/share/nginx/html

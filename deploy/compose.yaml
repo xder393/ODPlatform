@@ -1,29 +1,52 @@
 services:
   api:
     image: python:3.12-slim
-    working_dir: /app
+    working_dir: /workspace
     volumes:
-      - ../apps/web-backend:/app
+      - ..:/workspace
       - task-state:/data
-    command: ["sh", "-c", "sleep infinity"]
+    command: ["sh", "-c", "pip install -e /workspace/apps/web-backend -e /workspace/packages/shared-schemas uvicorn && python -m odp_api.migrations && python -m odp_api.seed && uvicorn odp_api.main:app --host 0.0.0.0 --port 8000"]
     environment:
       ODP_ENVIRONMENT: docker
       ODP_REDIS_URL: redis://redis:6379/0
       ODP_TASK_DATABASE_PATH: /data/odp-tasks.sqlite3
+      ODP_POSTGRES_URL: postgresql://odp:odp@postgres:5432/odp
+      ODP_RETRIEVAL_BACKEND: pgvector
+      # Development-only secret: replace for any shared deployment.
+      ODP_AUTH_JWT_SECRET: odp-dev-jwt-secret-do-not-reuse
+      ODP_SEED_DEMO: "true"
     ports:
       - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
 
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+    ports:
+      - "8080:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_DB: odp
       POSTGRES_USER: odp
       POSTGRES_PASSWORD: odp
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U odp -d odp"]
       interval: 10s
@@ -81,3 +104,4 @@ services:
 
 volumes:
   task-state:
+  postgres-data:

@@ -47,3 +47,45 @@ metric names, the header and the instrumented call sites stay stable so the
 swap is mechanical. The Compose observability stack (Prometheus,
 Alertmanager, Grafana) is documented in `deploy/README.md`.
 
+
+## Demo seed, login and retrieval backends
+
+`python -m odp_api.seed` prints the deterministic demo dataset. The Compose
+stack enables it automatically via `ODP_SEED_DEMO=true`; locally the app can
+be composed with `create_app(seed=build_demo_seed())`.
+
+Development-only accounts (never reuse these passwords):
+
+| Email | Password | Role |
+| --- | --- | --- |
+| inspector@example.test | odp-inspector-dev | INSPECTOR |
+| leader@example.test | odp-leader-dev | SUPERVISOR |
+| admin@example.test | odp-admin-dev | ADMINISTRATOR |
+
+`POST /api/v1/auth/login` with `{"email", "password"}` returns
+`{"access_token": ...}` (HS256 JWT, 12h). The token is sent as a Bearer header
+on REST calls; the inspection WebSocket accepts it as a `?token=` query
+parameter because browser WebSocket APIs cannot attach headers.
+
+Retrieval backends are selected with `ODP_RETRIEVAL_BACKEND`:
+
+- `inmemory` (default): `InMemoryKnowledgeIndex`, fully offline and
+  deterministic — used by tests, CI and local development.
+- `pgvector`: `PgVectorPostgresAdapter` over PostgreSQL with the pgvector
+  extension, using a deterministic 64-dim hash embedding
+  (`adapters/retrieval/embedding.py`). Replace `hash_embedding` with a
+  production embedding model while keeping the dimension synchronized with
+  the `embedding vector(64)` column in migration 0001.
+
+`python -m odp_api.migrations` applies `migrations/*.sql` in filename order
+and records them in `schema_migrations` (idempotent). psycopg is imported
+lazily, so the in-memory runtime never loads the driver.
+
+## Tests
+
+```bash
+python -m pytest tests -q
+```
+
+Unit, integration and deterministic end-to-end tests run fully offline
+(in-memory adapters only); no PostgreSQL, Redis or model provider is needed.
