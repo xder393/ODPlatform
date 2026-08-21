@@ -15,7 +15,7 @@
 业务端在自己仓库继承 OutputSink 实现自定义 sink:
   - S3Sink         : 写对象存储
   - WebSocketSink  : 实时推流
-  - QtSignalSink   : 桥接到 Qt 信号 (本仓库 apps/desktop 里有实现, 见阶段 11)
+  - QtSignalSink   : 桥接到 Qt 信号 (业务端自行实现)
 
 实现纪律 (与 D8 InferService 的"永不抛"一脉相承):
   - write() 内部 try/except 包住, 单帧写入失败 logger.warning + 跳过, 不抛
@@ -134,7 +134,7 @@ class NullSink(OutputSink):
 
     用途:
       - web 流推: annotated 已通过 WebSocketSink 推走, 后端无需落盘
-      - desktop: annotated 已通过 QtSignalSink 给 UI, 不需要本地文件
+      - 业务端 UI: annotated 已通过自定义 sink (如 QtSignalSink) 给 UI, 不需要本地文件
       - 性能基准测试: 排除 IO 干扰
       - --no-save 模式下的 CLI
     """
