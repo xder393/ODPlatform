@@ -1,0 +1,29 @@
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 1.25rem;
+  background: #1e293b;
+  color: #e2e8f0;
+  font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+.app-title {
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.app-logout {
+  padding: 0.35rem 0.9rem;
+  border: 1px solid #475569;
+  border-radius: 0.4rem;
+  background: transparent;
+  color: #cbd5e1;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.app-logout:hover {
+  background: #334155;
+  color: #fff;
+}

@@ -86,3 +86,23 @@ export async function reauthenticate(password: string): Promise<ReauthenticateRe
   });
   return (await response.json()) as ReauthenticateResponse;
 }
+
+export interface LoginResponse {
+  access_token: string;
+}
+
+/**
+ * 登录：返回 access_token，不自动写入存储，由调用方（登录表单）决定。
+ * 直接走原生 fetch 而不是 apiFetch，避免登录请求附带旧 token。
+ */
+export async function login(email: string, password: string): Promise<LoginResponse> {
+  const response = await fetch("/api/v1/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  if (!response.ok) {
+    throw new ApiError(response.status, await readErrorDetail(response));
+  }
+  return (await response.json()) as LoginResponse;
+}

@@ -43,3 +43,44 @@ docker compose -f deploy/compose.yaml down
 Configuration files are mounted read-only from
 `deploy/observability/`; edit them on the host and restart the affected
 service (`docker compose -f deploy/compose.yaml restart prometheus`).
+
+## Web frontend (nginx)
+
+The compose stack also serves the built Web frontend through an nginx
+entrypoint:
+
+- **nginx / frontend**: port `8080` — serves the static build of
+  `apps/web-frontend/` and proxies `/api` and `/ws` to the `api` service,
+  so the browser only ever talks to one origin
+  (`E2E_BASE_URL=http://localhost:8080` is the base URL used by the
+  Playwright suite and CI).
+
+## Enterprise quality inspection demo script
+
+One-shot demo of the full quality inspection loop (login, live alert, cited
+AI advice, case handling, audit/metrics):
+
+1. `docker compose -f deploy/compose.yaml up -d --build`
+2. Wait for health: `curl -fsS http://localhost:8080/healthz`
+   → `{"status":"ok"}` (retry until it succeeds)
+3. Open http://localhost:8080 and log in as the inspector demo account
+   (`inspector@example.test` / `odp-inspector-dev`; the leader and admin
+   accounts are listed in the repository root README)
+4. The live alert area shows a "疑似表面划痕" (suspected surface scratch)
+   card from the simulated camera feed
+5. Select the "待确认" case in the case list — the AI advice panel appears
+   with a "可信度高" (high confidence) badge and citations including the
+   document version and page numbers
+6. Optional high-risk operation demo: click "模拟暂停产线" (simulate line
+   pause), re-enter the password when the 5-minute reauthentication prompt
+   appears
+7. Click "确认复检" (confirm review) — the case timeline shows
+   "待确认 → 复核中"
+8. Click "完成处置" (complete handling) — the case becomes "已处置"
+   (resolved) and the manual transition is appended to the audit hash chain
+9. Open Grafana at http://localhost:3000 (`admin` / `admin`) — the
+   "Quality Inspection" dashboard shows alert rate, inference latency,
+   case resolution duration and RAG advice hit rate
+10. Open Prometheus at http://localhost:9090 and query
+    `odp_inspection_alerts_total` / `odp_audit_verification_failures_total`;
+    stop the stack with `docker compose -f deploy/compose.yaml down`

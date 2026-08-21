@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 
+import { apiFetch } from "../../api/client";
+
 export interface InspectionAlert {
   event_id: string;
   organization_id: string;
@@ -16,6 +18,10 @@ export function useInspectionFeed(
   const [reconnecting, setReconnecting] = useState(false);
 
   useEffect(() => {
+    // 无 token 时不建立连接：WS 与补偿 REST 在生产环境都要求 Bearer 鉴权。
+    const token = localStorage.getItem("odp_token");
+    if (!token) return;
+
     let stopped = false;
     let socket: WebSocket | undefined;
     let reconnectTimer: number | undefined;
@@ -29,7 +35,8 @@ export function useInspectionFeed(
 
     const connect = () => {
       const connection = new WebSocket(
-        `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/inspection-events`,
+        // 浏览器 WebSocket 无法设置请求头，鉴权走 query param（后端同时支持 Authorization 头）。
+        `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/inspection-events?token=${encodeURIComponent(token)}`,
       );
       socket = connection;
       const queued: InspectionAlert[] = [];
@@ -37,8 +44,10 @@ export function useInspectionFeed(
 
       connection.onopen = async () => {
         try {
-          const response = await fetch(`/api/v1/inspection-events?updated_after=${encodeURIComponent(since)}`);
-          if (!response.ok) throw new Error("Inspection event reconciliation failed");
+          // 补偿请求复用 apiFetch：自动附加 Authorization: Bearer 头。
+          const response = await apiFetch(
+            `/api/v1/inspection-events?updated_after=${encodeURIComponent(since)}`,
+          );
           const recovered = await response.json() as InspectionAlert[];
           if (stopped || socket !== connection) return;
           append(recovered);
