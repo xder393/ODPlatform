@@ -188,7 +188,7 @@ def _seed_summary() -> str:
         f"organization:      {DEMO_ORG_ID}",
         f"production line:   {DEMO_LINE_ID}",
         f"product category:  {PRODUCT_CATEGORY}",
-        f"cameras:           3",
+        "cameras:           3",
         f"defect cases:      {len(seed.cases)} (scratch, {MODEL_RELEASE})",
         f"knowledge docs:    {len(seed.documents)}",
         "accounts:",

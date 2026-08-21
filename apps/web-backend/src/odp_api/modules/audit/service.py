@@ -11,7 +11,6 @@ from odp_api.modules.audit.models import (
     AuditChainSnapshot,
     AuditCommand,
     AuditLog,
-    GENESIS_HASH,
     VerificationResult,
     audit_log_from_command,
 )
