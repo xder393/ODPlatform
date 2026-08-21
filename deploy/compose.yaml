@@ -5,7 +5,7 @@ services:
     volumes:
       - ..:/workspace
       - task-state:/data
-    command: ["sh", "-c", "pip install -e /workspace/apps/web-backend -e /workspace/packages/shared-schemas uvicorn && python -m odp_api.migrations && python -m odp_api.seed && uvicorn odp_api.main:app --host 0.0.0.0 --port 8000"]
+    command: ["sh", "-c", "pip install -e /workspace/apps/web-backend -e /workspace/packages/shared-schemas uvicorn && python -m odp_api.migrations && python -m odp_api.seed && uvicorn odp_api.main:create_app --factory --host 0.0.0.0 --port 8000"]
     environment:
       ODP_ENVIRONMENT: docker
       ODP_REDIS_URL: redis://redis:6379/0

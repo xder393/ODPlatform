@@ -118,14 +118,19 @@ def create_app(
     app.include_router(health_router)
     app.include_router(create_metrics_router(registry))
     inspection_service = InspectionService(MockVisionAdapter(), metric_registry=registry)
-    fixture_case = inspection_service.inspect_fixture(
-        FrameInput(fixture_name="scratch-frame-001", content=b"scratch-frame-001"),
-        organization_id=UUID("00000000-0000-0000-0000-000000000001"),
-        camera_id=UUID("00000000-0000-0000-0000-000000000002"),
-        event_id=UUID("00000000-0000-0000-0000-000000000003"),
-    )
     reauthentication_service = ReauthenticationService(InMemoryReauthenticationStore())
-    initial_cases = active_seed.cases if active_seed else (fixture_case,)
+    if active_seed is not None:
+        initial_cases = active_seed.cases
+    else:
+        # Default deterministic fixture used by the unseeded test runtime.
+        initial_cases = (
+            inspection_service.inspect_fixture(
+                FrameInput(fixture_name="scratch-frame-001", content=b"scratch-frame-001"),
+                organization_id=UUID("00000000-0000-0000-0000-000000000001"),
+                camera_id=UUID("00000000-0000-0000-0000-000000000002"),
+                event_id=UUID("00000000-0000-0000-0000-000000000003"),
+            ),
+        )
     case_repository = InMemoryCaseRepository(initial_cases)
     knowledge_index = _retrieval_index(runtime_settings)
     if active_seed is not None:
