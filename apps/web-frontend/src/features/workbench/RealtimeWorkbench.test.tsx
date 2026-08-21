@@ -29,7 +29,13 @@ describe("RealtimeWorkbench", () => {
   beforeEach(() => {
     TestWebSocket.instances = [];
     vi.stubGlobal("WebSocket", TestWebSocket);
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => [alert] }));
+    // 工作台挂载后还会通过 /api/v1/cases 拉取工单列表，这里按路径区分两类响应。
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).startsWith("/api/v1/cases")) {
+        return { ok: true, json: async () => [] };
+      }
+      return { ok: true, json: async () => [alert] };
+    }));
   });
 
   afterEach(() => vi.useRealTimers());
@@ -67,9 +73,17 @@ describe("RealtimeWorkbench", () => {
 
   it("reconnects and reconciles after a failed reconciliation closes the socket", async () => {
     vi.useFakeTimers();
-    vi.stubGlobal("fetch", vi.fn()
-      .mockResolvedValueOnce({ ok: false })
-      .mockResolvedValueOnce({ ok: true, json: async () => [alert] }));
+    // 挂载后工作台会额外请求一次 /api/v1/cases，按路径路由并单独统计补偿请求次数。
+    let reconciliationAttempts = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).startsWith("/api/v1/cases")) {
+        return { ok: true, json: async () => [] };
+      }
+      reconciliationAttempts += 1;
+      return reconciliationAttempts === 1
+        ? { ok: false }
+        : { ok: true, json: async () => [alert] };
+    }));
     render(<RealtimeWorkbench since="2026-08-19T08:00:00Z" />);
 
     TestWebSocket.instances[0].onopen?.();
@@ -82,6 +96,6 @@ describe("RealtimeWorkbench", () => {
 
     TestWebSocket.instances[1].onopen?.();
     await Promise.resolve();
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(reconciliationAttempts).toBe(2);
   });
 });
