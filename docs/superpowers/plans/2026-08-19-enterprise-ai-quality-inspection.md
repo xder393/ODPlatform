@@ -56,7 +56,7 @@
 - Produces `create_app() -> FastAPI` and `GET /healthz -> {"status":"ok"}`.
 - Produces `InspectionAlert` with `event_id: UUID`, `organization_id: UUID`, `camera_id: UUID`, `occurred_at: datetime`, `defect_class: str`, `confidence: float`.
 
-- [ ] **Step 1: Write failing health and schema tests.**
+- [x] **Step 1: Write failing health and schema tests.**
 
 ```python
 def test_healthz_returns_ok(client):
@@ -67,11 +67,11 @@ def test_alert_requires_confidence_between_zero_and_one():
         InspectionAlert(confidence=1.1, **valid_alert)
 ```
 
-- [ ] **Step 2: Run `pytest apps/web-backend/tests/test_health.py -v`; verify import and route failures.**
-- [ ] **Step 3: Implement `Settings`, `create_app`, the health router and bounded Pydantic `InspectionAlert`.**
-- [ ] **Step 4: Add Compose services named `api`, `postgres`, `redis`, `minio`, `prometheus`, `grafana` and `alertmanager`, with health checks for PostgreSQL and Redis.**
-- [ ] **Step 5: Run `docker compose -f deploy/compose.yaml config` and `pytest apps/web-backend/tests/test_health.py -v`; verify both pass.**
-- [ ] **Step 6: Commit `feat: scaffold web quality inspection runtime`.**
+- [x] **Step 2: Run `pytest apps/web-backend/tests/test_health.py -v`; verify import and route failures.**
+- [x] **Step 3: Implement `Settings`, `create_app`, the health router and bounded Pydantic `InspectionAlert`.**
+- [x] **Step 4: Add Compose services named `api`, `postgres`, `redis`, `minio`, `prometheus`, `grafana` and `alertmanager`, with health checks for PostgreSQL and Redis.**
+- [x] **Step 5: Run `docker compose -f deploy/compose.yaml config` and `pytest apps/web-backend/tests/test_health.py -v`; verify both pass.**
+- [x] **Step 6: Commit `feat: scaffold web quality inspection runtime`.**
 
 ### Task 2: Model the inspection event and case state machine
 
@@ -86,11 +86,11 @@ def test_alert_requires_confidence_between_zero_and_one():
 - Produces `CaseStatus = Literal["PENDING_CONFIRMATION", "IN_REVIEW", "RESOLVED", "FALSE_POSITIVE"]`.
 - Produces `CaseService.transition(case: DefectCase, to_status: CaseStatus, actor_id: UUID) -> DefectCase`.
 
-- [ ] **Step 1: Write failing transition tests for `PENDING_CONFIRMATION → IN_REVIEW`, `IN_REVIEW → RESOLVED`, and rejection of `RESOLVED → IN_REVIEW`.**
-- [ ] **Step 2: Run `pytest apps/web-backend/tests/modules/cases/test_service.py -v`; verify state-service import failure.**
-- [ ] **Step 3: Implement immutable `InspectionEvent`, `DefectCase`, `InvalidCaseTransition`, and a transition map that raises on terminal-state reopening.**
-- [ ] **Step 4: Run the case test file and `ruff check apps/web-backend/src`; verify pass.**
-- [ ] **Step 5: Commit `feat: add inspection case state machine`.**
+- [x] **Step 1: Write failing transition tests for `PENDING_CONFIRMATION → IN_REVIEW`, `IN_REVIEW → RESOLVED`, and rejection of `RESOLVED → IN_REVIEW`.**
+- [x] **Step 2: Run `pytest apps/web-backend/tests/modules/cases/test_service.py -v`; verify state-service import failure.**
+- [x] **Step 3: Implement immutable `InspectionEvent`, `DefectCase`, `InvalidCaseTransition`, and a transition map that raises on terminal-state reopening.**
+- [x] **Step 4: Run the case test file and `ruff check apps/web-backend/src`; verify pass.**
+- [x] **Step 5: Commit `feat: add inspection case state machine`.**
 
 ### Task 3: Deliver deterministic simulated vision alerts and REST case handling
 
@@ -106,12 +106,12 @@ def test_alert_requires_confidence_between_zero_and_one():
 - Produces `POST /api/v1/cases/{case_id}/transitions` accepting `{ "status": "IN_REVIEW" }`.
 - Produces `GET /api/v1/cases?updated_after=<ISO8601>` returning ordered case summaries.
 
-- [ ] **Step 1: Write failing API test that feeds fixture `scratch-frame-001`, receives one `PENDING_CONFIRMATION` case, then transitions it to `IN_REVIEW`.**
-- [ ] **Step 2: Run `pytest apps/web-backend/tests/integration/test_cases_api.py -v`; verify it fails before routing exists.**
-- [ ] **Step 3: Implement a protocol-based mock vision adapter returning a fixed scratch detection with frame SHA-256, model release `mock-yolo-1.0`, threshold `0.80`, and confidence `0.964`.**
-- [ ] **Step 4: Implement in-memory repository fixture and case router with Pydantic request/response models.**
-- [ ] **Step 5: Run the integration test; verify the final transition and input metadata assertions pass.**
-- [ ] **Step 6: Commit `feat: add simulated inspection case workflow`.**
+- [x] **Step 1: Write failing API test that feeds fixture `scratch-frame-001`, receives one `PENDING_CONFIRMATION` case, then transitions it to `IN_REVIEW`.**
+- [x] **Step 2: Run `pytest apps/web-backend/tests/integration/test_cases_api.py -v`; verify it fails before routing exists.**
+- [x] **Step 3: Implement a protocol-based mock vision adapter returning a fixed scratch detection with frame SHA-256, model release `mock-yolo-1.0`, threshold `0.80`, and confidence `0.964`.**
+- [x] **Step 4: Implement in-memory repository fixture and case router with Pydantic request/response models.**
+- [x] **Step 5: Run the integration test; verify the final transition and input metadata assertions pass.**
+- [x] **Step 6: Commit `feat: add simulated inspection case workflow`.**
 
 ### Task 4: Stream alerts to a React workbench and reconcile on reconnect
 
@@ -128,13 +128,13 @@ def test_alert_requires_confidence_between_zero_and_one():
 - Produces `GET /api/v1/inspection-events?updated_after=<ISO8601>` and `WS /ws/inspection-events`.
 - Produces `useInspectionFeed(since: string): { alerts: InspectionAlert[]; reconnecting: boolean }`.
 
-- [ ] **Step 1: Write backend test asserting a reconnect fetch returns the currently unseen event and WebSocket payload matches `InspectionAlert`.**
-- [ ] **Step 2: Write frontend test asserting the workbench renders “疑似表面划痕”, “96.4%”, and reconnects by calling the REST reconciliation endpoint.**
-- [ ] **Step 3: Run `pytest apps/web-backend/tests/integration/test_notification_api.py -v` and `npm test -- --run RealtimeWorkbench.test.tsx`; verify expected failures.**
-- [ ] **Step 4: Implement an at-most-once WebSocket endpoint and the React hook: on `onopen`, fetch unseen events, then append future socket messages; do not implement client ACK.**
-- [ ] **Step 5: Implement `RealtimeWorkbench` with video placeholder, alert details, case actions and an accessible live-region alert.**
-- [ ] **Step 6: Run both test commands and `npm run build --prefix apps/web-frontend`; verify pass.**
-- [ ] **Step 7: Commit `feat: add realtime inspection workbench`.**
+- [x] **Step 1: Write backend test asserting a reconnect fetch returns the currently unseen event and WebSocket payload matches `InspectionAlert`.**
+- [x] **Step 2: Write frontend test asserting the workbench renders “疑似表面划痕”, “96.4%”, and reconnects by calling the REST reconciliation endpoint.**
+- [x] **Step 3: Run `pytest apps/web-backend/tests/integration/test_notification_api.py -v` and `npm test -- --run RealtimeWorkbench.test.tsx`; verify expected failures.**
+- [x] **Step 4: Implement an at-most-once WebSocket endpoint and the React hook: on `onopen`, fetch unseen events, then append future socket messages; do not implement client ACK.**
+- [x] **Step 5: Implement `RealtimeWorkbench` with video placeholder, alert details, case actions and an accessible live-region alert.**
+- [x] **Step 6: Run both test commands and `npm run build --prefix apps/web-frontend`; verify pass.**
+- [x] **Step 7: Commit `feat: add realtime inspection workbench`.**
 
 ## Milestone 2 — enterprise boundaries and reliability
 
@@ -152,13 +152,13 @@ def test_alert_requires_confidence_between_zero_and_one():
 - Produces `authorize(actor: Actor, permission: str, organization_id: UUID, line_id: UUID | None) -> None`.
 - Produces `POST /api/v1/auth/reauthenticate` and `require_recent_reauth(actor_id: UUID, now: datetime) -> None`.
 
-- [ ] **Step 1: Write failing tests showing `defect_case:update:own_line` permits an inspector on their line, denies another line, and scope filters prevent cross-organization reads.**
-- [ ] **Step 2: Write failing test that rejects a pause action after five minutes and accepts it after password-based reauthentication.**
-- [ ] **Step 3: Run identity and tenant tests; verify authorization is absent.**
-- [ ] **Step 4: Implement role grants, resource-scope policies, tenant-aware repository base query, JWT subject extraction, and Redis `last_reauth_at` with a 300-second TTL.**
-- [ ] **Step 5: Guard every case mutation and alert query using `authorize`; expose pause as a simulation command only.**
-- [ ] **Step 6: Run the two test files and full backend suite; verify pass.**
-- [ ] **Step 7: Commit `feat: enforce tenant scoped inspection permissions`.**
+- [x] **Step 1: Write failing tests showing `defect_case:update:own_line` permits an inspector on their line, denies another line, and scope filters prevent cross-organization reads.**
+- [x] **Step 2: Write failing test that rejects a pause action after five minutes and accepts it after password-based reauthentication.**
+- [x] **Step 3: Run identity and tenant tests; verify authorization is absent.**
+- [x] **Step 4: Implement role grants, resource-scope policies, tenant-aware repository base query, JWT subject extraction, and Redis `last_reauth_at` with a 300-second TTL.**
+- [x] **Step 5: Guard every case mutation and alert query using `authorize`; expose pause as a simulation command only.**
+- [x] **Step 6: Run the two test files and full backend suite; verify pass.**
+- [x] **Step 7: Commit `feat: enforce tenant scoped inspection permissions`.**
 
 ### Task 6: Add append-only, hash-chained audit logging
 
@@ -173,12 +173,12 @@ def test_alert_requires_confidence_between_zero_and_one():
 - Produces `verify_organization_chain(organization_id: UUID) -> VerificationResult`.
 - `AuditCommand` fields are `resource_type`, `resource_id`, `action`, `change_summary`, `actor_id`, `occurred_at`, `correlation_id`, `request_ip`.
 
-- [ ] **Step 1: Write failing tests for deterministic SHA-256 input, two concurrent appends forming one continuous chain, and a tampered row producing failed verification.**
-- [ ] **Step 2: Run `pytest apps/web-backend/tests/modules/audit/test_hash_chain.py -v`; verify failure.**
-- [ ] **Step 3: Implement organization chain-head table and transaction that locks its row, inserts one append-only entry, then advances the head hash. Grant no application `UPDATE` or `DELETE` privilege for audit rows.**
-- [ ] **Step 4: Implement startup sample verification and daily full verification task; make failure emit P0 metric/log and block new audit appends until explicit admin recovery.**
-- [ ] **Step 5: Run audit tests and an Alembic migration upgrade against Compose PostgreSQL; verify pass.**
-- [ ] **Step 6: Commit `feat: add verifiable audit hash chain`.**
+- [x] **Step 1: Write failing tests for deterministic SHA-256 input, two concurrent appends forming one continuous chain, and a tampered row producing failed verification.**
+- [x] **Step 2: Run `pytest apps/web-backend/tests/modules/audit/test_hash_chain.py -v`; verify failure.**
+- [x] **Step 3: Implement organization chain-head table and transaction that locks its row, inserts one append-only entry, then advances the head hash. Grant no application `UPDATE` or `DELETE` privilege for audit rows.**
+- [x] **Step 4: Implement startup sample verification and daily full verification task; make failure emit P0 metric/log and block new audit appends until explicit admin recovery.**
+- [x] **Step 5: Run audit tests and an Alembic migration upgrade against Compose PostgreSQL; verify pass.**
+- [x] **Step 6: Commit `feat: add verifiable audit hash chain`.**
 
 ### Task 7: Make asynchronous work idempotent and bounded
 
@@ -193,12 +193,12 @@ def test_alert_requires_confidence_between_zero_and_one():
 - Produces `TaskStatus = Literal["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "RETRYING", "DEAD_LETTER"]`.
 - Produces `enqueue(task_type: str, idempotency_key: str, payload: dict[str, object]) -> TaskRecord`.
 
-- [ ] **Step 1: Write failing tests for duplicate `frame_id:model_version` enqueue, timeout retry with exponential delay, final `DEAD_LETTER`, and frame backlog marking stale work `SKIPPED`.**
-- [ ] **Step 2: Run `pytest apps/web-backend/tests/modules/tasks/test_service.py -v`; verify failure.**
-- [ ] **Step 3: Implement persisted task records, a Redis Stream adapter, retry limit of three attempts, 30-second vision timeout, and stale-frame cutoff of two seconds.**
-- [ ] **Step 4: Emit `task_dead_letter_total` and queue-depth metrics; write alert event on final failure.**
-- [ ] **Step 5: Run the task tests plus integration tests; verify pass.**
-- [ ] **Step 6: Commit `feat: add resilient async task processing`.**
+- [x] **Step 1: Write failing tests for duplicate `frame_id:model_version` enqueue, timeout retry with exponential delay, final `DEAD_LETTER`, and frame backlog marking stale work `SKIPPED`.**
+- [x] **Step 2: Run `pytest apps/web-backend/tests/modules/tasks/test_service.py -v`; verify failure.**
+- [x] **Step 3: Implement persisted task records, a Redis Stream adapter, retry limit of three attempts, 30-second vision timeout, and stale-frame cutoff of two seconds.**
+- [x] **Step 4: Emit `task_dead_letter_total` and queue-depth metrics; write alert event on final failure.**
+- [x] **Step 5: Run the task tests plus integration tests; verify pass.**
+- [x] **Step 6: Commit `feat: add resilient async task processing`.**
 
 ## Milestone 3 — evidence-backed AI assistant
 
@@ -215,12 +215,12 @@ def test_alert_requires_confidence_between_zero_and_one():
 - Produces `KnowledgeDocument(status: Literal["INDEXED", "SUPERSEDED", "FAILED"])`.
 - Produces `RAGRetrievalPort.search(query: str, organization_id: UUID, filters: RetrievalFilters) -> list[RetrievedChunk]`.
 
-- [ ] **Step 1: Write failing tests that ingest a two-page rule document, retain page and paragraph provenance, supersede a prior version, and reject a cross-tenant search result.**
-- [ ] **Step 2: Run `pytest apps/web-backend/tests/modules/knowledge/test_ingest.py -v`; verify failure.**
-- [ ] **Step 3: Implement validated PDF/DOCX ingestion, parent-child chunking with overlap, `organization_id` indexed on each pgvector row, and mandatory repository filter.**
-- [ ] **Step 4: Add a lexical BM25 score and vector score to the same retrieval adapter, normalizing and combining them before returning ordered chunks.**
-- [ ] **Step 5: Run tests and a PostgreSQL migration; verify provenance and isolation assertions pass.**
-- [ ] **Step 6: Commit `feat: add versioned tenant scoped knowledge ingestion`.**
+- [x] **Step 1: Write failing tests that ingest a two-page rule document, retain page and paragraph provenance, supersede a prior version, and reject a cross-tenant search result.**
+- [x] **Step 2: Run `pytest apps/web-backend/tests/modules/knowledge/test_ingest.py -v`; verify failure.**
+- [x] **Step 3: Implement validated PDF/DOCX ingestion, parent-child chunking with overlap, `organization_id` indexed on each pgvector row, and mandatory repository filter.**
+- [x] **Step 4: Add a lexical BM25 score and vector score to the same retrieval adapter, normalizing and combining them before returning ordered chunks.**
+- [x] **Step 5: Run tests and a PostgreSQL migration; verify provenance and isolation assertions pass.**
+- [x] **Step 6: Commit `feat: add versioned tenant scoped knowledge ingestion`.**
 
 ### Task 9: Add deterministic RAG advice with citations and confidence tiers
 
@@ -236,12 +236,12 @@ def test_alert_requires_confidence_between_zero_and_one():
 - Produces `AdviceResponse(answer: str, citations: list[Citation], confidence: Literal["HIGH", "MEDIUM", "LOW", "UNAVAILABLE"])`.
 - Produces `POST /api/v1/cases/{case_id}/advice`.
 
-- [ ] **Step 1: Write failing Golden Dataset tests for a direct specification match (`HIGH`), same-line historical case (`MEDIUM`), cross-product reference (`LOW`), and unavailable retrieval (`UNAVAILABLE`).**
-- [ ] **Step 2: Run `pytest apps/web-backend/tests/modules/ai_orchestration/test_service.py -v`; verify failure.**
-- [ ] **Step 3: Implement `MockLLMAdapter` as a pure template renderer over retrieved chunks, not a random generator. Return source document, version, page/paragraph and quoted snippet in each citation.**
-- [ ] **Step 4: Enforce that `LOW` advice contains no pause recommendation and `UNAVAILABLE` returns the exact human-review message.**
-- [ ] **Step 5: Run unit and Golden Dataset tests; verify deterministic output.**
-- [ ] **Step 6: Commit `feat: add cited quality inspection advice`.**
+- [x] **Step 1: Write failing Golden Dataset tests for a direct specification match (`HIGH`), same-line historical case (`MEDIUM`), cross-product reference (`LOW`), and unavailable retrieval (`UNAVAILABLE`).**
+- [x] **Step 2: Run `pytest apps/web-backend/tests/modules/ai_orchestration/test_service.py -v`; verify failure.**
+- [x] **Step 3: Implement `MockLLMAdapter` as a pure template renderer over retrieved chunks, not a random generator. Return source document, version, page/paragraph and quoted snippet in each citation.**
+- [x] **Step 4: Enforce that `LOW` advice contains no pause recommendation and `UNAVAILABLE` returns the exact human-review message.**
+- [x] **Step 5: Run unit and Golden Dataset tests; verify deterministic output.**
+- [x] **Step 6: Commit `feat: add cited quality inspection advice`.**
 
 ### Task 10: Render citations and case history in the workbench
 
@@ -255,11 +255,11 @@ def test_alert_requires_confidence_between_zero_and_one():
 - Consumes `AdviceResponse` from Task 9.
 - Produces `AdvicePanel({ advice }: { advice: AdviceResponse }): JSX.Element`.
 
-- [ ] **Step 1: Write tests asserting HIGH, MEDIUM and LOW labels have accessible text and green, yellow and gray semantic classes; assert every citation shows document version and page/paragraph.**
-- [ ] **Step 2: Run `npm test -- --run AdvicePanel.test.tsx`; verify failure.**
-- [ ] **Step 3: Implement the advice panel and chronological case timeline containing detection, advice and human state changes. Disable the pause action for LOW and UNAVAILABLE advice.**
-- [ ] **Step 4: Run frontend tests and production build; verify pass.**
-- [ ] **Step 5: Commit `feat: display cited inspection advice`.**
+- [x] **Step 1: Write tests asserting HIGH, MEDIUM and LOW labels have accessible text and green, yellow and gray semantic classes; assert every citation shows document version and page/paragraph.**
+- [x] **Step 2: Run `npm test -- --run AdvicePanel.test.tsx`; verify failure.**
+- [x] **Step 3: Implement the advice panel and chronological case timeline containing detection, advice and human state changes. Disable the pause action for LOW and UNAVAILABLE advice.**
+- [x] **Step 4: Run frontend tests and production build; verify pass.**
+- [x] **Step 5: Commit `feat: display cited inspection advice`.**
 
 ## Milestone 4 — operations, admin and delivery evidence
 
@@ -278,12 +278,12 @@ def test_alert_requires_confidence_between_zero_and_one():
 - Produces `GET /metrics` in Prometheus exposition format.
 - Produces counters `inspection_alert_total`, `task_dead_letter_total`, `audit_chain_verification_failure_total` and histograms `vision_inference_seconds`, `case_resolution_seconds`.
 
-- [ ] **Step 1: Write failing test that a simulated event increments `inspection_alert_total` and that `/metrics` exposes `task_dead_letter_total`.**
-- [ ] **Step 2: Run `pytest apps/web-backend/tests/test_metrics.py -v`; verify failure.**
-- [ ] **Step 3: Instrument HTTP, WebSocket, Redis task and database spans with correlation ID; register the stated metrics.**
-- [ ] **Step 4: Configure Prometheus scrape, Grafana dashboard panels for frame rate, queue depth, case closure, RAG hit and WebSocket health, plus Alertmanager rules for queue depth > 1,000, dead letters > 0 and audit verification failure > 0.**
-- [ ] **Step 5: Run the test, `docker compose -f deploy/compose.yaml config`, and a Compose smoke startup; verify all observability services become healthy.**
-- [ ] **Step 6: Commit `feat: add inspection observability stack`.**
+- [x] **Step 1: Write failing test that a simulated event increments `inspection_alert_total` and that `/metrics` exposes `task_dead_letter_total`.**
+- [x] **Step 2: Run `pytest apps/web-backend/tests/test_metrics.py -v`; verify failure.**
+- [x] **Step 3: Instrument HTTP, WebSocket, Redis task and database spans with correlation ID; register the stated metrics.**
+- [x] **Step 4: Configure Prometheus scrape, Grafana dashboard panels for frame rate, queue depth, case closure, RAG hit and WebSocket health, plus Alertmanager rules for queue depth > 1,000, dead letters > 0 and audit verification failure > 0.**
+- [x] **Step 5: Run the test, `docker compose -f deploy/compose.yaml config`, and a Compose smoke startup; verify all observability services become healthy.**
+- [x] **Step 6: Commit `feat: add inspection observability stack`.**
 
 ### Task 12: Seed, test, document and enforce the deliverable
 
@@ -300,13 +300,13 @@ def test_alert_requires_confidence_between_zero_and_one():
 - Produces `python -m odp_api.seed` with accounts `inspector@example.test`, `leader@example.test`, `admin@example.test` and documented development-only passwords.
 - Produces a deterministic E2E path from simulated frame to closed case with cited advice and audit verification.
 
-- [ ] **Step 1: Write failing backend E2E test that seeds data, ingests the two documents, emits a defect, logs in as inspector, resolves the case, and verifies the audit chain.**
-- [ ] **Step 2: Write failing Playwright test that sees the alert, opens cited advice, completes the confirmation action and sees the case timeline update.**
-- [ ] **Step 3: Run `pytest apps/web-backend/tests/e2e/test_quality_workflow.py -v` and `npx playwright test apps/web-frontend/e2e/quality-workflow.spec.ts`; verify failures before seed/runtime completion.**
-- [ ] **Step 4: Implement idempotent seed fixtures for three cameras, ten samples, two documents, user/role assignments and one model release.**
-- [ ] **Step 5: Update CI to run backend tests, frontend unit tests, TypeScript build, Compose migration/seed smoke test and deterministic E2E tests. Document local startup, architecture boundaries, demo script and performance baseline.**
-- [ ] **Step 6: Run the complete CI-equivalent command set locally; capture the passing output in the delivery notes.**
-- [ ] **Step 7: Commit `feat: deliver reproducible enterprise quality inspection demo`.**
+- [x] **Step 1: Write failing backend E2E test that seeds data, ingests the two documents, emits a defect, logs in as inspector, resolves the case, and verifies the audit chain.**
+- [x] **Step 2: Write failing Playwright test that sees the alert, opens cited advice, completes the confirmation action and sees the case timeline update.**
+- [x] **Step 3: Run `pytest apps/web-backend/tests/e2e/test_quality_workflow.py -v` and `npx playwright test apps/web-frontend/e2e/quality-workflow.spec.ts`; verify failures before seed/runtime completion.**
+- [x] **Step 4: Implement idempotent seed fixtures for three cameras, ten samples, two documents, user/role assignments and one model release.**
+- [x] **Step 5: Update CI to run backend tests, frontend unit tests, TypeScript build, Compose migration/seed smoke test and deterministic E2E tests. Document local startup, architecture boundaries, demo script and performance baseline.**
+- [x] **Step 6: Run the complete CI-equivalent command set locally; capture the passing output in the delivery notes.**
+- [x] **Step 7: Commit `feat: deliver reproducible enterprise quality inspection demo`.**
 
 ## Plan self-review
 
