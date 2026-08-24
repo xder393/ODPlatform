@@ -1,0 +1,37 @@
+[
+  {
+    "name": "direct current product and line specification",
+    "scope": "direct",
+    "confidence": "HIGH",
+    "source_name": "Line A Widget Scratch Specification",
+    "document_version": 3,
+    "page_number": 2,
+    "paragraph_number": 4,
+    "snippet": "Stop the line and isolate scratched widgets for inspection."
+  },
+  {
+    "name": "same line historical case",
+    "scope": "same_line",
+    "confidence": "MEDIUM",
+    "source_name": "Line A historical case 2026-07-14",
+    "document_version": 1,
+    "page_number": 1,
+    "paragraph_number": 7,
+    "snippet": "Previous scratch cases were reviewed by the quality lead before disposition."
+  },
+  {
+    "name": "cross product reference",
+    "scope": "cross_product",
+    "confidence": "LOW",
+    "source_name": "Gadget scratch reference",
+    "document_version": 2,
+    "page_number": 5,
+    "paragraph_number": 3,
+    "snippet": "Inspect the affected batch and document the finding."
+  },
+  {
+    "name": "unavailable retrieval",
+    "scope": "unavailable",
+    "confidence": "UNAVAILABLE"
+  }
+]

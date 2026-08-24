@@ -18,6 +18,7 @@ dist/
 venv/
 env/
 .venv/
+node_modules/
 ENV/
 
 # ============================================================
@@ -85,6 +86,14 @@ temp/
 # 工具元数据(reset/doctor 等元工具的审计日志,本地运行历史)
 .odp-meta/
 
+# Superpowers brainstorm visual companion session data
+.superpowers/
+
+# Isolated local worktrees
+.worktrees/
+
 # 运行时生成的配置(odp-gen-config / odp-transform 产出, 可随时重新生成)
 apps/platform/configs/runtime/
 apps/platform/configs/datasets/
+.venv-runtime/
+uv.lock
