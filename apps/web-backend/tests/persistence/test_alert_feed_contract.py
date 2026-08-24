@@ -95,7 +95,13 @@ async def test_redis_wakeup_requeries_durable_facts_and_uses_bounded_commands(fe
     class FakeRedis:
         def __init__(self): self.xadd_calls = []; self.xread_calls = []; self.response = [["s", [["9-0", []]]]]
         def xadd_bounded(self, stream, fields, maxlen): self.xadd_calls.append((stream, fields, maxlen)); return "9-0"
-        def xread(self, stream, cursor, block_ms): self.xread_calls.append((stream, cursor, block_ms)); return self.response
+        def async_client(self): return self
+        async def xrevrange(self, stream, count): return []
+        async def xread(self, streams, count, block):
+            self.xread_calls.append((streams, count, block))
+            await asyncio.sleep(0.01)
+            return None
+        async def aclose(self): return None
     redis = FakeRedis()
     durable = RedisDurableInspectionAlertFeed(feed, redis)
     subscription = durable.subscribe(None)

@@ -144,6 +144,16 @@ class RedisSocketStreamClient:
     def xread(self, stream: str, cursor: str, block_ms: int = 15_000) -> object:
         return self._execute("XREAD", "BLOCK", str(block_ms), "COUNT", "100", "STREAMS", stream, cursor)
 
+    def async_client(self):
+        """Dedicated cancellable async connection for long-polling alert feeds."""
+        from redis.asyncio import Redis
+        scheme = "rediss" if self._use_tls else "redis"
+        auth = f":{self._password}@" if self._password else ""
+        return Redis.from_url(
+            f"{scheme}://{auth}{self._host}:{self._port}/{self._database}",
+            socket_connect_timeout=1, socket_timeout=20, decode_responses=True,
+        )
+
     def xadd_once(self, stream: str, claim_key: str, fields: dict[str, str]) -> str | None:
         """Retry a pending append while suppressing completed event publications."""
         args = [item for pair in fields.items() for item in pair]
