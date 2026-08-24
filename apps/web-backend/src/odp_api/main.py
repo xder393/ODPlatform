@@ -259,7 +259,7 @@ def create_app(
         lambda: SqlAlchemyBusinessUnitOfWork(session_factory), audit_service
     )
     knowledge_index = _retrieval_index(runtime_settings)
-    if active_seed is not None:
+    if active_seed is not None and _should_seed_knowledge(runtime_settings):
         _ingest_seed_documents(knowledge_index, active_seed)
     advice_service = AdviceService(
         knowledge_index, MockLLMAdapter(), metric_registry=registry
@@ -328,6 +328,12 @@ def _ingest_seed_documents(index: KnowledgeIndexPort, seed: DemoSeed) -> None:
             applicable_line_id=DEMO_LINE_ID,
             product_category=PRODUCT_CATEGORY,
         )
+
+
+def _should_seed_knowledge(settings: Settings) -> bool:
+    if settings.seed_knowledge_on_startup is not None:
+        return settings.seed_knowledge_on_startup
+    return settings.environment.lower() in {"local", "test"}
 
 
 def _runtime_stream_client(settings: Settings) -> object:

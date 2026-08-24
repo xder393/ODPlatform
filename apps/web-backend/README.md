@@ -89,3 +89,9 @@ python -m pytest tests -q
 
 Unit, integration and deterministic end-to-end tests run fully offline
 (in-memory adapters only); no PostgreSQL, Redis or model provider is needed.
+
+For a pgvector runtime, bootstrap the demo knowledge corpus explicitly after
+the RAG migrations: `ODP_RETRIEVAL_BACKEND=pgvector python -m
+odp_api.seed_knowledge`. Enterprise API replicas do not seed knowledge by
+default; `ODP_SEED_KNOWLEDGE_ON_STARTUP=true` is only for an intentional
+single-process bootstrap.

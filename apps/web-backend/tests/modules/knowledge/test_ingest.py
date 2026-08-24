@@ -1,4 +1,5 @@
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
@@ -249,6 +250,28 @@ def test_same_content_reuses_one_active_document_with_stable_provenance(index) -
         (chunk.document_id, chunk.document_version, chunk.page_number, chunk.paragraph_number)
         for chunk in index.search("pressure limit", organization_id, RetrievalFilters())
     ] == first_provenance
+
+
+@pytest.mark.parametrize("index", [PgVectorRetrievalAdapter(), InMemoryKnowledgeIndex()])
+def test_concurrent_identical_ingests_create_one_document_and_chunk_set(index) -> None:
+    service, index = make_service(index)
+    organization_id = uuid4()
+    content = make_two_page_pdf()
+
+    def ingest_once():
+        return service.ingest(
+            organization_id=organization_id,
+            source_name="press rules",
+            filename="press-rules.pdf",
+            content=content,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        first, second = list(workers.map(lambda _: ingest_once(), range(2)))
+
+    assert first == second
+    assert len(index._documents) == 1
+    assert len(index.chunks_for_document(first.document_id)) > 0
 
 
 def test_line_ending_normalized_upload_bytes_reuse_the_same_document() -> None:

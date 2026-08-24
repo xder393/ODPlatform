@@ -80,7 +80,9 @@ class KnowledgeIngestionService:
             organization_id=organization_id,
             source_name=source_name,
             filename=filename,
-            version=self._index.next_version(organization_id, source_name),
+            # The storage adapter allocates this inside its source lock.  The
+            # UUID is safe to allocate here because chunks reference it.
+            version=0,
             media_type=media_type,
             content_sha256=content_sha256,
             status="INDEXED",
@@ -95,12 +97,16 @@ class KnowledgeIngestionService:
             if not chunks:
                 raise ValueError("Document does not contain extractable text.")
         except ValueError as error:
-            failed = replace(document, status="FAILED", failure_reason=str(error))
+            failed = replace(
+                document,
+                version=self._index.next_version(organization_id, source_name),
+                status="FAILED",
+                failure_reason=str(error),
+            )
             self._index.record_failure(failed)
             return failed
 
-        self._index.index(document, parents, chunks)
-        return document
+        return self._index.index_atomically(document, parents, chunks)
 
     def _chunk(
         self,

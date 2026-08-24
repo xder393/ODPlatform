@@ -7,9 +7,11 @@ import json
 import math
 import re
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime
+from threading import RLock
 from typing import Protocol
 from uuid import UUID
 
@@ -120,6 +122,8 @@ class PostgresExecutorPort(Protocol):
 
     def fetch_all(self, sql: str, parameters: Mapping[str, object]) -> Sequence[Mapping[str, object]]: ...
 
+    def transaction(self) -> Iterator[PostgresExecutorPort]: ...
+
 
 class PgVectorPostgresAdapter:
     """Production pgvector persistence and hybrid retrieval provider."""
@@ -139,31 +143,10 @@ class PgVectorPostgresAdapter:
         source_name: str,
         content_sha256: str,
     ) -> KnowledgeDocument | None:
-        rows = self._executor.fetch_all(
-            """SELECT document_id, organization_id, source_name, filename, version, media_type,
-                      content_sha256, status, indexed_at, evidence_kind, applicable_line_id,
-                      product_category, failure_reason
-               FROM knowledge_documents
-               WHERE organization_id = %(organization_id)s AND source_name = %(source_name)s
-                 AND content_sha256 = %(content_sha256)s AND status = 'INDEXED'
-               ORDER BY version DESC
-               LIMIT 1""",
-            {
-                "organization_id": organization_id,
-                "source_name": source_name,
-                "content_sha256": content_sha256,
-            },
-        )
-        return _knowledge_document_from_row(rows[0]) if rows else None
+        return _find_indexed_document(self._executor, organization_id, source_name, content_sha256)
 
     def next_version(self, organization_id: UUID, source_name: str) -> int:
-        rows = self._executor.fetch_all(
-            """SELECT COALESCE(MAX(version), 0) + 1 AS version
-               FROM knowledge_documents
-               WHERE organization_id = %(organization_id)s AND source_name = %(source_name)s""",
-            {"organization_id": organization_id, "source_name": source_name},
-        )
-        return int(rows[0]["version"]) if rows else 1
+        return _next_version(self._executor, organization_id, source_name)
 
     def index(
         self,
@@ -220,6 +203,29 @@ class PgVectorPostgresAdapter:
                 parameters,
             )
 
+    def index_atomically(
+        self,
+        document: KnowledgeDocument,
+        parents: Sequence[KnowledgeParentChunk],
+        chunks: Sequence[KnowledgeChunk],
+    ) -> KnowledgeDocument:
+        PgVectorRetrievalAdapter._validate_index_scope(document, parents, chunks)
+        with self._executor.transaction() as executor:
+            parameters = _document_parameters(document)
+            executor.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%(source_lock)s, 0))",
+                {"source_lock": f"{document.organization_id}:{document.source_name}"},
+            )
+            existing = _find_indexed_document(
+                executor, document.organization_id, document.source_name, document.content_sha256
+            )
+            if existing is not None:
+                return existing
+            version = _next_version(executor, document.organization_id, document.source_name)
+            indexed = replace(document, version=version)
+            self._index_with_executor(executor, indexed, parents, chunks)
+            return indexed
+
     def record_failure(self, document: KnowledgeDocument) -> None:
         if document.status != "FAILED":
             raise ValueError("Only failed documents may be recorded as ingestion failures.")
@@ -269,6 +275,62 @@ class PgVectorPostgresAdapter:
             parameters,
         )
 
+    def _index_with_executor(
+        self,
+        executor: PostgresExecutorPort,
+        document: KnowledgeDocument,
+        parents: Sequence[KnowledgeParentChunk],
+        chunks: Sequence[KnowledgeChunk],
+    ) -> None:
+        parameters = _document_parameters(document)
+        executor.execute(
+            """UPDATE knowledge_documents SET status = 'SUPERSEDED'
+               WHERE organization_id = %(organization_id)s AND source_name = %(source_name)s
+                 AND status = 'INDEXED'""",
+            parameters,
+        )
+        self._persist_document_with_executor(executor, document, parameters)
+        for parent in parents:
+            executor.execute(
+                """INSERT INTO knowledge_parent_chunks (
+                       parent_chunk_id, document_id, organization_id, text, page_number, paragraph_number
+                   ) VALUES (%(parent_chunk_id)s, %(document_id)s, %(organization_id)s, %(text)s,
+                             %(page_number)s, %(paragraph_number)s)""",
+                {"parent_chunk_id": parent.parent_chunk_id, "document_id": parent.document_id,
+                 "organization_id": parent.organization_id, "text": parent.text,
+                 "page_number": parent.page_number, "paragraph_number": parent.paragraph_number},
+            )
+        for chunk in chunks:
+            executor.execute(
+                """INSERT INTO knowledge_chunk_index (
+                       chunk_id, parent_chunk_id, document_id, organization_id, text, page_number,
+                       paragraph_number, child_index, embedding
+                   ) VALUES (%(chunk_id)s, %(parent_chunk_id)s, %(document_id)s, %(organization_id)s,
+                             %(text)s, %(page_number)s, %(paragraph_number)s, %(child_index)s,
+                             CAST(%(embedding)s AS vector))""",
+                {"chunk_id": chunk.chunk_id, "parent_chunk_id": chunk.parent_chunk_id,
+                 "document_id": chunk.document_id, "organization_id": chunk.organization_id,
+                 "text": chunk.text, "page_number": chunk.page_number,
+                 "paragraph_number": chunk.paragraph_number, "child_index": chunk.child_index,
+                 "embedding": _vector_parameter(self._embed(chunk.text))},
+            )
+
+    @staticmethod
+    def _persist_document_with_executor(
+        executor: PostgresExecutorPort, document: KnowledgeDocument, parameters: Mapping[str, object]
+    ) -> None:
+        executor.execute(
+            """INSERT INTO knowledge_documents (
+                   document_id, organization_id, source_name, filename, version, media_type,
+                   content_sha256, status, indexed_at, evidence_kind, applicable_line_id,
+                   product_category, failure_reason
+               ) VALUES (%(document_id)s, %(organization_id)s, %(source_name)s, %(filename)s, %(version)s,
+                         %(media_type)s, %(content_sha256)s, %(status)s, %(indexed_at)s,
+                         %(evidence_kind)s, %(applicable_line_id)s, %(product_category)s,
+                         %(failure_reason)s)""",
+            parameters,
+        )
+
 
 def _document_parameters(document: KnowledgeDocument) -> dict[str, object]:
     return {
@@ -286,6 +348,31 @@ def _document_parameters(document: KnowledgeDocument) -> dict[str, object]:
         "product_category": document.product_category,
         "failure_reason": document.failure_reason,
     }
+
+
+def _find_indexed_document(
+    executor: PostgresExecutorPort, organization_id: UUID, source_name: str, content_sha256: str
+) -> KnowledgeDocument | None:
+    rows = executor.fetch_all(
+        """SELECT document_id, organization_id, source_name, filename, version, media_type,
+                  content_sha256, status, indexed_at, evidence_kind, applicable_line_id,
+                  product_category, failure_reason
+           FROM knowledge_documents
+           WHERE organization_id = %(organization_id)s AND source_name = %(source_name)s
+             AND content_sha256 = %(content_sha256)s AND status = 'INDEXED'
+           ORDER BY version DESC LIMIT 1""",
+        {"organization_id": organization_id, "source_name": source_name, "content_sha256": content_sha256},
+    )
+    return _knowledge_document_from_row(rows[0]) if rows else None
+
+
+def _next_version(executor: PostgresExecutorPort, organization_id: UUID, source_name: str) -> int:
+    rows = executor.fetch_all(
+        """SELECT COALESCE(MAX(version), 0) + 1 AS version FROM knowledge_documents
+           WHERE organization_id = %(organization_id)s AND source_name = %(source_name)s""",
+        {"organization_id": organization_id, "source_name": source_name},
+    )
+    return int(rows[0]["version"]) if rows else 1
 
 
 def _knowledge_document_from_row(row: Mapping[str, object]) -> KnowledgeDocument:
@@ -356,6 +443,7 @@ class PgVectorRetrievalAdapter:
         self._documents: dict[UUID, KnowledgeDocument] = {}
         self._parents: dict[UUID, KnowledgeParentChunk] = {}
         self._chunks: dict[UUID, KnowledgeChunk] = {}
+        self._ingest_lock = RLock()
 
     def find_indexed_document(
         self,
@@ -398,6 +486,25 @@ class PgVectorRetrievalAdapter:
         self._documents[document.document_id] = document
         self._parents.update({parent.parent_chunk_id: parent for parent in parents})
         self._chunks.update({chunk.chunk_id: chunk for chunk in chunks})
+
+    def index_atomically(
+        self,
+        document: KnowledgeDocument,
+        parents: Sequence[KnowledgeParentChunk],
+        chunks: Sequence[KnowledgeChunk],
+    ) -> KnowledgeDocument:
+        with self._ingest_lock:
+            existing = self.find_indexed_document(
+                document.organization_id, document.source_name, document.content_sha256
+            )
+            if existing is not None:
+                return existing
+            indexed = replace(
+                document,
+                version=self.next_version(document.organization_id, document.source_name),
+            )
+            self.index(indexed, parents, chunks)
+            return indexed
 
     def record_failure(self, document: KnowledgeDocument) -> None:
         if document.status != "FAILED":
@@ -598,6 +705,28 @@ class PsycopgPostgresExecutor:
 
         with psycopg.connect(self._postgres_url, row_factory=dict_row) as connection:
             return list(connection.execute(sql, parameters))
+
+    @contextmanager
+    def transaction(self) -> Iterator[PostgresExecutorPort]:
+        import psycopg  # deferred optional runtime dependency
+        from psycopg.rows import dict_row
+
+        with psycopg.connect(self._postgres_url, row_factory=dict_row) as connection:
+            yield _PsycopgConnectionExecutor(connection)
+
+
+class _PsycopgConnectionExecutor:
+    def __init__(self, connection: object) -> None:
+        self._connection = connection
+
+    def execute(self, sql: str, parameters: Mapping[str, object]) -> None:
+        self._connection.execute(sql, parameters)  # type: ignore[union-attr]
+
+    def fetch_all(self, sql: str, parameters: Mapping[str, object]) -> Sequence[Mapping[str, object]]:
+        return list(self._connection.execute(sql, parameters))  # type: ignore[union-attr]
+
+    def transaction(self) -> Iterator[PostgresExecutorPort]:
+        raise RuntimeError("Nested knowledge transactions are not supported.")
 
 
 def psycopg_executor(postgres_url: str) -> PostgresExecutorPort:

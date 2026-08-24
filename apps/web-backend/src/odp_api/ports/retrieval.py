@@ -82,6 +82,13 @@ class KnowledgeIndexPort(RAGRetrievalPort, Protocol):
 
     def next_version(self, organization_id: UUID, source_name: str) -> int: ...
 
+    def index_atomically(
+        self,
+        document: KnowledgeDocument,
+        parents: Sequence[KnowledgeParentChunk],
+        chunks: Sequence[KnowledgeChunk],
+    ) -> KnowledgeDocument: ...
+
     def index(
         self,
         document: KnowledgeDocument,

@@ -9,6 +9,7 @@ backends without requiring PostgreSQL.
 
 from collections.abc import Sequence
 from dataclasses import replace
+from threading import RLock
 from uuid import UUID
 
 from odp_api.adapters.retrieval.pgvector import (
@@ -28,6 +29,7 @@ class InMemoryKnowledgeIndex:
         self._documents: dict[UUID, KnowledgeDocument] = {}
         self._parents: dict[UUID, KnowledgeParentChunk] = {}
         self._chunks: dict[UUID, KnowledgeChunk] = {}
+        self._ingest_lock = RLock()
 
     def find_indexed_document(
         self,
@@ -70,6 +72,25 @@ class InMemoryKnowledgeIndex:
         self._documents[document.document_id] = document
         self._parents.update({parent.parent_chunk_id: parent for parent in parents})
         self._chunks.update({chunk.chunk_id: chunk for chunk in chunks})
+
+    def index_atomically(
+        self,
+        document: KnowledgeDocument,
+        parents: Sequence[KnowledgeParentChunk],
+        chunks: Sequence[KnowledgeChunk],
+    ) -> KnowledgeDocument:
+        with self._ingest_lock:
+            existing = self.find_indexed_document(
+                document.organization_id, document.source_name, document.content_sha256
+            )
+            if existing is not None:
+                return existing
+            indexed = replace(
+                document,
+                version=self.next_version(document.organization_id, document.source_name),
+            )
+            self.index(indexed, parents, chunks)
+            return indexed
 
     def record_failure(self, document: KnowledgeDocument) -> None:
         if document.status != "FAILED":

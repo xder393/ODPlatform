@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     # Load the deterministic demo seed at app creation (used by the Compose
     # stack so the browser demo can log in with the demo accounts).
     seed_demo: bool = False
+    seed_knowledge_on_startup: bool | None = None
     # E2E-only event injection is opt-in in every environment.
     enable_dev_event_trigger: bool = False
 
