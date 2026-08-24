@@ -132,3 +132,10 @@ Commit: `feat: stream durable inspection alerts in realtime` (recorded after thi
 - `test_fresh_alert_feed_migrations_match_sqlalchemy_metadata` now executes a
   real fresh upgrade plus check. Final focused: 16 passed; `alembic check` has
   no new operations; full backend: 137 passed, 1 existing skip.
+
+## Durable alert seed handoff
+
+- `python -m odp_api.seed_alerts` is the migration-service one-shot seed; its
+  idempotency contract passed with 10 stable cursors across two runs. API
+  startup no longer replays these facts. Focused seed/notification evidence:
+  8 passed; Compose configuration parsed successfully.

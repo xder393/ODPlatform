@@ -50,6 +50,16 @@ Configuration files are mounted read-only from
 `deploy/observability/`; edit them on the host and restart the affected
 service (`docker compose -f deploy/compose.yaml restart prometheus`).
 
+## Database bootstrap
+
+`migrate` 是唯一的数据库 bootstrap 服务：它以既有卷 owner `odp` 执行
+角色/RAG/Alembic 迁移和授权，再以 runtime role `odp_app` 依次播种业务数据、
+durable inspection alerts（`python -m odp_api.seed_alerts`）和知识库。API
+不会在启动时重播这些告警。旧卷升级请运行
+`deploy/postgres/upgrade-existing-volume.sh`；脚本使用 migrate 的退出码，失败
+即失败。Compose 仍使用 editable `pip install`，尚未 frozen；这是明确保留的
+后续改进项。
+
 ## Web frontend (nginx)
 
 The compose stack also serves the built Web frontend through an nginx
