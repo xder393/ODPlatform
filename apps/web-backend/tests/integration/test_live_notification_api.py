@@ -54,3 +54,15 @@ def test_rest_reconciliation_uses_cursor_envelope_and_line_authorization(tmp_pat
     assert set(payload) == {"items", "next_cursor"}
     assert len(payload["items"]) == 2
     assert payload["next_cursor"] == payload["items"][-1]["cursor"]
+
+
+def test_idle_disconnect_cancels_subscription_and_restores_active_gauge(tmp_path: Path) -> None:
+    """An idle client disconnect must not leave a pending subscription task or gauge."""
+    app = create_app(settings=_settings(tmp_path), seed=build_demo_seed())
+    with TestClient(app) as client:
+        ticket = client.post(
+            "/api/v1/auth/websocket-ticket", headers={"Authorization": f"Bearer {_token(client)}"}
+        ).json()["ticket"]
+        with client.websocket_connect(f"/ws/inspection-events?ticket={ticket}&cursor=10"):
+            pass
+    assert app.state.metric_registry._metrics["websocket_active_connections"].snapshot() == 0

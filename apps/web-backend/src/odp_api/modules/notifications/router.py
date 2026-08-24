@@ -1,5 +1,7 @@
 """Transport adapters for the process-local inspection alert feed."""
 
+import asyncio
+from contextlib import suppress
 from collections.abc import Callable, Mapping
 from uuid import UUID
 
@@ -93,16 +95,17 @@ def create_notifications_router(
             registry.add("websocket_active_connections", 1)
         try:
             subscription_cursor = cursor
-            for stored in repository.list(actor.organization_id, cursor, 100, _authorized_lines(actor)):
-                subscription_cursor = stored.cursor
-                if _is_authorized(actor, stored):
+            while True:
+                backlog = repository.list(actor.organization_id, subscription_cursor, 100, _authorized_lines(actor))
+                for stored in backlog:
+                    subscription_cursor = stored.cursor
                     await websocket.send_json(_envelope(stored))
                     if registry is not None:
                         registry.inc("websocket_reconciled_events_total")
-            async for stored in repository.subscribe(subscription_cursor):
-                if _is_authorized(actor, stored):
-                    await websocket.send_json(_envelope(stored))
-        except (WebSocketDisconnect, RuntimeError):
+                if len(backlog) < 100:
+                    break
+            await _deliver_until_disconnect(websocket, repository, subscription_cursor, actor)
+        except (WebSocketDisconnect, asyncio.CancelledError):
             return
         finally:
             if registry is not None:
@@ -139,3 +142,34 @@ def _envelope(stored: StoredInspectionAlert) -> dict[str, object]:
 
 def _authorized_lines(actor: Actor) -> frozenset[UUID] | None:
     return None if actor.role is Role.ADMINISTRATOR else actor.line_ids
+
+
+async def _deliver_until_disconnect(websocket: WebSocket, repository: InspectionAlertFeedPort, cursor: str | None, actor: Actor) -> None:
+    """Race the next durable event with client disconnect and clean both tasks."""
+    subscription = repository.subscribe(cursor)
+    event_task = asyncio.create_task(anext(subscription))
+    receive_task = asyncio.create_task(websocket.receive())
+    try:
+        while True:
+            done, _ = await asyncio.wait((event_task, receive_task), return_when=asyncio.FIRST_COMPLETED)
+            if receive_task in done:
+                message = receive_task.result()
+                if message.get("type") == "websocket.disconnect":
+                    return
+                receive_task = asyncio.create_task(websocket.receive())
+            if event_task in done:
+                try:
+                    stored = event_task.result()
+                except StopAsyncIteration:
+                    return
+                if _is_authorized(actor, stored):
+                    await websocket.send_json(_envelope(stored))
+                event_task = asyncio.create_task(anext(subscription))
+    finally:
+        for task in (event_task, receive_task):
+            task.cancel()
+        for task in (event_task, receive_task):
+            with suppress(asyncio.CancelledError, WebSocketDisconnect, StopAsyncIteration):
+                await task
+        with suppress(RuntimeError):
+            await subscription.aclose()

@@ -49,3 +49,13 @@ Commit: `feat: stream durable inspection alerts in realtime` (recorded after thi
 - Idempotency is unique per `(organization_id, event_id)` with a compatible
   SQLite table rebuild for the original unnamed unique constraint.
 - Focused: 17 passed. Full backend: 123 passed, 1 existing skip.
+
+## Fix round 1 completion
+
+- WebSocket delivery now races the next subscription item with `receive()` so
+  an idle disconnect cancels and closes pending iterator tasks immediately;
+  the active-connections gauge is decremented in all exits.
+- Backlog is paged in 100-item chunks and reconciliation metrics increment per
+  sent backlog item; live events remain excluded from that counter.
+- Added idle gauge-lifecycle and concurrent duplicate-publish coverage.
+- Focused: 19 passed. Full backend: 125 passed, 1 existing skip.

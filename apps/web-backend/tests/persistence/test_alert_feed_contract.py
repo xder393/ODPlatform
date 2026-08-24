@@ -1,6 +1,7 @@
 """Contract tests for the durable cursor-based inspection alert feed."""
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -70,6 +71,15 @@ def test_same_event_id_is_idempotent_only_inside_its_tenant(feed) -> None:
     second = feed.publish(_alert(event_id, foreign_org), LINE_ID)
     assert first != second
     assert [item.cursor for item in feed.list(foreign_org, None, 100)] == [second]
+
+
+def test_concurrent_duplicate_publish_returns_the_committed_winner(feed) -> None:
+    """A racing uniqueness conflict must roll back then return the stored cursor."""
+    alert = _alert()
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        cursors = list(executor.map(lambda _: feed.publish(alert, LINE_ID), range(2)))
+    assert cursors[0] == cursors[1]
+    assert len(feed.list(ORG_ID, None, 100)) == 1
 
 
 def test_authorized_line_filter_applies_before_limit(feed) -> None:
