@@ -1,7 +1,9 @@
 """End-to-end contracts for opaque, one-time WebSocket tickets."""
 
 from datetime import UTC, datetime, timedelta
+import json
 import logging
+import logging.config
 from pathlib import Path
 import sys
 from uuid import uuid4
@@ -232,6 +234,19 @@ def test_uvicorn_error_websocket_handshake_logs_strip_query_credentials(caplog, 
         assert secret not in caplog.text
         assert all(secret not in record.getMessage() for record in caplog.records)
     assert "non-WebSocket lifecycle log remains readable" in captured.out
+
+
+def test_uvicorn_error_non_websocket_question_mark_message_survives_real_log_config(capsys) -> None:
+    """A broad sanitizer must not corrupt ordinary Uvicorn error formatting."""
+    config_path = Path(__file__).parents[2] / "src" / "odp_api" / "observability" / "uvicorn_logging.json"
+    logging.config.dictConfig(json.loads(config_path.read_text()))
+    logger = logging.getLogger("uvicorn.error")
+
+    logger.error("Health probe failed? retrying %s", "soon")
+    captured = capsys.readouterr()
+
+    assert "Health probe failed? retrying soon" in captured.err
+    assert "Logging error" not in captured.err
 
 
 def test_reauthentication_marker_survives_a_local_runtime_restart(tmp_path: Path) -> None:
