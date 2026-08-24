@@ -60,6 +60,17 @@ Commit: `feat: stream durable inspection alerts in realtime` (recorded after thi
 - Added idle gauge-lifecycle and concurrent duplicate-publish coverage.
 - Focused: 19 passed. Full backend: 125 passed, 1 existing skip.
 
+## Fix round 2 completion
+
+- Redis subscriptions now use a dedicated `redis.asyncio` connection with a
+  one-second connect timeout and 20-second socket timeout, while `XREAD BLOCK`
+  remains 15 seconds. Cancellation closes that connection through `aclose()`.
+- Subscription captures stream high-water with `XREVRANGE`, queries durable
+  facts, then reads from that stable stream ID (or `0-0` when empty), avoiding
+  the `$` lost-wakeup window.
+- Added the Redis runtime dependency and regenerated `uv.lock`.
+- Full backend: 125 passed, 1 existing skip.
+
 ## Fix round 2 (migration/interface)
 
 - Restored immutable 0004 migration contents and moved tenant-scoped uniqueness
