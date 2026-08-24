@@ -1,6 +1,7 @@
 """Append-only audit service and an in-memory transactional adapter for tests."""
 
 from collections import defaultdict
+from contextlib import contextmanager
 from dataclasses import replace
 from threading import Event, Lock, RLock
 from typing import Callable, Protocol
@@ -126,20 +127,27 @@ class AuditService:
         self._health_lock = RLock()
 
     def append(self, command: AuditCommand) -> AuditLog:
-        self.ensure_append_allowed(command.organization_id)
-        return self.repository.append_under_head_lock(
-            command,
-            lambda sequence, previous_hash: audit_log_from_command(
-                command, sequence=sequence, previous_hash=previous_hash
-            ),
-        )
+        with self.append_guard(command.organization_id):
+            return self.repository.append_under_head_lock(
+                command,
+                lambda sequence, previous_hash: audit_log_from_command(
+                    command, sequence=sequence, previous_hash=previous_hash
+                ),
+            )
 
-    def ensure_append_allowed(self, organization_id: UUID) -> None:
+    @contextmanager
+    def append_guard(self, organization_id: UUID):
+        """Keep P0 health state stable through the complete append transaction."""
         with self._health_lock:
             if organization_id in self._blocked_organizations:
                 raise AuditAppendBlocked(
                     f"Audit appends for organization {organization_id} are blocked pending explicit recovery."
                 )
+            yield
+
+    def ensure_append_allowed(self, organization_id: UUID) -> None:
+        with self.append_guard(organization_id):
+            return None
 
     def verify_organization_chain(self, organization_id: UUID) -> VerificationResult:
         from odp_api.modules.audit.verify import verify_organization_chain
