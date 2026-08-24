@@ -2,6 +2,7 @@ import { useCallback, useState } from "react";
 
 import { LoginForm } from "./features/auth/LoginForm";
 import { RealtimeWorkbench } from "./features/workbench/RealtimeWorkbench";
+import { inspectionAlertCursorStorageKey } from "./features/workbench/useInspectionFeed";
 import "./app.css";
 
 const TOKEN_KEY = "odp_token";
@@ -23,11 +24,13 @@ export function App({ since }: { since: string }) {
   }, []);
 
   const handleLogout = useCallback(() => {
+    if (token) localStorage.removeItem(inspectionAlertCursorStorageKey(token));
     localStorage.removeItem(TOKEN_KEY);
+    // Remove the former global format if a user is upgrading from Task 5 pre-fix builds.
     localStorage.removeItem("odp_alert_cursor");
     setToken(null);
     setWorkbenchKey((key) => key + 1);
-  }, []);
+  }, [token]);
 
   if (!token) {
     return <LoginForm onAuthenticated={handleAuthenticated} />;

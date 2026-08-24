@@ -7,7 +7,7 @@ React 19 + TypeScript + Vite 8 实现的质检工作台：登录鉴权 → 实�
 - 打开页面时 `App` 作为鉴权门：`localStorage["odp_token"]` 无值 → 渲染 `LoginForm`；有值 → 渲染 `RealtimeWorkbench`（顶部带「退出登录」，清 token 回登录页）。
 - `LoginForm` 提交邮箱 + 密码到 `POST /api/v1/auth/login`，成功后把 `access_token` 写入 `localStorage["odp_token"]` 并回调 `onAuthenticated`；401 显示「邮箱或密码错误」。
 - 业务请求统一走 `src/api/client.ts` 的 `apiFetch`：自动附加 `Authorization: Bearer <token>`；`login()` 本身不自动存 token。
-- 每次 WebSocket 连接先以 Bearer JWT 换取 60 秒、一次性 `/api/v1/auth/websocket-ticket`，再连接 `/ws/inspection-events?ticket=<opaque>&cursor=<opaque>`；长期 JWT 不出现在 URL。REST 与 WebSocket 都返回 `{ cursor, alert }`，游标只在接受并按 `event_id` 去重后保存，并按 actor/session 隔离。
+- 每次 WebSocket 连接先以 Bearer JWT 换取 60 秒、一次性 `/api/v1/auth/websocket-ticket`，再连接 `/ws/inspection-events?ticket=<opaque>&cursor=<opaque>`；长期 JWT 不出现在 URL。REST 与 WebSocket 都返回 `{ cursor, alert }`，仅完整有效的包络会在按 `event_id` 去重后保存游标。游标键为 `odp_alert_cursor:<actor-or-session-scope>`，因此不同 actor 不会共享进度；登出仅清理当前 actor 的键。
 - 演示账户见仓库根 README「企业质检演示」。
 
 ## 组件结构
@@ -31,7 +31,7 @@ src/
 ## 常用命令
 
 ```bash
-npm test                # vitest 单测（jsdom，26 个）
+npm test                # vitest 单测（jsdom）
 npm run build           # tsc --noEmit + vite build
 npm run typecheck:e2e   # 仅类型检查 Playwright 规格与配置（无需浏览器）
 npm run test:e2e        # Playwright E2E（需服务已就绪 + 浏览器已安装）
@@ -41,7 +41,7 @@ npm run test:e2e        # Playwright E2E（需服务已就绪 + 浏览器已安�
 
 ## E2E
 
-`e2e/quality-workflow.spec.ts` 覆盖确定性闭环：登录质检员账户 → 看到「疑似表面划痕」告警 → 选中工单出现 AI 处置建议（可信度高徽标 + 引用来源含文档版本/页码）→ 确认复检（时间线「待确认 → 复核中」）→ 完成处置（状态已处置）。
+`e2e/quality-workflow.spec.ts` 覆盖确定性闭环：登录质检员账户 → 显式捕获并确认 `/ws/inspection-events` 的已连接 WebSocket → 调用开发触发器 → 断言目标 `event_id` 由同一 socket 的接收帧送达且没有主框架导航/页面 load → 选中工单出现 AI 处置建议（可信度高徽标 + 引用来源含文档版本/页码）→ 确认复检（时间线「待确认 → 复核中」）→ 完成处置（状态已处置）。
 
 运行方式（CI 同款）：
 

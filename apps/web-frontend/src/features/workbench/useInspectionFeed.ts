@@ -5,14 +5,9 @@ import type { InspectionAlert, InspectionAlertEnvelope } from "../../api/types";
 
 export type { InspectionAlert } from "../../api/types";
 
-const CURSOR_STORAGE_KEY = "odp_alert_cursor";
+const CURSOR_STORAGE_PREFIX = "odp_alert_cursor:";
 const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as const;
 const STABLE_CONNECTION_MS = 5_000;
-
-interface StoredCursor {
-  actor_id: string;
-  cursor: string;
-}
 
 function actorScope(token: string): string {
   try {
@@ -30,32 +25,40 @@ function actorScope(token: string): string {
   return `session-${(hash >>> 0).toString(16)}`;
 }
 
-function loadCursor(actorId: string): string | undefined {
-  const raw = localStorage.getItem(CURSOR_STORAGE_KEY);
-  if (!raw) return undefined;
-  try {
-    const stored = JSON.parse(raw) as Partial<StoredCursor>;
-    if (stored.actor_id === actorId && typeof stored.cursor === "string" && stored.cursor) {
-      return stored.cursor;
-    }
-  } catch {
-    // A legacy timestamp cursor is intentionally not carried into this protocol.
-  }
-  localStorage.removeItem(CURSOR_STORAGE_KEY);
-  return undefined;
+/** Return the actor/session-isolated key without exposing raw token material. */
+export function inspectionAlertCursorStorageKey(token: string): string {
+  return `${CURSOR_STORAGE_PREFIX}${actorScope(token)}`;
 }
 
-function saveCursor(actorId: string, cursor: string): void {
-  localStorage.setItem(CURSOR_STORAGE_KEY, JSON.stringify({ actor_id: actorId, cursor }));
+function loadCursor(storageKey: string): string | undefined {
+  const cursor = localStorage.getItem(storageKey);
+  return cursor && cursor.trim() ? cursor : undefined;
+}
+
+function saveCursor(storageKey: string, cursor: string): void {
+  localStorage.setItem(storageKey, cursor);
 }
 
 function isEnvelope(value: unknown): value is InspectionAlertEnvelope {
   if (!value || typeof value !== "object") return false;
   const envelope = value as Partial<InspectionAlertEnvelope>;
-  return typeof envelope.cursor === "string"
-    && typeof envelope.alert === "object"
-    && envelope.alert !== null
-    && typeof envelope.alert.event_id === "string";
+  if (!isNonEmptyString(envelope.cursor) || !envelope.alert || typeof envelope.alert !== "object") {
+    return false;
+  }
+  const alert = envelope.alert as Partial<InspectionAlert>;
+  return isNonEmptyString(alert.event_id)
+    && isNonEmptyString(alert.organization_id)
+    && isNonEmptyString(alert.camera_id)
+    && isNonEmptyString(alert.occurred_at)
+    && isNonEmptyString(alert.defect_class)
+    && typeof alert.confidence === "number"
+    && Number.isFinite(alert.confidence)
+    && alert.confidence >= 0
+    && alert.confidence <= 1;
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 /**
@@ -72,8 +75,8 @@ export function useInspectionFeed(
   useEffect(() => {
     if (!token) return undefined;
 
-    const actorId = actorScope(token);
-    let cursor = loadCursor(actorId);
+    const cursorStorageKey = inspectionAlertCursorStorageKey(token);
+    let cursor = loadCursor(cursorStorageKey);
     const eventIds = new Set<string>();
     let stopped = false;
     let socket: WebSocket | undefined;
@@ -95,7 +98,7 @@ export function useInspectionFeed(
       if (!isEnvelope(candidate) || eventIds.has(candidate.alert.event_id)) return false;
       eventIds.add(candidate.alert.event_id);
       cursor = candidate.cursor;
-      saveCursor(actorId, candidate.cursor);
+      saveCursor(cursorStorageKey, candidate.cursor);
       setAlerts((current) => [...current, candidate.alert]);
       return true;
     };
@@ -120,7 +123,7 @@ export function useInspectionFeed(
         // the cursor it establishes, covering the interval between both calls.
         const recovered = await reconcileInspectionAlerts(cursor, request.signal);
         if (stopped) return;
-        for (const item of recovered.items) accept(item);
+        for (const item of Array.isArray(recovered.items) ? recovered.items : []) accept(item);
 
         const { ticket } = await createWebSocketTicket(request.signal);
         if (stopped) return;

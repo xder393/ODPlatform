@@ -1,8 +1,15 @@
 import "@testing-library/jest-dom/vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
+
+const ACTOR_A = "11111111-1111-4111-8111-111111111111";
+const cursorKey = `odp_alert_cursor:${ACTOR_A}`;
+
+function tokenFor(actorId: string): string {
+  return `header.${btoa(JSON.stringify({ sub: actorId }))}.signature`;
+}
 
 class TestWebSocket {
   static instances: TestWebSocket[] = [];
@@ -28,6 +35,7 @@ describe("App 鉴权门", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     localStorage.clear();
   });
@@ -70,5 +78,32 @@ describe("App 鉴权门", () => {
 
     expect(screen.getByRole("button", { name: "登录" })).toBeInTheDocument();
     expect(localStorage.getItem("odp_token")).toBeNull();
+  });
+
+  it("logout through App aborts the active request, closes the socket, clears only this actor cursor, and cancels retries", async () => {
+    vi.useFakeTimers();
+    localStorage.setItem("odp_token", tokenFor(ACTOR_A));
+    localStorage.setItem(cursorKey, "44");
+    let activeSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      activeSignal = init?.signal ?? undefined;
+      if (String(input) === "/api/v1/cases") return { ok: true, json: async () => [] };
+      if (String(input).startsWith("/api/v1/inspection-events")) return { ok: true, json: async () => ({ items: [], next_cursor: "44" }) };
+      if (String(input) === "/api/v1/auth/websocket-ticket") return { ok: true, json: async () => ({ ticket: "logout-ticket", expires_in: 60 }) };
+      throw new Error(`Unexpected request: ${String(input)}`);
+    }));
+    render(<App since="2026-08-19T08:00:00Z" />);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(TestWebSocket.instances).toHaveLength(1);
+    act(() => TestWebSocket.instances[0].onclose?.());
+
+    fireEvent.click(screen.getByRole("button", { name: "退出登录" }));
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(activeSignal?.aborted).toBe(true);
+    expect(TestWebSocket.instances[0].close).toHaveBeenCalled();
+    expect(TestWebSocket.instances).toHaveLength(1);
+    expect(localStorage.getItem("odp_token")).toBeNull();
+    expect(localStorage.getItem(cursorKey)).toBeNull();
   });
 });

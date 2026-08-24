@@ -99,6 +99,9 @@ describe("RealtimeWorkbench", () => {
 
     expect(await screen.findByText("疑似表面划痕")).toBeInTheDocument();
     expect(screen.getAllByText("疑似表面划痕")).toHaveLength(1);
-    expect(JSON.parse(localStorage.getItem("odp_alert_cursor")!).cursor).toBe("13");
+    const cursorStorageKey = Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index))
+      .find((key) => key?.startsWith("odp_alert_cursor:"));
+    expect(cursorStorageKey).toBeDefined();
+    expect(localStorage.getItem(cursorStorageKey!)).toBe("13");
   });
 });
