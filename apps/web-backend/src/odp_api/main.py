@@ -290,7 +290,7 @@ def create_app(
     app.include_router(
         create_notifications_router(inspection_alert_feed)
     )
-    if runtime_settings.environment.lower() != "production":
+    if runtime_settings.enable_dev_event_trigger:
         app.include_router(create_development_notifications_router(inspection_alert_feed))
     app.include_router(
         create_auth_router(

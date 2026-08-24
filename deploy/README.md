@@ -10,6 +10,12 @@ docker compose -f deploy/compose.yaml up -d
 docker compose -f deploy/compose.yaml down
 ```
 
+The API container installs the bind-mounted source as editable packages, so it
+does not use `uv sync --frozen` yet. Backend CI validates
+`apps/web-backend/uv.lock` and installs its hashed frozen export instead.
+Making the Compose path equally frozen is tracked as a follow-up because it
+needs an image-level `uv` installation and a container validation pass.
+
 ## Services and ports
 
 | Service       | Port          | Notes                                                        |

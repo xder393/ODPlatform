@@ -2,7 +2,9 @@ from pathlib import Path
 from uuid import UUID
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
+from odp_api.adapters.persistence.models import ActorRow
 from odp_api.main import create_app
 from odp_api.seed import DEMO_ACCOUNTS, DEMO_ORG_ID, build_demo_seed
 from odp_api.settings import Settings
@@ -84,3 +86,21 @@ def test_successful_simulated_pause_is_appended_to_the_durable_audit_chain(tmp_p
         entries = client.app.state.audit_service.repository.read_consistent_chain(DEMO_ORG_ID).entries
         assert entries[-1].action == "defect_case.pause.simulated"
         assert entries[-1].correlation_id == CORRELATION_ID
+
+
+def test_disabled_actor_stays_disabled_after_runtime_restart(tmp_path) -> None:
+    """A fresh application process must reload the disabled identity rather than seed it active."""
+    settings = _settings(tmp_path)
+    seed = build_demo_seed()
+    with TestClient(create_app(settings=settings, seed=seed)) as first:
+        token = _login(first)
+        actor_id = first.app.state.jwt_authenticator.authenticate(token).actor_id
+        with first.app.state.session_factory.begin() as session:
+            session.scalar(select(ActorRow).where(ActorRow.actor_id == actor_id)).enabled = False
+
+    with TestClient(create_app(settings=settings, seed=seed)) as restarted:
+        response = restarted.post(
+            "/api/v1/auth/login",
+            json={"email": DEMO_ACCOUNTS[0][0], "password": DEMO_ACCOUNTS[0][1]},
+        )
+        assert response.status_code == 401

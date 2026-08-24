@@ -53,10 +53,17 @@ jobs:
         with:
           python-version: "3.12"
 
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Verify backend dependency lock
+        working-directory: apps/web-backend
+        run: uv lock --check
+
       - name: Install dependencies
         run: |
-          pip install ruff
-          pip install -e "./apps/web-backend[dev]" -e ./apps/platform -e ./packages/shared-schemas
+          uv export --project apps/web-backend --frozen --extra dev --no-emit-project --output-file /tmp/odp-backend-requirements.txt
+          pip install --require-hashes -r /tmp/odp-backend-requirements.txt
+          pip install --no-deps -e ./apps/web-backend -e ./packages/shared-schemas
 
       - name: Upgrade a clean SQLite runtime schema
         run: |

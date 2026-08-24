@@ -195,6 +195,7 @@ def seed_business_data(
                         organization_id=actor.organization_id,
                         role=actor.role.value,
                         email=actor.email,
+                        enabled=True,
                     )
                     session.add(actor_row)
                 else:

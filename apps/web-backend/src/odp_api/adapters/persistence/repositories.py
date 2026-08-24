@@ -31,12 +31,16 @@ class SqlAlchemyActorRepository:
 
     def get(self, actor_id: UUID) -> Actor | None:
         with self._session_factory() as session:
-            row = session.get(ActorRow, actor_id)
+            row = session.scalar(
+                select(ActorRow).where(ActorRow.actor_id == actor_id, ActorRow.enabled.is_(True))
+            )
             return _to_actor(session, row) if row is not None else None
 
     def get_by_email(self, email: str) -> Actor | None:
         with self._session_factory() as session:
-            row = session.scalar(select(ActorRow).where(ActorRow.email == email))
+            row = session.scalar(
+                select(ActorRow).where(ActorRow.email == email, ActorRow.enabled.is_(True))
+            )
             return _to_actor(session, row) if row is not None else None
 
 

@@ -17,5 +17,7 @@ class Settings(BaseSettings):
     # Load the deterministic demo seed at app creation (used by the Compose
     # stack so the browser demo can log in with the demo accounts).
     seed_demo: bool = False
+    # E2E-only event injection is opt-in in every environment.
+    enable_dev_event_trigger: bool = False
 
     model_config = SettingsConfigDict(env_prefix="ODP_", case_sensitive=False)

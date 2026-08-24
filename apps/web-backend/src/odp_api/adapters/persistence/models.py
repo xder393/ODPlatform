@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, true
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import Uuid
 
@@ -26,6 +26,7 @@ class ActorRow(Base):
     organization_id: Mapped[UUID] = mapped_column(Uuid, index=True)
     role: Mapped[str] = mapped_column(String(32))
     email: Mapped[str | None] = mapped_column(String(320), unique=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=true())
 
 
 class ActorLineGrantRow(Base):

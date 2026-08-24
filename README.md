@@ -86,7 +86,9 @@ curl -fsS http://localhost:8080/healthz
 
 ### 开发专用未来告警触发器
 
-本机和 Compose 的非生产环境提供经过 Bearer 鉴权、组织和产线授权检查的 `POST /api/v1/dev/inspection-events`，请求体为 `{"event_id":"UUID","line_id":"UUID"}`。它用于 Playwright 在已经建立 WebSocket 后发布确定性测试告警；`ODP_ENVIRONMENT=production` 时该路由不会注册，不能作为生产写入接口。
+只有显式设置 `ODP_ENABLE_DEV_EVENT_TRIGGER=true` 的运行时才提供经过 Bearer 鉴权、组织和产线授权检查的 `POST /api/v1/dev/inspection-events`，请求体为 `{"event_id":"UUID","line_id":"UUID"}`。它用于 Compose/Playwright 在已经建立 WebSocket 后发布确定性测试告警；环境名称不会隐式开启此路由，不能作为生产写入接口。
+
+账号启用状态由持久化身份仓储在每次认证和票据消费时强制执行；本 P0 不提供管理员启用/停用账号的管理接口。
 
 ### 常见问题
 

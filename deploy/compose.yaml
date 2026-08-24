@@ -19,6 +19,7 @@ services:
       # Development-only secret: replace for any shared deployment.
       ODP_AUTH_JWT_SECRET: odp-dev-jwt-secret-do-not-reuse
       ODP_SEED_DEMO: "true"
+      ODP_ENABLE_DEV_EVENT_TRIGGER: "true"
     ports:
       - "8000:8000"
     healthcheck:
