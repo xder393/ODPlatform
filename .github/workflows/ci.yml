@@ -32,18 +32,20 @@ jobs:
         image: pgvector/pgvector:pg16
         env:
           POSTGRES_DB: odp
-          POSTGRES_USER: odp
-          POSTGRES_PASSWORD: odp
+          POSTGRES_USER: odp_migrator
+          POSTGRES_PASSWORD: odp_migrator_dev
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U odp -d odp"
+          --health-cmd "pg_isready -U odp_migrator -d odp"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
     env:
-      ODP_POSTGRES_URL: postgresql://odp:odp@localhost:5432/odp
-      ODP_POSTGRES_TEST_URL: postgresql+psycopg://odp:odp@localhost:5432/odp
+      ODP_MIGRATOR_DATABASE_URL: postgresql+psycopg://odp_migrator:odp_migrator_dev@localhost:5432/odp
+      ODP_POSTGRES_URL: postgresql://odp_migrator:odp_migrator_dev@localhost:5432/odp
+      ODP_POSTGRES_TEST_URL: postgresql+psycopg://odp_migrator:odp_migrator_dev@localhost:5432/odp
+      ODP_POSTGRES_APP_TEST_URL: postgresql+psycopg://odp_app:odp_app_dev@localhost:5432/odp
     steps:
       - uses: actions/checkout@v4
 
@@ -63,9 +65,11 @@ jobs:
 
       - name: Upgrade the PostgreSQL knowledge and business schemas
         run: |
+          python -m odp_api.database_roles --bootstrap-only
           python -m odp_api.migrations
           ODP_DATABASE_URL="$ODP_POSTGRES_TEST_URL" \
             bash -c 'cd apps/web-backend && alembic upgrade head'
+          python -m odp_api.database_roles
 
       - name: Lint touched backend integration code
         run: ruff check apps/web-backend/src/odp_api/modules/notifications/dev_router.py apps/web-backend/tests/integration/test_dev_event_trigger.py

@@ -76,8 +76,8 @@ curl -fsS http://localhost:8080/healthz
 ### 持久化、迁移与恢复
 
 - 本机模式把业务状态（账户密码哈希、工单、状态历史、审计链和告警事实）保存在 `ODP_DATABASE_URL`，默认是 `/tmp/odp-quality-inspection.sqlite3`。迁移命令为 `cd apps/web-backend && alembic upgrade head`（需要时设置同一 `ODP_DATABASE_URL`）。
-- Docker 模式使用 `postgres-data` 卷中的 PostgreSQL 保存同一业务状态；Redis 仅用于一次性票据、二次认证 TTL 和跨实例告警唤醒，不是告警事实来源。`docker compose down` 保留数据卷，`docker compose down -v` 会删除演示数据。
-- 服务异常恢复时先恢复 PostgreSQL 卷/备份，再运行 `python -m odp_api.migrations`（RAG/pgvector）、`alembic upgrade head`（业务状态）、最后运行 `python -m odp_api.seed`（可安全重复运行），然后重启 `api`。Compose 使用同一 fail-closed 顺序；任一迁移或种子失败都不会启动 Uvicorn。客户端会以最后成功接受的游标补偿遗漏告警。
+- Docker 模式使用 `postgres-data` 卷中的 PostgreSQL 保存同一业务状态；Redis 仅用于一次性票据、二次认证 TTL 和跨实例告警唤醒，不是告警事实来源。Compose 以 `odp_migrator` 作为迁移/表 owner，以受限的 `odp_app` 运行 API；后者不能更新、删除或截断审计日志。文件中的数据库密码仅供本地演示，部署时必须由秘密管理系统注入独立的运行时与迁移 URL。`docker compose down` 保留数据卷，`docker compose down -v` 会删除演示数据。
+- 服务异常恢复时先恢复 PostgreSQL 卷/备份，再以迁移角色运行 `python -m odp_api.migrations`（RAG/pgvector）、`alembic upgrade head`（业务状态）和 `python -m odp_api.database_roles`（重放运行时最小权限），最后以运行时角色运行 `python -m odp_api.seed`（可安全重复运行），然后重启 `api`。Compose 使用同一 fail-closed 顺序；任一迁移或种子失败都不会启动 Uvicorn。客户端会以最后成功接受的游标补偿遗漏告警。
 - Alembic URL 优先级是调用方显式 `Config.set_main_option("sqlalchemy.url", ...)`、然后 `ODP_DATABASE_URL`、最后 `alembic.ini` 的本地 SQLite 默认值。这样 CLI/Compose 会使用环境数据库，而程序化测试可隔离到自己的数据库。
 
 ### WebSocket 票据与游标

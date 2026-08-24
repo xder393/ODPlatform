@@ -4,8 +4,9 @@ from uuid import UUID
 
 from alembic import command
 from alembic.config import Config
-from fastapi import APIRouter, FastAPI
-from sqlalchemy import inspect
+from argon2 import PasswordHasher
+from fastapi import APIRouter, FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from odp_api.adapters.auth.argon2 import Argon2PasswordVerifier
 from odp_api.adapters.auth.jwt import ActorRepository, JwtAuthenticator
 from odp_api.adapters.auth.redis_security import (
@@ -17,8 +18,8 @@ from odp_api.adapters.auth.sqlite_security import (
     SqliteWebSocketTicketStore,
 )
 from odp_api.adapters.generation.mock import MockLLMAdapter
-from odp_api.adapters.notifications.sqlite_feed import SqliteInspectionAlertFeed
 from odp_api.adapters.notifications.redis_durable_feed import RedisDurableInspectionAlertFeed
+from odp_api.adapters.notifications.sqlite_feed import SqliteInspectionAlertFeed
 from odp_api.adapters.persistence.models import Base
 from odp_api.adapters.persistence.repositories import (
     SqlAlchemyActorRepository,
@@ -34,6 +35,7 @@ from odp_api.adapters.retrieval.pgvector import PgVectorPostgresAdapter, psycopg
 from odp_api.adapters.tasks.redis_stream import RedisStreamTaskAlertPublisher, RedisStreamTaskQueue
 from odp_api.adapters.tasks.sqlite import SQLiteTaskRepository
 from odp_api.adapters.vision.mock import MockVisionAdapter
+from odp_api.db import create_engine_and_session
 from odp_api.modules.ai_orchestration.router import create_advice_router
 from odp_api.modules.ai_orchestration.service import AdviceService
 from odp_api.modules.audit.service import AuditRepository, AuditService
@@ -48,16 +50,16 @@ from odp_api.modules.identity.service import (
 from odp_api.modules.identity.tickets import WebSocketTicketService
 from odp_api.modules.inspection.service import InspectionService
 from odp_api.modules.knowledge.ingest import KnowledgeIngestionService
-from odp_api.modules.notifications.router import create_notifications_router
 from odp_api.modules.notifications.dev_router import create_development_notifications_router
+from odp_api.modules.notifications.router import create_notifications_router
 from odp_api.modules.tasks.service import TaskService
+from odp_api.observability.logging import configure_uvicorn_access_logging
 from odp_api.observability.metrics import (
     DEFAULT_REGISTRY,
     MetricRegistry,
     RegistryTaskMetrics,
     register_standard_metrics,
 )
-from odp_api.observability.logging import configure_uvicorn_access_logging
 from odp_api.observability.router import create_metrics_router
 from odp_api.observability.tracing import CorrelationIdMiddleware
 from odp_api.ports.retrieval import KnowledgeIndexPort
@@ -71,15 +73,40 @@ from odp_api.seed import (
     seed_business_data,
 )
 from odp_api.settings import Settings
-from odp_api.db import create_engine_and_session
-from argon2 import PasswordHasher
+from sqlalchemy import inspect, text
+from sqlalchemy.exc import (
+    DBAPIError,
+    DisconnectionError,
+    IntegrityError,
+    InterfaceError,
+    OperationalError,
+    SQLAlchemyError,
+)
 
 health_router = APIRouter()
 
 
 @health_router.get("/healthz")
-def healthz() -> dict[str, str]:
+def healthz(request: Request) -> dict[str, str]:
+    try:
+        with request.app.state.session_factory() as session:
+            session.execute(text("SELECT 1"))
+    except (OperationalError, InterfaceError, DisconnectionError, DBAPIError) as error:
+        if _is_database_unavailable(error):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database unavailable",
+            ) from error
+        raise
     return {"status": "ok"}
+
+
+def _is_database_unavailable(error: BaseException) -> bool:
+    """Distinguish connection/driver outages from domain constraint conflicts."""
+    return (
+        isinstance(error, (OperationalError, InterfaceError, DisconnectionError))
+        or (isinstance(error, DBAPIError) and error.connection_invalidated)
+    ) and not isinstance(error, IntegrityError)
 
 
 def _upgrade_runtime_schema(database_url: str) -> None:
@@ -123,9 +150,19 @@ def create_app(
     # Pre-register the documented metric set so /metrics always exposes every
     # series, including gauges that no code path has written yet.
     register_standard_metrics(registry)
-    _upgrade_runtime_schema(runtime_settings.database_url)
+    # Docker/staging always use an external migrator.  A production-labelled
+    # SQLite configuration remains self-contained for the route-registration
+    # test harness; real production PostgreSQL never receives DDL from odp_app.
+    externally_migrated = runtime_settings.environment.lower() in {"docker", "staging"} or (
+        runtime_settings.environment.lower() == "production"
+        and runtime_settings.database_url.startswith("postgres")
+    )
+    managed_database = not externally_migrated
+    if managed_database:
+        _upgrade_runtime_schema(runtime_settings.database_url)
     engine, session_factory = create_engine_and_session(runtime_settings.database_url)
-    Base.metadata.create_all(engine)
+    if managed_database:
+        Base.metadata.create_all(engine)
     runtime_stream_client = stream_client or _runtime_stream_client(runtime_settings)
     task_repository = SQLiteTaskRepository(runtime_settings.task_database_path)
     task_service = TaskService(
@@ -159,6 +196,19 @@ def create_app(
             engine.dispose()
 
     app = FastAPI(title=runtime_settings.app_name, lifespan=lifespan)
+
+    @app.exception_handler(SQLAlchemyError)
+    async def database_error_handler(_request: Request, error: SQLAlchemyError) -> JSONResponse:
+        if _is_database_unavailable(error):
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"detail": "Database unavailable"},
+            )
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"detail": "Database operation failed"},
+        )
+
     app.add_middleware(CorrelationIdMiddleware)
     resolved_actor_repository = actor_repository or SqlAlchemyActorRepository(session_factory)
     app.state.session_factory = session_factory

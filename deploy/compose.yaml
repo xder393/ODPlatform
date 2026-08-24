@@ -5,13 +5,16 @@ services:
     volumes:
       - ..:/workspace
       - task-state:/data
-    command: ["sh", "-c", "pip install -e /workspace/apps/web-backend -e /workspace/packages/shared-schemas && python -m odp_api.migrations && (cd /workspace/apps/web-backend && alembic upgrade head) && python -m odp_api.seed && uvicorn odp_api.main:create_app --factory --host 0.0.0.0 --port 8000 --log-config /workspace/apps/web-backend/src/odp_api/observability/uvicorn_logging.json"]
+    command: ["sh", "-c", "pip install -e /workspace/apps/web-backend -e /workspace/packages/shared-schemas && python -m odp_api.database_roles --bootstrap-only && ODP_DATABASE_URL=$$ODP_MIGRATOR_DATABASE_URL python -m odp_api.migrations && ODP_DATABASE_URL=$$ODP_MIGRATOR_DATABASE_URL sh -c 'cd /workspace/apps/web-backend && alembic upgrade head' && python -m odp_api.database_roles && ODP_DATABASE_URL=$$ODP_RUNTIME_DATABASE_URL python -m odp_api.seed && ODP_DATABASE_URL=$$ODP_RUNTIME_DATABASE_URL uvicorn odp_api.main:create_app --factory --host 0.0.0.0 --port 8000 --log-config /workspace/apps/web-backend/src/odp_api/observability/uvicorn_logging.json"]
     environment:
       ODP_ENVIRONMENT: docker
       ODP_REDIS_URL: redis://redis:6379/0
-      ODP_DATABASE_URL: postgresql+psycopg://odp:odp@postgres:5432/odp
+      # Development-only database credentials; shared deployments inject both URLs.
+      ODP_RUNTIME_DATABASE_URL: postgresql+psycopg://odp_app:odp_app_dev@postgres:5432/odp
+      ODP_MIGRATOR_DATABASE_URL: postgresql+psycopg://odp_migrator:odp_migrator_dev@postgres:5432/odp
+      ODP_DATABASE_URL: postgresql+psycopg://odp_app:odp_app_dev@postgres:5432/odp
       ODP_TASK_DATABASE_PATH: /data/odp-tasks.sqlite3
-      ODP_POSTGRES_URL: postgresql://odp:odp@postgres:5432/odp
+      ODP_POSTGRES_URL: postgresql://odp_migrator:odp_migrator_dev@postgres:5432/odp
       ODP_RETRIEVAL_BACKEND: pgvector
       # Development-only secret: replace for any shared deployment.
       ODP_AUTH_JWT_SECRET: odp-dev-jwt-secret-do-not-reuse
@@ -44,12 +47,14 @@ services:
     image: pgvector/pgvector:pg16
     environment:
       POSTGRES_DB: odp
-      POSTGRES_USER: odp
-      POSTGRES_PASSWORD: odp
+      # Development-only owner password; never use this Compose credential in production.
+      POSTGRES_USER: odp_migrator
+      POSTGRES_PASSWORD: odp_migrator_dev
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - ./postgres/001-create-app-role.sql:/docker-entrypoint-initdb.d/001-create-app-role.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U odp -d odp"]
+      test: ["CMD-SHELL", "pg_isready -U odp_migrator -d odp"]
       interval: 10s
       timeout: 5s
       retries: 5
