@@ -34,31 +34,44 @@ class SqliteInspectionAlertFeed:
 
     def publish(self, alert: InspectionAlert, line_id: UUID | None) -> str:
         """Persist before any notification and deduplicate by the event identity."""
-        with self._sessions.begin() as session:
-            row = session.scalar(
-                select(InspectionAlertFeedRow).where(InspectionAlertFeedRow.event_id == alert.event_id)
-            )
-            if row is None:
-                row = InspectionAlertFeedRow(
-                    event_id=alert.event_id, organization_id=alert.organization_id,
-                    line_id=line_id, payload=alert.model_dump(mode="json"),
-                    created_at=_as_utc(alert.occurred_at),
-                )
-                session.add(row)
-                session.flush()
+        try:
+            with self._sessions.begin() as session:
+                row = session.scalar(select(InspectionAlertFeedRow).where(
+                    InspectionAlertFeedRow.organization_id == alert.organization_id,
+                    InspectionAlertFeedRow.event_id == alert.event_id,
+                ))
+                if row is None:
+                    row = InspectionAlertFeedRow(
+                        event_id=alert.event_id, organization_id=alert.organization_id,
+                        line_id=line_id, payload=alert.model_dump(mode="json"),
+                        created_at=_as_utc(alert.occurred_at),
+                    )
+                    session.add(row)
+                    session.flush()
+        except IntegrityError:
+            with self._sessions() as session:
+                row = session.scalar(select(InspectionAlertFeedRow).where(
+                    InspectionAlertFeedRow.organization_id == alert.organization_id,
+                    InspectionAlertFeedRow.event_id == alert.event_id,
+                ))
+                if row is None:
+                    raise
         with self._condition:
             self._generation += 1
             self._condition.notify_all()
         return str(row.cursor)
 
-    def list(self, organization_id: UUID, after_cursor: str | None, limit: int) -> list[StoredInspectionAlert]:
+    def list(self, organization_id: UUID, after_cursor: str | None, limit: int, authorized_line_ids: frozenset[UUID] | None = None) -> list[StoredInspectionAlert]:
         if not 1 <= limit <= _MAX_LIMIT:
             raise ValueError("limit must be between 1 and 100")
         cursor = _parse_cursor(after_cursor)
         statement = select(InspectionAlertFeedRow).where(
             InspectionAlertFeedRow.organization_id == organization_id,
             InspectionAlertFeedRow.cursor > cursor,
-        ).order_by(InspectionAlertFeedRow.cursor).limit(limit)
+        )
+        if authorized_line_ids is not None:
+            statement = statement.where(InspectionAlertFeedRow.line_id.in_(authorized_line_ids))
+        statement = statement.order_by(InspectionAlertFeedRow.cursor).limit(limit)
         with self._sessions() as session:
             return [_stored(row) for row in session.scalars(statement)]
 

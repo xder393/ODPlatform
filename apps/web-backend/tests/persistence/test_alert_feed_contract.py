@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from odp_api.adapters.notifications.redis_durable_feed import RedisDurableInspectionAlertFeed
 from odp_api.adapters.notifications.sqlite_feed import SqliteInspectionAlertFeed
 from odp_api.adapters.persistence.models import Base
 from odp_api.db import create_engine_and_session
@@ -59,6 +60,49 @@ def test_reconciliation_is_incremental_idempotent_and_tenant_scoped(feed) -> Non
 
     assert [item.cursor for item in feed.list(ORG_ID, first, 100)] == [second]
     assert [item.cursor for item in feed.list(ORG_ID, None, 100)] == [first, second]
+
+
+def test_same_event_id_is_idempotent_only_inside_its_tenant(feed) -> None:
+    """A global event-id uniqueness constraint rejects a valid foreign tenant fact."""
+    event_id = uuid4()
+    first = feed.publish(_alert(event_id), LINE_ID)
+    foreign_org = uuid4()
+    second = feed.publish(_alert(event_id, foreign_org), LINE_ID)
+    assert first != second
+    assert [item.cursor for item in feed.list(foreign_org, None, 100)] == [second]
+
+
+def test_authorized_line_filter_applies_before_limit(feed) -> None:
+    """Post-limit filtering lets an inaccessible first page starve authorized events."""
+    feed.publish(_alert(), uuid4())
+    visible = feed.publish(_alert(), LINE_ID)
+    assert [item.cursor for item in feed.list(ORG_ID, None, 1, frozenset({LINE_ID}))] == [visible]
+
+
+@pytest.mark.anyio
+async def test_redis_wakeup_requeries_durable_facts_and_uses_bounded_commands(feed) -> None:
+    """Redis is only a blocking wake-up; its response must never be the alert fact."""
+    class FakeRedis:
+        def __init__(self): self.xadd_calls = []; self.xread_calls = []; self.response = [["s", [["9-0", []]]]]
+        def xadd_bounded(self, stream, fields, maxlen): self.xadd_calls.append((stream, fields, maxlen)); return "9-0"
+        def xread(self, stream, cursor, block_ms): self.xread_calls.append((stream, cursor, block_ms)); return self.response
+    redis = FakeRedis()
+    durable = RedisDurableInspectionAlertFeed(feed, redis)
+    subscription = durable.subscribe(None)
+    pending = anext(subscription)
+    await asyncio.sleep(0)
+    alert = _alert()
+    cursor = durable.publish(alert, LINE_ID)
+    received = await asyncio.wait_for(pending, 1)
+    waiting = asyncio.create_task(anext(subscription))
+    await asyncio.sleep(0)
+    assert received.cursor == cursor
+    assert redis.xadd_calls[0][2] == 10_000
+    assert redis.xread_calls[0][2] == 15_000
+    waiting.cancel()
+    with __import__("contextlib").suppress(asyncio.CancelledError):
+        await waiting
+    await subscription.aclose()
 
 
 @pytest.mark.parametrize("limit", [0, -1, 101])

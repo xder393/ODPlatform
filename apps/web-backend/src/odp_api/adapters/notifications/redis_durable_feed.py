@@ -15,46 +15,29 @@ class RedisDurableInspectionAlertFeed:
     """Never reads reconciliation facts from Redis, only uses it for transport."""
 
     def __init__(self, facts: SqliteInspectionAlertFeed, client: Any, stream_name: str = "odp:inspection-alerts") -> None:
+        if not callable(getattr(client, "xadd_bounded", None)) or not callable(getattr(client, "xread", None)):
+            raise RuntimeError("Redis alert transport requires bounded XADD and blocking XREAD")
         self._facts, self._client, self._stream = facts, client, stream_name
 
     def publish(self, alert: InspectionAlert, line_id: UUID | None) -> str:
         cursor = self._facts.publish(alert, line_id)
         fields = {"cursor": cursor, "event_id": str(alert.event_id)}
-        bounded = getattr(self._client, "xadd_bounded", None)
-        if bounded is None:
-            self._client.xadd(self._stream, fields)
-        else:
-            bounded(self._stream, fields, 10_000)
+        self._client.xadd_bounded(self._stream, fields, 10_000)
         return cursor
 
-    def list(self, organization_id: UUID, after_cursor: str | None, limit: int):
-        return self._facts.list(organization_id, after_cursor, limit)
+    def list(self, organization_id: UUID, after_cursor: str | None, limit: int, authorized_line_ids=None):
+        return self._facts.list(organization_id, after_cursor, limit, authorized_line_ids)
 
     async def subscribe(self, after_cursor: str | None) -> AsyncIterator[StoredInspectionAlert]:
-        # The durable delegate re-queries after its bounded timeout. Redis
-        # messages reduce cross-instance latency; a lost stream is never used
-        # as evidence that a database fact does not exist.
-        reader = getattr(self._client, "xread", None)
-        task = (
-            asyncio.create_task(self._read_wakeups(reader))
-            if reader is not None
-            else None
-        )
-        try:
-            async for item in self._facts.subscribe(after_cursor):
-                yield item
-        finally:
-            if task is not None:
-                task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
-
-    async def _read_wakeups(self, reader: Any) -> None:
-        """Block on bounded Redis XREAD; durable queries decide what to send."""
+        cursor = int(after_cursor or "0")
         stream_cursor = "$"
         while True:
-            response = await asyncio.to_thread(reader, self._stream, stream_cursor, 15_000)
+            for item in self._facts._list_after(cursor):
+                cursor = int(item.cursor)
+                yield item
+            response = await asyncio.to_thread(self._client.xread, self._stream, stream_cursor, 15_000)
             stream_cursor = _last_stream_id(response) or stream_cursor
+            await asyncio.sleep(0)
 
 
 def _last_stream_id(response: object) -> str | None:

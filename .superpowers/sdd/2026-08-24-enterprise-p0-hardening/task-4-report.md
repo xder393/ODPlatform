@@ -1,6 +1,6 @@
 # Task 4 report — durable real-time inspection alerts
 
-Status: complete.
+Status: complete (fix round 1).
 
 Commit: `feat: stream durable inspection alerts in realtime` (recorded after this report).
 
@@ -39,3 +39,13 @@ Commit: `feat: stream durable inspection alerts in realtime` (recorded after thi
 - Live Redis/Compose verification remains intentionally deferred to Task 5 as
   specified. The local fake verifies bounded stream publication compatibility;
   no live Redis server was used in this task.
+
+## Fix round 1
+
+- RED: tenant-scoped duplicate, authorization-before-limit, and deterministic
+  Redis XADD/XREAD wake-up tests failed against the initial adapter.
+- Redis now requires bounded XADD and blocking XREAD capabilities, uses
+  `MAXLEN ~ 10000` / `BLOCK 15000`, and re-queries durable facts after a wake.
+- Idempotency is unique per `(organization_id, event_id)` with a compatible
+  SQLite table rebuild for the original unnamed unique constraint.
+- Focused: 17 passed. Full backend: 123 passed, 1 existing skip.

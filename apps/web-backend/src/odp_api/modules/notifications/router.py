@@ -5,7 +5,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket
 from starlette.websockets import WebSocketDisconnect
-from odp_api.modules.identity.models import Actor
+from odp_api.modules.identity.models import Actor, Role
 from odp_api.modules.identity.policies import AuthorizationDenied, authorize
 from odp_api.modules.identity.service import (
     WebSocketAuthenticationError,
@@ -37,13 +37,14 @@ class InMemoryInspectionAlertRepository:
         )
 
     def list(
-        self, organization_id: UUID, after_cursor: str | None = None, limit: int = 100
+        self, organization_id: UUID, after_cursor: str | None = None, limit: int = 100, authorized_line_ids=None
     ) -> list[StoredInspectionAlert]:
         return [
             stored
             for stored in self._alerts
             if stored.alert.organization_id == organization_id
             and (after_cursor is None or int(stored.cursor) > int(after_cursor))
+            and (authorized_line_ids is None or stored.line_id in authorized_line_ids)
         ][:limit]
 
     def publish(self, alert: InspectionAlert, line_id: UUID | None) -> str:
@@ -68,7 +69,7 @@ def create_notifications_router(
         actor: Actor = Depends(actor_provider),
     ) -> dict[str, object]:
         try:
-            stored = repository.list(actor.organization_id, after_cursor, limit)
+            stored = repository.list(actor.organization_id, after_cursor, limit, _authorized_lines(actor))
         except ValueError as error:
             raise HTTPException(status_code=422, detail="Invalid cursor or limit") from error
         items = [_envelope(item) for item in stored if _is_authorized(actor, item)]
@@ -76,20 +77,23 @@ def create_notifications_router(
 
     @router.websocket("/ws/inspection-events")
     async def inspection_events_socket(websocket: WebSocket) -> None:
+        cursor = websocket.query_params.get("cursor")
+        if cursor is not None and (not cursor.isdigit() or int(cursor) < 0):
+            await websocket.close(code=1008)
+            return
         try:
             actor = _websocket_actor(websocket, actor_provider)
         except WebSocketAuthenticationError:
             await websocket.close(code=1008)
             return
         await websocket.accept()
-        cursor = websocket.query_params.get("cursor")
         registry = getattr(websocket.app.state, "metric_registry", None)
         if registry is not None:
             registry.inc("websocket_reconnect_total")
             registry.add("websocket_active_connections", 1)
         try:
             subscription_cursor = cursor
-            for stored in repository.list(actor.organization_id, cursor, 100):
+            for stored in repository.list(actor.organization_id, cursor, 100, _authorized_lines(actor)):
                 subscription_cursor = stored.cursor
                 if _is_authorized(actor, stored):
                     await websocket.send_json(_envelope(stored))
@@ -131,3 +135,7 @@ def _is_authorized(actor: Actor, stored: StoredInspectionAlert) -> bool:
 
 def _envelope(stored: StoredInspectionAlert) -> dict[str, object]:
     return {"cursor": stored.cursor, "alert": stored.alert.model_dump(mode="json")}
+
+
+def _authorized_lines(actor: Actor) -> frozenset[UUID] | None:
+    return None if actor.role is Role.ADMINISTRATOR else actor.line_ids
