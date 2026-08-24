@@ -11,11 +11,15 @@
 **终端 1 — 启动后端**（仓库根目录；`ODP_SEED_DEMO=true` 启用演示数据，否则无法登录）：
 
 ```bash
+# 首次运行或升级代码后：显式迁移持久化 SQLite 数据库。
+ODP_DATABASE_URL=sqlite:////tmp/odp-quality-inspection.sqlite3 \
+  bash -c 'cd apps/web-backend && ../../.venv-runtime/bin/alembic upgrade head'
+
 ODP_AUTH_JWT_SECRET=dev-demo-secret ODP_SEED_DEMO=true \
   .venv-runtime/bin/uvicorn odp_api.main:create_app --factory --host 127.0.0.1 --port 8000
 ```
 
-> 没有现成虚拟环境时：`python -m venv .venv-runtime && .venv-runtime/bin/pip install -e ./apps/web-backend -e ./packages/shared-schemas uvicorn`
+> 没有现成虚拟环境时：`python -m venv .venv-runtime && .venv-runtime/bin/pip install -e ./apps/web-backend -e ./packages/shared-schemas`。默认 SQLite 文件是 `/tmp/odp-quality-inspection.sqlite3`；应用启动也会执行 Alembic 升级并以稳定业务键补齐演示种子，因此重启不会复制账户、工单、检测事件或审计记录。
 
 **终端 2 — 启动前端**（`apps/web-frontend/` 目录）：
 
@@ -68,6 +72,20 @@ curl -fsS http://localhost:8080/healthz
 7. 点击「完成处置」→ 工单状态变为「已处置」，人工流转写入审计哈希链
 8. （Docker 模式）打开 Grafana 查看 Quality Inspection 仪表盘：告警速率、推理延迟（p50/p95）、工单解决时长、RAG 建议命中率；Prometheus 查询 `inspection_alert_total` 等指标
 9. 结束后 `docker compose -f deploy/compose.yaml down`
+
+### 持久化、迁移与恢复
+
+- 本机模式把业务状态（账户密码哈希、工单、状态历史、审计链和告警事实）保存在 `ODP_DATABASE_URL`，默认是 `/tmp/odp-quality-inspection.sqlite3`。迁移命令为 `cd apps/web-backend && alembic upgrade head`（需要时设置同一 `ODP_DATABASE_URL`）。
+- Docker 模式使用 `postgres-data` 卷中的 PostgreSQL 保存同一业务状态；Redis 仅用于一次性票据、二次认证 TTL 和跨实例告警唤醒，不是告警事实来源。`docker compose down` 保留数据卷，`docker compose down -v` 会删除演示数据。
+- 服务异常恢复时先恢复 PostgreSQL 卷/备份，再运行 `alembic upgrade head`，最后运行 `python -m odp_api.seed`（可安全重复运行），然后重启 `api`。客户端会以最后成功接受的游标补偿遗漏告警。
+
+### WebSocket 票据与游标
+
+浏览器绝不把长期 JWT 放在 WebSocket URL。每次连接先用 Bearer JWT 调用 `POST /api/v1/auth/websocket-ticket`，得到随机、单次使用、60 秒有效的票据；随后连接 `/ws/inspection-events?ticket=…&cursor=…`。后端的 REST 补偿与 WebSocket 帧均使用 `{ cursor, alert }` 包络。前端只在接受并按 `event_id` 去重后，才把游标保存为当前认证 actor 的 `localStorage["odp_alert_cursor"]`；登出或切换 actor 会清除/隔离该状态，并按 1/2/4/8/16/30 秒退避重连。
+
+### 开发专用未来告警触发器
+
+本机和 Compose 的非生产环境提供经过 Bearer 鉴权、组织和产线授权检查的 `POST /api/v1/dev/inspection-events`，请求体为 `{"event_id":"UUID","line_id":"UUID"}`。它用于 Playwright 在已经建立 WebSocket 后发布确定性测试告警；`ODP_ENVIRONMENT=production` 时该路由不会注册，不能作为生产写入接口。
 
 ### 常见问题
 
@@ -132,8 +150,8 @@ odp-infer --model <best.pt> --source 图片/视频/文件夹 --save
 
 ## 企业质检平台架构
 
-- **Web 后端**（`apps/web-backend/`）：FastAPI + Pydantic，端口/适配器分层（六边形架构）；模块化实现检查工单（cases）、身份与 RBAC（identity）、AI 编排（ai_orchestration）、审计哈希链（audit）、知识库（knowledge）与可观测性（observability）；JWT 登录（`POST /api/v1/auth/login`）、WebSocket 告警流（`/ws/inspection-events`，query param 鉴权）、Prometheus 指标（`/metrics`）
-- **Web 前端**（`apps/web-frontend/`）：React 19 + TypeScript + Vite；登录鉴权门（token 存 `localStorage["odp_token"]`）→ 实时告警流（WS + REST 补偿对账）→ 工单时间线 / AI 处置建议面板（可信度徽标 + 文档引用）/ 暂停产线二次认证；vitest 单测 + Playwright E2E
+- **Web 后端**（`apps/web-backend/`）：FastAPI + Pydantic，端口/适配器分层（六边形架构）；模块化实现检查工单（cases）、身份与 RBAC（identity）、AI 编排（ai_orchestration）、审计哈希链（audit）、知识库（knowledge）与可观测性（observability）；JWT 登录、一次性 WebSocket 票据、持久化告警游标流与 Prometheus 指标（`/metrics`）
+- **Web 前端**（`apps/web-frontend/`）：React 19 + TypeScript + Vite；登录鉴权门（token 存 `localStorage["odp_token"]`）→ 票据 WebSocket + 游标 REST 补偿 → 工单时间线 / AI 处置建议面板（可信度徽标 + 文档引用）/ 暂停产线二次认证；vitest 单测 + Playwright E2E
 - **共享契约**（`packages/shared-schemas/`）：前后端共用的 Pydantic 事件模型
 - **部署**（`deploy/`）：Docker Compose（api / nginx 前端 / postgres+pgvector / redis / minio）+ Prometheus / Alertmanager / Grafana 可观测栈
 
@@ -173,10 +191,10 @@ odp_platform/
 # 1. 平台核心引擎（202 个测试：注册表机制、划分边界、配置合并溯源、训练/评估编排、端到端冒烟）
 cd apps/platform && pytest tests/ -q
 
-# 2. Web 后端（86 个测试：工单状态机、RBAC/租户隔离、审计哈希链、任务状态机、知识库、AI 编排、登录、E2E 闭环）
+# 2. Web 后端（工单状态机、RBAC/租户隔离、审计哈希链、持久化票据/告警、任务状态机、知识库、AI 编排、登录）
 pytest apps/web-backend/tests -q
 
-# 3. Web 前端（26 个单测：登录、鉴权门、告警流对账、工单处置、建议面板）
+# 3. Web 前端（登录、鉴权门、票据/游标告警对账、工单处置、建议面板）
 cd apps/web-frontend && npm test && npm run build && npm run typecheck:e2e
 
 # E2E（需 Docker 起全套服务 + Playwright 浏览器）

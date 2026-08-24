@@ -2,8 +2,10 @@ import type {
   AdviceResponse,
   CaseSummary,
   CaseTransitionStatus,
+  InspectionAlertReconciliation,
   PauseResponse,
   ReauthenticateResponse,
+  WebSocketTicketResponse,
 } from "./types";
 
 /** 带 HTTP 状态码的 API 错误，调用方可用 status 区分 401/403/404/409。 */
@@ -85,6 +87,22 @@ export async function reauthenticate(password: string): Promise<ReauthenticateRe
     body: JSON.stringify({ password }),
   });
   return (await response.json()) as ReauthenticateResponse;
+}
+
+/** 用长期 Bearer JWT 交换只能消费一次、60 秒有效的 WebSocket 票据。 */
+export async function createWebSocketTicket(signal?: AbortSignal): Promise<WebSocketTicketResponse> {
+  const response = await apiFetch("/api/v1/auth/websocket-ticket", { method: "POST", signal });
+  return (await response.json()) as WebSocketTicketResponse;
+}
+
+/** 通过不透明游标读取断线期间的可见告警，不使用时间戳重放。 */
+export async function reconcileInspectionAlerts(
+  afterCursor?: string,
+  signal?: AbortSignal,
+): Promise<InspectionAlertReconciliation> {
+  const query = afterCursor ? `?after_cursor=${encodeURIComponent(afterCursor)}` : "";
+  const response = await apiFetch(`/api/v1/inspection-events${query}`, { signal });
+  return (await response.json()) as InspectionAlertReconciliation;
 }
 
 export interface LoginResponse {

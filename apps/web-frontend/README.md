@@ -7,7 +7,7 @@ React 19 + TypeScript + Vite 8 实现的质检工作台：登录鉴权 → 实�
 - 打开页面时 `App` 作为鉴权门：`localStorage["odp_token"]` 无值 → 渲染 `LoginForm`；有值 → 渲染 `RealtimeWorkbench`（顶部带「退出登录」，清 token 回登录页）。
 - `LoginForm` 提交邮箱 + 密码到 `POST /api/v1/auth/login`，成功后把 `access_token` 写入 `localStorage["odp_token"]` 并回调 `onAuthenticated`；401 显示「邮箱或密码错误」。
 - 业务请求统一走 `src/api/client.ts` 的 `apiFetch`：自动附加 `Authorization: Bearer <token>`；`login()` 本身不自动存 token。
-- WebSocket 告警流连接为 `/ws/inspection-events?token=<jwt>`（浏览器 WS 无法设置请求头，走 query param 鉴权）；断线补偿的 REST 对账请求复用 `apiFetch`（自动带 Bearer 头）。无 token 时不建立连接。
+- 每次 WebSocket 连接先以 Bearer JWT 换取 60 秒、一次性 `/api/v1/auth/websocket-ticket`，再连接 `/ws/inspection-events?ticket=<opaque>&cursor=<opaque>`；长期 JWT 不出现在 URL。REST 与 WebSocket 都返回 `{ cursor, alert }`，游标只在接受并按 `event_id` 去重后保存，并按 actor/session 隔离。
 - 演示账户见仓库根 README「企业质检演示」。
 
 ## 组件结构
@@ -23,7 +23,7 @@ src/
 └── features/
     ├── auth/LoginForm.tsx           邮箱/密码登录表单（中文 UI、label 关联、401 错误文案）
     ├── workbench/RealtimeWorkbench.tsx  告警流 + 工单列表/详情/时间线/暂停二次认证
-    ├── workbench/useInspectionFeed.ts   WS 告警流（query param 鉴权 + REST 补偿对账 + 断线重连）
+    ├── workbench/useInspectionFeed.ts   票据 WS 告警流（游标 REST 补偿 + 1/2/4/8/16/30 秒退避）
     ├── cases/CaseTimeline.tsx       工单时间线（检测事件/AI 建议/人工流转/当前状态）
     └── advice/AdvicePanel.tsx       AI 处置建议面板（可信度徽标 + 引用来源 + 模拟暂停产线）
 ```

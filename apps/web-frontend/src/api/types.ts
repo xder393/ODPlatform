@@ -51,3 +51,29 @@ export interface PauseResponse {
 export interface ReauthenticateResponse {
   reauthenticated: boolean;
 }
+
+/** 浏览器建立 WebSocket 前用 Bearer JWT 换取的一次性短期票据。 */
+export interface WebSocketTicketResponse {
+  ticket: string;
+  expires_in: 60;
+}
+
+/** 后端的持久化告警事实；游标随传输包络而非业务事实本身返回。 */
+export interface InspectionAlert {
+  event_id: string;
+  organization_id: string;
+  camera_id: string;
+  occurred_at: string;
+  defect_class: string;
+  confidence: number;
+}
+
+export interface InspectionAlertEnvelope {
+  cursor: string;
+  alert: InspectionAlert;
+}
+
+export interface InspectionAlertReconciliation {
+  items: InspectionAlertEnvelope[];
+  next_cursor: string | null;
+}

@@ -49,6 +49,7 @@ from odp_api.modules.identity.tickets import WebSocketTicketService
 from odp_api.modules.inspection.service import InspectionService
 from odp_api.modules.knowledge.ingest import KnowledgeIngestionService
 from odp_api.modules.notifications.router import create_notifications_router
+from odp_api.modules.notifications.dev_router import create_development_notifications_router
 from odp_api.modules.tasks.service import TaskService
 from odp_api.observability.metrics import (
     DEFAULT_REGISTRY,
@@ -239,6 +240,8 @@ def create_app(
     app.include_router(
         create_notifications_router(inspection_alert_feed)
     )
+    if runtime_settings.environment.lower() != "production":
+        app.include_router(create_development_notifications_router(inspection_alert_feed))
     app.include_router(
         create_auth_router(
             reauthentication_service=reauthentication_service,

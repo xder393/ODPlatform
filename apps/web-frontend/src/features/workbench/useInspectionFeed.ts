@@ -1,87 +1,172 @@
 import { useEffect, useState } from "react";
 
-import { apiFetch } from "../../api/client";
+import { createWebSocketTicket, reconcileInspectionAlerts } from "../../api/client";
+import type { InspectionAlert, InspectionAlertEnvelope } from "../../api/types";
 
-export interface InspectionAlert {
-  event_id: string;
-  organization_id: string;
-  camera_id: string;
-  occurred_at: string;
-  defect_class: string;
-  confidence: number;
+export type { InspectionAlert } from "../../api/types";
+
+const CURSOR_STORAGE_KEY = "odp_alert_cursor";
+const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as const;
+const STABLE_CONNECTION_MS = 5_000;
+
+interface StoredCursor {
+  actor_id: string;
+  cursor: string;
 }
 
+function actorScope(token: string): string {
+  try {
+    const payload = token.split(".")[1];
+    if (!payload) throw new Error("JWT payload is missing");
+    const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const subject = JSON.parse(atob(normalized)) as { sub?: unknown };
+    if (typeof subject.sub === "string" && subject.sub.length > 0) return subject.sub;
+  } catch {
+    // Invalid tokens are rejected by the API. Keep their cursor isolated so a
+    // malformed replacement cannot inherit an authenticated actor's cursor.
+  }
+  let hash = 2166136261;
+  for (const character of token) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619);
+  return `session-${(hash >>> 0).toString(16)}`;
+}
+
+function loadCursor(actorId: string): string | undefined {
+  const raw = localStorage.getItem(CURSOR_STORAGE_KEY);
+  if (!raw) return undefined;
+  try {
+    const stored = JSON.parse(raw) as Partial<StoredCursor>;
+    if (stored.actor_id === actorId && typeof stored.cursor === "string" && stored.cursor) {
+      return stored.cursor;
+    }
+  } catch {
+    // A legacy timestamp cursor is intentionally not carried into this protocol.
+  }
+  localStorage.removeItem(CURSOR_STORAGE_KEY);
+  return undefined;
+}
+
+function saveCursor(actorId: string, cursor: string): void {
+  localStorage.setItem(CURSOR_STORAGE_KEY, JSON.stringify({ actor_id: actorId, cursor }));
+}
+
+function isEnvelope(value: unknown): value is InspectionAlertEnvelope {
+  if (!value || typeof value !== "object") return false;
+  const envelope = value as Partial<InspectionAlertEnvelope>;
+  return typeof envelope.cursor === "string"
+    && typeof envelope.alert === "object"
+    && envelope.alert !== null
+    && typeof envelope.alert.event_id === "string";
+}
+
+/**
+ * Reconcile durable facts first, then open one ticket-authenticated socket.
+ * Cursor strings are deliberately never parsed: their ordering belongs to the server.
+ */
 export function useInspectionFeed(
-  since: string,
+  _since: string,
 ): { alerts: InspectionAlert[]; reconnecting: boolean } {
+  const token = localStorage.getItem("odp_token");
   const [alerts, setAlerts] = useState<InspectionAlert[]>([]);
   const [reconnecting, setReconnecting] = useState(false);
 
   useEffect(() => {
-    // 无 token 时不建立连接：WS 与补偿 REST 在生产环境都要求 Bearer 鉴权。
-    const token = localStorage.getItem("odp_token");
-    if (!token) return;
+    if (!token) return undefined;
 
+    const actorId = actorScope(token);
+    let cursor = loadCursor(actorId);
+    const eventIds = new Set<string>();
     let stopped = false;
     let socket: WebSocket | undefined;
     let reconnectTimer: number | undefined;
+    let stableTimer: number | undefined;
+    let activeRequest: AbortController | undefined;
+    let retries = 0;
 
-    const append = (incoming: InspectionAlert[]) => {
-      setAlerts((current) => {
-        const known = new Set(current.map((alert) => alert.event_id));
-        return [...current, ...incoming.filter((alert) => !known.has(alert.event_id))];
-      });
+    setAlerts([]);
+
+    const clearTimers = () => {
+      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+      if (stableTimer !== undefined) window.clearTimeout(stableTimer);
+      reconnectTimer = undefined;
+      stableTimer = undefined;
     };
 
-    const connect = () => {
-      const connection = new WebSocket(
-        // 浏览器 WebSocket 无法设置请求头，鉴权走 query param（后端同时支持 Authorization 头）。
-        `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/inspection-events?token=${encodeURIComponent(token)}`,
-      );
-      socket = connection;
-      const queued: InspectionAlert[] = [];
-      let reconciled = false;
+    const accept = (candidate: unknown): boolean => {
+      if (!isEnvelope(candidate) || eventIds.has(candidate.alert.event_id)) return false;
+      eventIds.add(candidate.alert.event_id);
+      cursor = candidate.cursor;
+      saveCursor(actorId, candidate.cursor);
+      setAlerts((current) => [...current, candidate.alert]);
+      return true;
+    };
 
-      connection.onopen = async () => {
-        try {
-          // 补偿请求复用 apiFetch：自动附加 Authorization: Bearer 头。
-          const response = await apiFetch(
-            `/api/v1/inspection-events?updated_after=${encodeURIComponent(since)}`,
-          );
-          const recovered = await response.json() as InspectionAlert[];
+    const scheduleReconnect = () => {
+      if (stopped || reconnectTimer !== undefined) return;
+      const delay = RECONNECT_DELAYS_MS[Math.min(retries, RECONNECT_DELAYS_MS.length - 1)];
+      retries += 1;
+      setReconnecting(true);
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = undefined;
+        void connect();
+      }, delay);
+    };
+
+    const connect = async () => {
+      try {
+        activeRequest?.abort();
+        const request = new AbortController();
+        activeRequest = request;
+        // REST is the durable fact source. The subsequent socket resumes from
+        // the cursor it establishes, covering the interval between both calls.
+        const recovered = await reconcileInspectionAlerts(cursor, request.signal);
+        if (stopped) return;
+        for (const item of recovered.items) accept(item);
+
+        const { ticket } = await createWebSocketTicket(request.signal);
+        if (stopped) return;
+        const query = new URLSearchParams({ ticket });
+        if (cursor) query.set("cursor", cursor);
+        const connection = new WebSocket(
+          `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/inspection-events?${query.toString()}`,
+        );
+        socket = connection;
+        connection.onopen = () => {
           if (stopped || socket !== connection) return;
-          append(recovered);
-          reconciled = true;
-          append(queued);
-          setReconnecting(false);
-        } catch {
-          if (!stopped && socket === connection) {
-            setReconnecting(true);
-            connection.close();
+          stableTimer = window.setTimeout(() => {
+            retries = 0;
+            stableTimer = undefined;
+            setReconnecting(false);
+          }, STABLE_CONNECTION_MS);
+        };
+        connection.onmessage = (event) => {
+          if (stopped || socket !== connection) return;
+          try {
+            accept(JSON.parse(event.data));
+          } catch {
+            // A malformed transport frame cannot update either feed or cursor.
           }
-        }
-      };
-      connection.onmessage = (event) => {
-        if (stopped || socket !== connection) return;
-        const alert = JSON.parse(event.data) as InspectionAlert;
-        if (reconciled) append([alert]);
-        else queued.push(alert);
-      };
-      connection.onclose = () => {
-        if (!stopped && socket === connection) {
-          setReconnecting(true);
-          reconnectTimer = window.setTimeout(connect, 1000);
-        }
-      };
+        };
+        connection.onclose = () => {
+          if (socket !== connection) return;
+          if (stableTimer !== undefined) window.clearTimeout(stableTimer);
+          stableTimer = undefined;
+          scheduleReconnect();
+        };
+      } catch {
+        // A failed ticket request follows exactly the same bounded backoff and
+        // cannot create a socket because construction is below the await.
+        scheduleReconnect();
+      }
     };
 
-    connect();
+    void connect();
     return () => {
       stopped = true;
-      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+      clearTimers();
+      activeRequest?.abort();
       socket?.close();
     };
-  }, [since]);
+  }, [_since, token]);
 
   return { alerts, reconnecting };
 }

@@ -24,6 +24,7 @@ export function App({ since }: { since: string }) {
 
   const handleLogout = useCallback(() => {
     localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem("odp_alert_cursor");
     setToken(null);
     setWorkbenchKey((key) => key + 1);
   }, []);
