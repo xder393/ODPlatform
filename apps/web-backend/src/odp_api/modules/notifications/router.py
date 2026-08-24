@@ -170,8 +170,6 @@ async def _deliver_until_disconnect(websocket: WebSocket, repository: Inspection
     finally:
         for task in (event_task, receive_task):
             task.cancel()
-        for task in (event_task, receive_task):
-            with suppress(asyncio.CancelledError, WebSocketDisconnect, StopAsyncIteration):
-                await task
-        with suppress(RuntimeError):
+        await asyncio.gather(event_task, receive_task, return_exceptions=True)
+        with suppress(BaseException):
             await subscription.aclose()

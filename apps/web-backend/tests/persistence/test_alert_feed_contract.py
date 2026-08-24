@@ -139,11 +139,14 @@ async def test_redis_wakeup_requeries_durable_facts_and_uses_bounded_commands(fe
 
 @pytest.mark.anyio
 async def test_redis_highwater_interleaving_publishes_before_first_xread(feed, monkeypatch) -> None:
-    """An event after high-water capture must be found by the next durable query."""
+    """An event after an empty fact query wakes XREAD from captured high-water."""
     class AsyncRedis:
-        def __init__(self): self.xread_calls = 0; self.closed = False
+        def __init__(self): self.xread_calls = []; self.closed = False
         async def xrevrange(self, stream, count): return [("8-0", {})]
-        async def xread(self, streams, count, block): self.xread_calls += 1; return None
+        async def xread(self, streams, count, block):
+            self.xread_calls.append((streams, count, block))
+            feed.publish(alert, LINE_ID)
+            return [("odp:inspection-alerts", [("9-0", {})])]
         async def aclose(self): self.closed = True
     class Redis:
         def __init__(self): self.async_instance = AsyncRedis()
@@ -151,20 +154,17 @@ async def test_redis_highwater_interleaving_publishes_before_first_xread(feed, m
         def async_client(self): return self.async_instance
     redis = Redis()
     durable = RedisDurableInspectionAlertFeed(feed, redis)
-    original = feed._list_after
-    inserted = False
     alert = _alert()
+    original = feed._list_after; calls = 0
     def interleave(cursor):
-        nonlocal inserted
-        if not inserted:
-            inserted = True
-            feed.publish(alert, LINE_ID)
-        return original(cursor)
+        nonlocal calls
+        calls += 1
+        return [] if calls == 1 else original(cursor)
     monkeypatch.setattr(feed, "_list_after", interleave)
     subscription = durable.subscribe(None)
     received = await asyncio.wait_for(anext(subscription), 0.2)
     assert received.alert.event_id == alert.event_id
-    assert redis.async_instance.xread_calls == 0
+    assert redis.async_instance.xread_calls == [({"odp:inspection-alerts": "8-0"}, 100, 15_000)]
     await subscription.aclose()
     assert redis.async_instance.closed
 
@@ -173,12 +173,15 @@ async def test_redis_highwater_interleaving_publishes_before_first_xread(feed, m
 async def test_redis_timeout_requeries_and_cancellation_closes_client(feed) -> None:
     """A timeout is a wake-up hint; cancellation must close the async connection."""
     class AsyncRedis:
-        def __init__(self): self.calls = 0; self.closed = False
+        def __init__(self): self.calls = 0; self.closed = False; self.started = asyncio.Event(); self.cancelled = False
         async def xrevrange(self, stream, count): return []
         async def xread(self, streams, count, block):
             self.calls += 1
-            await asyncio.sleep(0)
-            return None
+            self.started.set()
+            try: await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
         async def aclose(self): self.closed = True
     class Redis:
         def __init__(self): self.async_instance = AsyncRedis()
@@ -187,11 +190,11 @@ async def test_redis_timeout_requeries_and_cancellation_closes_client(feed) -> N
     redis = Redis(); durable = RedisDurableInspectionAlertFeed(feed, redis)
     subscription = durable.subscribe(None)
     pending = asyncio.create_task(anext(subscription))
-    await asyncio.sleep(0.01)
+    await redis.async_instance.started.wait()
     pending.cancel()
     with __import__("contextlib").suppress(asyncio.CancelledError): await pending
     await subscription.aclose()
-    assert redis.async_instance.calls > 0 and redis.async_instance.closed
+    assert redis.async_instance.calls > 0 and redis.async_instance.closed and redis.async_instance.cancelled
 
 
 @pytest.mark.anyio

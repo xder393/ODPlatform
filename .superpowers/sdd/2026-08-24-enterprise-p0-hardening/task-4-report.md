@@ -1,6 +1,6 @@
 # Task 4 report — durable real-time inspection alerts
 
-Status: complete (fix round 1).
+Status: complete (final verification pending commit SHA update).
 
 Commit: `feat: stream durable inspection alerts in realtime` (recorded after this report).
 
@@ -90,6 +90,18 @@ Commit: `feat: stream durable inspection alerts in realtime` (recorded after thi
 - `test_barrier_forces_duplicate_unique_race_and_returns_winner` synchronizes
   both absent checks with `threading.Barrier` before the unique collision.
 - Focused: 18 passed. Full backend: 131 passed, 1 existing skip.
+
+## Fix round 3 final checks
+
+- `test_redis_highwater_interleaving_publishes_before_first_xread` now proves
+  the first durable query is empty, XREAD starts from captured `8-0`, and a
+  fact published during XREAD is returned by the next durable query.
+- Cancellation test blocks XREAD on an unset event and proves cancellation was
+  delivered plus `aclose()` executed. WebSocket task cleanup now uses gather
+  with `return_exceptions=True` before unconditional iterator close.
+- Final authoritative verification: focused persistence feed tests 13 passed;
+  full backend 131 passed, 1 existing PostgreSQL-gated skip; `git diff --check`
+  passed.
 
 ## Fix round 2 (migration/interface)
 
