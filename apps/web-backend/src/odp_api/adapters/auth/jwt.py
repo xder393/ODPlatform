@@ -12,9 +12,7 @@ from uuid import UUID
 
 from odp_api.modules.identity.models import Actor
 
-# Matches the 12-hour login grant documented for the demo; expiry validation
-# is not enforced by ``extract_subject`` yet, so tokens without ``exp`` (used
-# by the test suite) remain accepted.
+# Matches the 12-hour login grant documented for the demo.
 ACCESS_TOKEN_TTL_SECONDS = 12 * 60 * 60
 
 
@@ -63,15 +61,14 @@ def issue_token(
     secret: str,
     *,
     expires_in_seconds: int = ACCESS_TOKEN_TTL_SECONDS,
+    now: datetime | None = None,
 ) -> str:
     """Issue a compact HS256 JWT carrying the actor UUID in its ``sub`` claim.
 
-    The payload also carries ``iat`` and ``exp`` for observability and future
-    expiry enforcement. ``extract_subject`` currently validates only the
-    signature and the ``sub`` claim, so tokens without an ``exp`` (such as the
-    deterministic tokens built by the test suite) remain accepted.
+    The payload includes mandatory integer ``iat`` and ``exp`` claims that
+    ``extract_subject`` validates against the current server time.
     """
-    issued_at = int(datetime.now(UTC).timestamp())
+    issued_at = int((now or datetime.now(UTC)).timestamp())
     header = {"alg": "HS256", "typ": "JWT"}
     payload = {
         "sub": str(actor_id),
@@ -87,7 +84,7 @@ def issue_token(
     return f"{encoded_header}.{encoded_payload}.{signature}"
 
 
-def extract_subject(token: str, secret: str) -> UUID:
+def extract_subject(token: str, secret: str, *, now: datetime | None = None) -> UUID:
     """Verify a compact HS256 JWT and return its UUID ``sub`` claim."""
     try:
         encoded_header, encoded_payload, encoded_signature = token.split(".")
@@ -104,6 +101,7 @@ def extract_subject(token: str, secret: str) -> UUID:
         payload = json.loads(_decode_segment(encoded_payload))
         if not isinstance(payload, dict):
             raise InvalidJwtSubject("JWT payload must be an object.")
+        _validate_temporal_claims(payload, now or datetime.now(UTC))
         return UUID(payload["sub"])
     except (
         AttributeError,
@@ -124,3 +122,18 @@ def _decode_segment(value: str) -> bytes:
 
 def _encode_segment(value: str) -> str:
     return base64.urlsafe_b64encode(value.encode()).rstrip(b"=").decode()
+
+
+def _validate_temporal_claims(payload: dict[object, object], now: datetime) -> None:
+    issued_at = payload.get("iat")
+    expires_at = payload.get("exp")
+    if (
+        isinstance(issued_at, bool)
+        or not isinstance(issued_at, int)
+        or isinstance(expires_at, bool)
+        or not isinstance(expires_at, int)
+    ):
+        raise InvalidJwtSubject("JWT temporal claims are invalid.")
+    current_timestamp = int(now.timestamp())
+    if expires_at <= issued_at or expires_at <= current_timestamp or issued_at > current_timestamp + 60:
+        raise InvalidJwtSubject("JWT temporal claims are invalid.")

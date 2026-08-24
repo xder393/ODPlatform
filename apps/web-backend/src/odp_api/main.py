@@ -6,7 +6,12 @@ from alembic import command
 from alembic.config import Config
 from fastapi import APIRouter, FastAPI
 from sqlalchemy import inspect
+from odp_api.adapters.auth.argon2 import Argon2PasswordVerifier
 from odp_api.adapters.auth.jwt import ActorRepository, JwtAuthenticator
+from odp_api.adapters.auth.redis_security import (
+    RedisReauthenticationStore,
+    RedisWebSocketTicketStore,
+)
 from odp_api.adapters.generation.mock import MockLLMAdapter
 from odp_api.adapters.notifications.redis_stream import RedisStreamInspectionAlertFeed
 from odp_api.adapters.persistence.models import Base
@@ -14,6 +19,7 @@ from odp_api.adapters.persistence.repositories import (
     SqlAlchemyActorRepository,
     SqlAlchemyAuditRepository,
     SqlAlchemyCaseRepository,
+    SqlAlchemyPasswordCredentialRepository,
 )
 from odp_api.adapters.persistence.unit_of_work import SqlAlchemyBusinessUnitOfWork
 from odp_api.adapters.redis_stream import RedisSocketStreamClient, SQLiteStreamClient
@@ -30,11 +36,14 @@ from odp_api.modules.audit.verify import AuditVerificationMonitor, ManagedDailyA
 from odp_api.modules.cases.application import CaseApplicationService
 from odp_api.modules.cases.router import create_cases_router
 from odp_api.modules.identity.service import (
-    InMemoryPasswordVerifier,
-    InMemoryReauthenticationStore,
     PasswordVerifier,
     ReauthenticationService,
     create_auth_router,
+)
+from odp_api.modules.identity.tickets import (
+    SqliteReauthenticationStore,
+    SqliteWebSocketTicketStore,
+    WebSocketTicketService,
 )
 from odp_api.modules.inspection.service import InspectionService
 from odp_api.modules.knowledge.ingest import KnowledgeIngestionService
@@ -141,9 +150,8 @@ def create_app(
     app = FastAPI(title=runtime_settings.app_name, lifespan=lifespan)
     app.add_middleware(CorrelationIdMiddleware)
     resolved_actor_repository = actor_repository or SqlAlchemyActorRepository(session_factory)
-    resolved_password_verifier = password_verifier or InMemoryPasswordVerifier(
-        active_seed.passwords if active_seed else {}
-    )
+    app.state.session_factory = session_factory
+    app.state.actor_repository = resolved_actor_repository
     app.state.jwt_authenticator = JwtAuthenticator(
         runtime_settings.auth_jwt_secret,
         resolved_actor_repository,
@@ -151,7 +159,6 @@ def create_app(
     app.include_router(health_router)
     app.include_router(create_metrics_router(registry))
     inspection_service = InspectionService(MockVisionAdapter(), metric_registry=registry)
-    reauthentication_service = ReauthenticationService(InMemoryReauthenticationStore())
     if active_seed is None:
         # Default deterministic fixture used by the unseeded test runtime.
         initial_cases = (
@@ -167,6 +174,18 @@ def create_app(
         initial_cases = active_seed.cases
         persistence_seed = active_seed
     seed_business_data(session_factory, persistence_seed, PasswordHasher().hash)
+    resolved_password_verifier = password_verifier or Argon2PasswordVerifier(
+        SqlAlchemyPasswordCredentialRepository(session_factory)
+    )
+    if runtime_settings.environment.lower() in {"production", "docker", "staging"}:
+        reauthentication_store = RedisReauthenticationStore(runtime_stream_client)
+        websocket_ticket_store = RedisWebSocketTicketStore(runtime_stream_client)
+    else:
+        reauthentication_store = SqliteReauthenticationStore(session_factory)
+        websocket_ticket_store = SqliteWebSocketTicketStore(session_factory)
+    reauthentication_service = ReauthenticationService(reauthentication_store)
+    websocket_ticket_service = WebSocketTicketService(websocket_ticket_store)
+    app.state.websocket_ticket_service = websocket_ticket_service
     case_repository = SqlAlchemyCaseRepository(session_factory)
     audit_service = AuditService(audit_repository or SqlAlchemyAuditRepository(session_factory))
     audit_verification_monitor = AuditVerificationMonitor(
@@ -213,6 +232,7 @@ def create_app(
             reauthentication_service=reauthentication_service,
             password_verifier=resolved_password_verifier,
             actor_repository=resolved_actor_repository,
+            websocket_ticket_service=websocket_ticket_service,
         )
     )
     return app

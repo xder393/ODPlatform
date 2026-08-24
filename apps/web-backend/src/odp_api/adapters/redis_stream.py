@@ -143,6 +143,20 @@ class RedisSocketStreamClient:
     def setnx(self, key: str, value: str) -> bool:
         return self._execute("SET", key, value, "NX") is not None
 
+    def set_ex(self, key: str, value: str, seconds: int, *, nx: bool = False) -> bool:
+        command = ["SET", key, value, "EX", str(seconds)]
+        if nx:
+            command.append("NX")
+        return self._execute(*command) is not None
+
+    def get(self, key: str) -> str | None:
+        result = self._execute("GET", key)
+        return None if result is None else _decode(result)
+
+    def getdel(self, key: str) -> str | None:
+        result = self._execute("GETDEL", key)
+        return None if result is None else _decode(result)
+
     def eval(self, script: str, keys: list[str], args: list[str]) -> object:
         return self._execute("EVAL", script, str(len(keys)), *keys, *args)
 

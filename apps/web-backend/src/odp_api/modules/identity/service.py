@@ -8,6 +8,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 from odp_api.modules.identity.models import Actor
+from odp_api.modules.identity.tickets import WebSocketTicketService
 
 REAUTHENTICATION_TTL_SECONDS = 300
 
@@ -59,8 +60,14 @@ class InMemoryReauthenticationStore:
         return occurred_at
 
 
+class ReauthenticationStore(Protocol):
+    def set_last_reauth_at(self, actor_id: UUID, occurred_at: datetime) -> None: ...
+
+    def get_last_reauth_at(self, actor_id: UUID, now: datetime) -> datetime | None: ...
+
+
 class ReauthenticationService:
-    def __init__(self, store: InMemoryReauthenticationStore) -> None:
+    def __init__(self, store: ReauthenticationStore) -> None:
         self._store = store
 
     def record_success(self, actor_id: UUID, now: datetime) -> None:
@@ -94,26 +101,17 @@ class WebSocketAuthenticationError(ValueError):
 
 
 def get_current_websocket_actor(websocket: WebSocket) -> Actor:
-    """Authenticate a WebSocket without HTTPBearer(Request).
-
-    Browser WebSocket APIs cannot attach headers, so when the Authorization
-    header is absent the token is read from the ``?token=<jwt>`` query
-    parameter. The header takes precedence when both are present. Query
-    parameters can leak into proxy and browser history, so production should
-    keep this fallback for short-lived WebSocket connections and prefer
-    first-party-cookie or subprotocol negotiation for long-lived sockets.
-    """
-    authorization = websocket.headers.get("authorization")
-    if authorization is not None:
-        scheme, _, token = authorization.partition(" ")
-        if scheme.lower() != "bearer" or not token or " " in token:
-            raise WebSocketAuthenticationError("Invalid credentials")
-    else:
-        token = websocket.query_params.get("token")
-        if not token:
-            raise WebSocketAuthenticationError("Authentication required")
+    """Consume an opaque ticket, then reload its actor's current grants."""
+    ticket = websocket.query_params.get("ticket")
+    if not ticket:
+        raise WebSocketAuthenticationError("Authentication required")
     try:
-        return websocket.app.state.jwt_authenticator.authenticate(token)
+        service: WebSocketTicketService = websocket.app.state.websocket_ticket_service
+        actor_id = service.consume(ticket)
+        actor = websocket.app.state.actor_repository.get(actor_id)
+        if actor is None:
+            raise WebSocketAuthenticationError("Invalid credentials")
+        return actor
     except ValueError as error:
         raise WebSocketAuthenticationError("Invalid credentials") from error
 
@@ -132,6 +130,7 @@ def create_auth_router(
     reauthentication_service: ReauthenticationService | None = None,
     password_verifier: PasswordVerifier | None = None,
     actor_repository: ActorEmailLookup | None = None,
+    websocket_ticket_service: WebSocketTicketService | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
     service = reauthentication_service or ReauthenticationService(InMemoryReauthenticationStore())
@@ -169,5 +168,11 @@ def create_auth_router(
         from odp_api.adapters.auth.jwt import issue_token
 
         return {"access_token": issue_token(actor.actor_id, secret)}
+
+    @router.post("/websocket-ticket")
+    def websocket_ticket(actor: Actor = Depends(actor_provider)) -> dict[str, str | int]:
+        if websocket_ticket_service is None:
+            raise HTTPException(status_code=503, detail="WebSocket authentication is not configured.")
+        return {"ticket": websocket_ticket_service.issue(actor.actor_id), "expires_in": 60}
 
     return router

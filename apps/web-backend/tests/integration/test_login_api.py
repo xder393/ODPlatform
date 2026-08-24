@@ -1,4 +1,4 @@
-"""Login endpoint and WebSocket token fallback integration tests."""
+"""Login endpoint and WebSocket ticket integration tests."""
 
 from uuid import UUID
 
@@ -74,18 +74,21 @@ def test_protected_endpoint_requires_a_token() -> None:
     assert response.status_code == 401
 
 
-def test_websocket_accepts_token_query_parameter() -> None:
+def test_websocket_accepts_a_bearer_issued_ticket() -> None:
     client, _ = _seeded_client()
     email, password, _role = DEMO_ACCOUNTS[0]
     token = client.post(
         "/api/v1/auth/login", json={"email": email, "password": password}
     ).json()["access_token"]
-    with client.websocket_connect(f"/ws/inspection-events?token={token}") as websocket:
+    ticket = client.post(
+        "/api/v1/auth/websocket-ticket", headers={"Authorization": f"Bearer {token}"}
+    ).json()["ticket"]
+    with client.websocket_connect(f"/ws/inspection-events?ticket={ticket}") as websocket:
         payload = websocket.receive_json()
         assert payload["defect_class"] == "scratch"
 
 
-def test_websocket_rejects_missing_token() -> None:
+def test_websocket_rejects_missing_ticket() -> None:
     from starlette.websockets import WebSocketDisconnect
 
     client, _ = _seeded_client()

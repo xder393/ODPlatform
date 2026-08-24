@@ -23,7 +23,9 @@ from odp_api.settings import Settings
 
 
 def signed_token(subject: UUID, secret: str) -> str:
-    return signed_jwt({"alg": "HS256", "typ": "JWT"}, {"sub": str(subject)}, secret)
+    from odp_api.adapters.auth.jwt import issue_token
+
+    return issue_token(subject, secret)
 
 
 def signed_jwt(header_value: object, payload_value: object, secret: str) -> str:
@@ -96,7 +98,7 @@ def test_reauthentication_uses_the_authenticated_bearer_subject() -> None:
     assert response.json() == {"reauthenticated": True}
 
 
-def test_runtime_websocket_requires_a_verified_bearer_token() -> None:
+def test_runtime_websocket_requires_a_verified_one_time_ticket() -> None:
     secret = "test-signing-secret"
     actor = Actor(
         uuid4(),
@@ -111,16 +113,16 @@ def test_runtime_websocket_requires_a_verified_bearer_token() -> None:
         )
     )
 
-    with client.websocket_connect(
-        "/ws/inspection-events",
-        headers={"Authorization": f"Bearer {signed_token(actor.actor_id, secret)}"},
-    ) as websocket:
+    token = signed_token(actor.actor_id, secret)
+    ticket = client.post(
+        "/api/v1/auth/websocket-ticket", headers={"Authorization": f"Bearer {token}"}
+    ).json()["ticket"]
+    with client.websocket_connect(f"/ws/inspection-events?ticket={ticket}") as websocket:
         assert websocket.receive_json()["organization_id"] == str(actor.organization_id)
 
-    for authorization in (None, "Bearer invalid"):
-        headers = {} if authorization is None else {"Authorization": authorization}
+    for query in ("", "?token=legacy-jwt"):
         with pytest.raises(WebSocketDisconnect) as error:
-            with client.websocket_connect("/ws/inspection-events", headers=headers):
+            with client.websocket_connect(f"/ws/inspection-events{query}"):
                 pass
         assert error.value.code == 1008
 

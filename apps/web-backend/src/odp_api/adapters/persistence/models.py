@@ -135,3 +135,11 @@ class WebSocketTicketRow(Base):
     token_hash: Mapped[str] = mapped_column(String(128), unique=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ReauthenticationMarkerRow(Base):
+    __tablename__ = "reauthentication_markers"
+
+    actor_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
