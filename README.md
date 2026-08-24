@@ -79,6 +79,7 @@ curl -fsS http://localhost:8080/healthz
 - Docker 模式使用 `postgres-data` 卷中的 PostgreSQL 保存同一业务状态；Redis 仅用于一次性票据、二次认证 TTL 和跨实例告警唤醒，不是告警事实来源。Compose 以 `odp_migrator` 作为迁移/表 owner，以受限的 `odp_app` 运行 API；后者不能更新、删除或截断审计日志。文件中的数据库密码仅供本地演示，部署时必须由秘密管理系统注入独立的运行时与迁移 URL。`docker compose down` 保留数据卷，`docker compose down -v` 会删除演示数据。
 - 服务异常恢复时先恢复 PostgreSQL 卷/备份，再以迁移角色运行 `python -m odp_api.migrations`（RAG/pgvector）、`alembic upgrade head`（业务状态）和 `python -m odp_api.database_roles`（重放运行时最小权限），最后以运行时角色运行 `python -m odp_api.seed`（可安全重复运行），然后重启 `api`。Compose 使用同一 fail-closed 顺序；任一迁移或种子失败都不会启动 Uvicorn。客户端会以最后成功接受的游标补偿遗漏告警。
 - Alembic URL 优先级是调用方显式 `Config.set_main_option("sqlalchemy.url", ...)`、然后 `ODP_DATABASE_URL`、最后 `alembic.ini` 的本地 SQLite 默认值。这样 CLI/Compose 会使用环境数据库，而程序化测试可隔离到自己的数据库。
+- 旧 `postgres-data` 卷仍以 owner `odp` 运行；不要重建卷或重命名 owner。升级前先备份：`docker compose -f deploy/compose.yaml exec -T postgres pg_dump -U odp -d odp > odp-before-upgrade.sql`。随后运行 `deploy/postgres/upgrade-existing-volume.sh`（或 `docker compose -f deploy/compose.yaml up migrate`）；该一次性服务会幂等修正 `odp_app`、迁移、授权并播种，而不会删除既有数据。若升级失败，以备份恢复：`cat odp-before-upgrade.sql | docker compose -f deploy/compose.yaml exec -T postgres psql -U odp -d odp`；代码回滚时也应回滚对应镜像后再启动 `migrate`，避免在不兼容的 schema 上直接启动 API。
 
 ### WebSocket 票据与游标
 

@@ -11,7 +11,8 @@ BEGIN
     FOREACH table_name IN ARRAY ARRAY[
         'actors', 'actor_line_grants', 'password_credentials', 'defect_cases',
         'inspection_events', 'case_transitions', 'alerts', 'inspection_alerts',
-        'websocket_tickets', 'reauthentication_markers'
+        'websocket_tickets', 'reauthentication_markers', 'knowledge_documents',
+        'knowledge_parent_chunks', 'knowledge_chunk_index'
     ]
     LOOP
         IF to_regclass('public.' || table_name) IS NOT NULL THEN

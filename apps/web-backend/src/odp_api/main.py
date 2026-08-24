@@ -150,14 +150,9 @@ def create_app(
     # Pre-register the documented metric set so /metrics always exposes every
     # series, including gauges that no code path has written yet.
     register_standard_metrics(registry)
-    # Docker/staging always use an external migrator.  A production-labelled
-    # SQLite configuration remains self-contained for the route-registration
-    # test harness; real production PostgreSQL never receives DDL from odp_app.
-    externally_migrated = runtime_settings.environment.lower() in {"docker", "staging"} or (
-        runtime_settings.environment.lower() == "production"
-        and runtime_settings.database_url.startswith("postgres")
-    )
-    managed_database = not externally_migrated
+    # All externally deployed environments are migrated and seeded by the
+    # one-shot migrator, never by the runtime credential.
+    managed_database = runtime_settings.environment in {"local", "test"}
     if managed_database:
         _upgrade_runtime_schema(runtime_settings.database_url)
     engine, session_factory = create_engine_and_session(runtime_settings.database_url)
@@ -220,7 +215,7 @@ def create_app(
     app.include_router(health_router)
     app.include_router(create_metrics_router(registry))
     inspection_service = InspectionService(MockVisionAdapter(), metric_registry=registry)
-    if active_seed is None:
+    if active_seed is None and managed_database:
         # Default deterministic fixture used by the unseeded test runtime.
         initial_cases = (
             inspection_service.inspect_fixture(
@@ -231,10 +226,14 @@ def create_app(
             ),
         )
         persistence_seed = DemoSeed((), {}, initial_cases, (), "runtime-fixture")
-    else:
+    elif active_seed is not None:
         initial_cases = active_seed.cases
         persistence_seed = active_seed
-    seed_business_data(session_factory, persistence_seed, PasswordHasher().hash)
+    else:
+        initial_cases = ()
+        persistence_seed = DemoSeed((), {}, (), (), "externally-seeded")
+    if managed_database:
+        seed_business_data(session_factory, persistence_seed, PasswordHasher().hash)
     resolved_password_verifier = password_verifier or Argon2PasswordVerifier(
         SqlAlchemyPasswordCredentialRepository(session_factory)
     )
@@ -284,13 +283,14 @@ def create_app(
         )
     )
     app.include_router(create_advice_router(case_repository, advice_service))
-    for case in initial_cases:
-        for event in case.inspection_events:
-            inspection_alert_feed.publish(event.to_alert(), event.line_id)
+    if managed_database:
+        for case in initial_cases:
+            for event in case.inspection_events:
+                inspection_alert_feed.publish(event.to_alert(), event.line_id)
     app.include_router(
         create_notifications_router(inspection_alert_feed)
     )
-    if runtime_settings.enable_dev_event_trigger:
+    if runtime_settings.enable_dev_event_trigger and runtime_settings.environment in {"local", "test", "docker"}:
         app.include_router(create_development_notifications_router(inspection_alert_feed))
     app.include_router(
         create_auth_router(
@@ -309,7 +309,7 @@ def _retrieval_index(settings: Settings) -> KnowledgeIndexPort:
         # psycopg is imported lazily inside the executor; local tests and the
         # in-memory backend never load the driver.
         return PgVectorPostgresAdapter(
-            psycopg_executor(settings.postgres_url),
+            psycopg_executor(settings.postgres_url or ""),
             embed=hash_embedding,
         )
     return InMemoryKnowledgeIndex()
@@ -331,12 +331,14 @@ def _ingest_seed_documents(index: KnowledgeIndexPort, seed: DemoSeed) -> None:
 
 
 def _should_seed_knowledge(settings: Settings) -> bool:
+    if settings.environment not in {"local", "test"}:
+        return False
     if settings.seed_knowledge_on_startup is not None:
         return settings.seed_knowledge_on_startup
-    return settings.environment.lower() in {"local", "test"}
+    return True
 
 
 def _runtime_stream_client(settings: Settings) -> object:
     if settings.environment.lower() in {"production", "docker", "staging"}:
-        return RedisSocketStreamClient(settings.redis_url)
+        return RedisSocketStreamClient(settings.redis_url or "")
     return SQLiteStreamClient(settings.task_database_path)

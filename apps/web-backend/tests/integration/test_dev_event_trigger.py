@@ -5,8 +5,6 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from odp_api.adapters.persistence.models import Base
-from odp_api.db import create_engine_and_session
 from odp_api.main import create_app
 from odp_api.seed import DEMO_ACCOUNTS, DEMO_LINE_ID, build_demo_seed
 from odp_api.settings import Settings
@@ -62,33 +60,10 @@ def test_development_trigger_rejects_an_unauthorized_line(tmp_path: Path) -> Non
     assert response.status_code == 403
 
 
-@pytest.mark.parametrize("environment", ["local", "staging", "production", "prod"])
-def test_development_trigger_requires_explicit_enablement(tmp_path: Path, environment: str) -> None:
-    """Environment spelling must not accidentally expose a generic event-publication backdoor."""
-    class FakeRedis:
-        def xadd(self, *_: object) -> str:
-            return "1-0"
-
-        def xadd_bounded(self, *_: object) -> str:
-            return "1-0"
-
-        def xlen(self, *_: object) -> int:
-            return 0
-
-        def close(self) -> None:
-            return None
-
-    settings = _settings(tmp_path, environment=environment)
-    if environment == "staging":
-        engine, _ = create_engine_and_session(settings.database_url)
-        Base.metadata.create_all(engine)
-        engine.dispose()
-    app = create_app(
-        settings=settings,
-        seed=build_demo_seed(),
-        stream_client=FakeRedis(),
-    )
-
-    assert "/api/v1/dev/inspection-events" not in {
-        route.path for route in app.routes if hasattr(route, "path")
-    }
+@pytest.mark.parametrize("environment", ["staging", "production", "prod"])
+def test_development_trigger_is_rejected_outside_its_environment_allowlist(
+    tmp_path: Path, environment: str
+) -> None:
+    """A production-like config must fail rather than merely hide a write route."""
+    with pytest.raises(ValueError):
+        _settings(tmp_path, environment=environment, enable_dev_event_trigger=True)

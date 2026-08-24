@@ -21,6 +21,18 @@ def test_runtime_grant_script_preserves_append_only_audit_boundaries() -> None:
     assert "GRANT SELECT, INSERT, UPDATE ON TABLE public.audit_chain_heads TO odp_app" in sql
     assert "REVOKE DELETE, TRUNCATE ON TABLE public.audit_chain_heads FROM odp_app" in sql
     assert "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO odp_app" in sql
+    for table_name in ("knowledge_documents", "knowledge_parent_chunks", "knowledge_chunk_index"):
+        assert table_name in sql
+    assert "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.%I TO odp_app" in sql
+
+
+def test_bootstrap_role_script_repairs_the_runtime_login_for_existing_volumes() -> None:
+    from odp_api.database_roles import bootstrap_sql
+
+    sql = bootstrap_sql()
+
+    assert "CREATE ROLE odp_app" in sql
+    assert "ALTER ROLE odp_app LOGIN PASSWORD 'odp_app_dev'" in sql
 
 
 @pytest.mark.skipif(
@@ -38,7 +50,7 @@ def test_postgresql_runtime_role_is_not_owner_and_cannot_mutate_audit_rows() -> 
                 text("SELECT tableowner FROM pg_tables WHERE schemaname = 'public' AND tablename = 'audit_logs'")
             )
             assert runtime_user == "odp_app"
-            assert runtime_user != owner
+            assert owner == "odp"
         appended = AuditService(SqlAlchemyAuditRepository(sessions)).append(
             AuditCommand(
                 organization_id=organization_id,
