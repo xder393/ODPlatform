@@ -93,3 +93,14 @@ def test_backlog_over_100_counts_every_reconciled_event(tmp_path: Path) -> None:
             for _ in range(101): websocket.receive_json()
         after = app.state.metric_registry._metrics["websocket_reconciled_events_total"].snapshot()
     assert after - before == 101
+
+
+def test_local_runtime_bootstraps_seed_alerts_once_across_restarts(tmp_path: Path) -> None:
+    """Local SQLite needs initial alerts, but a restart must retain their cursors."""
+    settings = _settings(tmp_path)
+    first = create_app(settings=settings, seed=build_demo_seed())
+    before = first.state.inspection_alert_feed.list(DEMO_ORG_ID, None, 100)
+    second = create_app(settings=settings, seed=build_demo_seed())
+    after = second.state.inspection_alert_feed.list(DEMO_ORG_ID, None, 100)
+    assert len(before) == len(after) == 10
+    assert [item.cursor for item in after] == [item.cursor for item in before]

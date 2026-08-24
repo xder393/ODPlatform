@@ -139,3 +139,11 @@ Commit: `feat: stream durable inspection alerts in realtime` (recorded after thi
   idempotency contract passed with 10 stable cursors across two runs. API
   startup no longer replays these facts. Focused seed/notification evidence:
   8 passed; Compose configuration parsed successfully.
+
+## Local durable-alert bootstrap regression
+
+- Local/test app-managed SQLite idempotently publishes deterministic seed
+  alerts at composition time; Docker/staging/production remain migrate-only.
+- `test_local_runtime_bootstraps_seed_alerts_once_across_restarts` verifies ten
+  alerts and stable cursors across restart. Focused live-notification suite:
+  6 passed; full backend: 171 passed, 3 existing skips.
