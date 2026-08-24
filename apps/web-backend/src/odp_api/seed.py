@@ -1,9 +1,9 @@
 """Deterministic demo seed for the quality inspection platform.
 
-``python -m odp_api.seed`` prints the demo accounts and a summary of the
-seeded artifacts. ``build_demo_seed()`` is a pure function: fixed UUIDs and
-fixed content make repeated runs idempotent, which keeps the Compose demo and
-the offline E2E suite reproducible.
+``python -m odp_api.seed`` persists the demo business data and prints a safe
+summary. ``build_demo_seed()`` is a pure function: fixed UUIDs and fixed
+content make repeated runs idempotent, which keeps the Compose demo and the
+offline E2E suite reproducible.
 
 The knowledge documents use English PDF content on purpose: the retrieval
 query is ``"{defect_class} inspection guidance"`` and both scoring paths
@@ -19,6 +19,7 @@ from io import BytesIO
 from typing import Literal
 from uuid import UUID, uuid5
 
+from argon2 import PasswordHasher
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from sqlalchemy import select
@@ -32,10 +33,12 @@ from odp_api.adapters.persistence.models import (
     PasswordCredentialRow,
 )
 from odp_api.adapters.vision.mock import MockVisionAdapter
+from odp_api.db import create_engine_and_session
 from odp_api.modules.identity.models import Actor, Role
 from odp_api.modules.inspection.models import DefectCase
 from odp_api.modules.inspection.service import InspectionService
 from odp_api.ports.vision import FrameInput
+from odp_api.settings import Settings
 
 # Fixed namespace so every derived UUID is stable across runs.
 SEED_NAMESPACE = UUID("0d750000-0000-4000-8000-000000000001")
@@ -284,12 +287,21 @@ def _seed_summary() -> str:
         "cameras:           3",
         f"defect cases:      {len(seed.cases)} (scratch, {MODEL_RELEASE})",
         f"knowledge docs:    {len(seed.documents)}",
-        "accounts:",
+        f"demo accounts:      {len(DEMO_ACCOUNTS)}",
     ]
-    for email, password, role in DEMO_ACCOUNTS:
-        lines.append(f"  {email:24} {password:18} {role.value}")
     return "\n".join(lines)
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Seed the configured durable database, propagating every failure."""
+    settings = Settings()
+    engine, sessions = create_engine_and_session(settings.database_url)
+    try:
+        seed_business_data(sessions, build_demo_seed(), PasswordHasher().hash)
+    finally:
+        engine.dispose()
     print(_seed_summary())
+
+
+if __name__ == "__main__":
+    main()
