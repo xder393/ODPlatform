@@ -1,6 +1,6 @@
 # Task 4 report — durable real-time inspection alerts
 
-Status: complete (final verification pending commit SHA update).
+Status: complete.
 
 Commit: `feat: stream durable inspection alerts in realtime` (recorded after this report).
 
@@ -59,6 +59,17 @@ Commit: `feat: stream durable inspection alerts in realtime` (recorded after thi
   sent backlog item; live events remain excluded from that counter.
 - Added idle gauge-lifecycle and concurrent duplicate-publish coverage.
 - Focused: 19 passed. Full backend: 125 passed, 1 existing skip.
+
+## Final authoritative regression evidence
+
+- `test_async_redis_client_uses_separate_connect_and_read_timeouts` intercepts
+  `Redis.from_url` and asserts URL, 1-second connect timeout, 20-second socket
+  timeout and decoded responses.
+- `test_alembic_upgrades_original_0004_alert_data_to_tenant_scoped_uniqueness`
+  upgrades a real temporary SQLite database from original 0004 to head, then
+  verifies old data remains and composite event uniqueness works.
+- Final focused feed suite: 15 passed. Final backend suite: 133 passed, 1
+  existing PostgreSQL-gated skip. `git diff --check` passed.
 
 ## Fix round 2 completion
 

@@ -5,13 +5,20 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from datetime import UTC, datetime
 from pathlib import Path
+import json
+import sys
+from types import ModuleType
 from uuid import UUID, uuid4
 
 import pytest
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import text
 
 from odp_api.adapters.notifications.redis_durable_feed import RedisDurableInspectionAlertFeed
 from odp_api.adapters.notifications.sqlite_feed import SqliteInspectionAlertFeed
-from odp_api.adapters.persistence.models import Base
+from odp_api.adapters.redis_stream import RedisSocketStreamClient
+from odp_api.adapters.persistence.models import Base, InspectionAlertFeedRow
 from odp_api.db import create_engine_and_session
 from odp_schemas.events import InspectionAlert
 
@@ -96,6 +103,38 @@ def test_barrier_forces_duplicate_unique_race_and_returns_winner(feed, monkeypat
         cursors = list(executor.map(lambda _: feed.publish(alert, LINE_ID), range(2)))
     assert cursors[0] == cursors[1]
     assert len(feed.list(ORG_ID, None, 100)) == 1
+
+
+def test_async_redis_client_uses_separate_connect_and_read_timeouts(monkeypatch) -> None:
+    """A socket timeout below XREAD BLOCK would abort normal 15-second reads."""
+    captured = {}
+    async_module = ModuleType("redis.asyncio")
+    async_module.Redis = type("Redis", (), {"from_url": staticmethod(lambda url, **kwargs: captured.update(url=url, **kwargs) or object())})
+    redis_module = ModuleType("redis"); redis_module.asyncio = async_module
+    monkeypatch.setitem(sys.modules, "redis", redis_module)
+    monkeypatch.setitem(sys.modules, "redis.asyncio", async_module)
+    RedisSocketStreamClient("redis://:secret@redis.example:6380/2").async_client()
+    assert captured["url"] == "redis://:secret@redis.example:6380/2"
+    assert captured["socket_connect_timeout"] == 1
+    assert captured["socket_timeout"] == 20
+    assert captured["decode_responses"] is True
+
+
+def test_alembic_upgrades_original_0004_alert_data_to_tenant_scoped_uniqueness(tmp_path: Path) -> None:
+    """Existing global-event unique data must survive the 0004→head migration."""
+    database_url = f"sqlite:///{tmp_path / 'migration.db'}"
+    config = Config(str(Path(__file__).parents[2] / "alembic.ini"))
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(config, "0004_durable_inspection_alert_feed")
+    engine, sessions = create_engine_and_session(database_url)
+    alert = _alert()
+    with sessions.begin() as session:
+        session.add(InspectionAlertFeedRow(event_id=alert.event_id, organization_id=ORG_ID, line_id=LINE_ID, payload=alert.model_dump(mode="json"), created_at=alert.occurred_at))
+    command.upgrade(config, "head")
+    feed = SqliteInspectionAlertFeed(sessions)
+    assert feed.publish(alert, LINE_ID) == "1"
+    assert feed.publish(_alert(alert.event_id, uuid4()), LINE_ID) == "2"
+    engine.dispose()
 
 
 def test_authorized_line_filter_applies_before_limit(feed) -> None:
