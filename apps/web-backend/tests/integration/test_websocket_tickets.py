@@ -136,7 +136,7 @@ def test_ticket_endpoint_is_bearer_protected_single_use_and_does_not_echo_ticket
         assert token not in issued.text
 
         with client.websocket_connect(f"/ws/inspection-events?ticket={ticket}") as websocket:
-            assert websocket.receive_json()["defect_class"] == "scratch"
+            assert websocket.receive_json()["alert"]["defect_class"] == "scratch"
 
         with pytest.raises(WebSocketDisconnect) as reused:
             with client.websocket_connect(f"/ws/inspection-events?ticket={ticket}"):

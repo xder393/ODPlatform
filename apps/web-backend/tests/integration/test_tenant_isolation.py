@@ -77,7 +77,7 @@ def test_case_and_alert_queries_are_tenant_scoped() -> None:
     assert cases.status_code == 200
     assert [item["case_id"] for item in cases.json()] == [str(own_case.case_id)]
     assert alerts.status_code == 200
-    assert [item["organization_id"] for item in alerts.json()] == [str(organization_id)]
+    assert [item["alert"]["organization_id"] for item in alerts.json()["items"]] == [str(organization_id)]
 
 
 def test_simulated_pause_requires_recent_password_reauthentication() -> None:

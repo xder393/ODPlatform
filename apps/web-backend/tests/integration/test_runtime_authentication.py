@@ -118,7 +118,7 @@ def test_runtime_websocket_requires_a_verified_one_time_ticket() -> None:
         "/api/v1/auth/websocket-ticket", headers={"Authorization": f"Bearer {token}"}
     ).json()["ticket"]
     with client.websocket_connect(f"/ws/inspection-events?ticket={ticket}") as websocket:
-        assert websocket.receive_json()["organization_id"] == str(actor.organization_id)
+        assert websocket.receive_json()["alert"]["organization_id"] == str(actor.organization_id)
 
     for query in ("", "?token=legacy-jwt"):
         with pytest.raises(WebSocketDisconnect) as error:

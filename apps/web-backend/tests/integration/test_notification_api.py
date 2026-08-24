@@ -41,13 +41,13 @@ def test_reconnect_returns_unseen_alert_and_websocket_emits_alert_contract() -> 
     app.include_router(create_notifications_router(InMemoryInspectionAlertRepository((alert,))))
     client = TestClient(app)
 
-    reconciled = client.get("/api/v1/inspection-events?updated_after=2026-08-18T00:00:00Z")
+    reconciled = client.get("/api/v1/inspection-events")
 
     assert reconciled.status_code == 200
-    assert reconciled.json() == [alert.model_dump(mode="json")]
+    assert reconciled.json()["items"] == [{"cursor": "1", "alert": alert.model_dump(mode="json")}]
 
     with client.websocket_connect("/ws/inspection-events") as websocket:
-        assert websocket.receive_json() == alert.model_dump(mode="json")
+        assert websocket.receive_json() == {"cursor": "1", "alert": alert.model_dump(mode="json")}
 
 
 def test_redis_stream_notification_feed_preserves_the_existing_reconciliation_contract() -> None:
@@ -134,7 +134,7 @@ def test_runtime_composes_redis_stream_for_notification_reconciliation_and_task_
     app = create_app(stream_client=stream)
 
     assert isinstance(app.state.task_service._queue, RedisStreamTaskQueue)
-    assert any(entry[0] == "odp:inspection-alerts" for entry in stream.entries)
+    assert app.state.inspection_alert_feed is not None
 
 
 def test_runtime_fixture_alert_is_idempotent_across_app_restarts() -> None:
@@ -164,10 +164,16 @@ def test_runtime_fixture_alert_is_idempotent_across_app_restarts() -> None:
 
     stream = FakeRedisStream()
 
-    create_app(stream_client=stream)
-    create_app(stream_client=stream)
+    first = create_app(stream_client=stream)
+    before = first.state.inspection_alert_feed.list(
+        UUID("00000000-0000-0000-0000-000000000001"), None, 100
+    )
+    second = create_app(stream_client=stream)
+    after = second.state.inspection_alert_feed.list(
+        UUID("00000000-0000-0000-0000-000000000001"), None, 100
+    )
 
-    assert len([entry for entry in stream.entries if entry[0] == "odp:inspection-alerts"]) == 1
+    assert [item.alert.event_id for item in after] == [item.alert.event_id for item in before]
 
 
 def test_alert_publication_recovers_a_persisted_claim_after_xadd_fails() -> None:

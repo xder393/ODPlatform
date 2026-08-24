@@ -126,6 +126,19 @@ class AlertRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class InspectionAlertFeedRow(Base):
+    """Durable event facts with a database-assigned, monotonic feed cursor."""
+
+    __tablename__ = "inspection_alerts"
+
+    cursor: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_id: Mapped[UUID] = mapped_column(Uuid, unique=True, index=True)
+    organization_id: Mapped[UUID] = mapped_column(Uuid, index=True)
+    line_id: Mapped[UUID | None] = mapped_column(Uuid, index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class WebSocketTicketRow(Base):
     __tablename__ = "websocket_tickets"
 

@@ -30,9 +30,12 @@ _STANDARD_COUNTERS: Final = {
     "rag_advice_hits_total": (
         "Total number of AI advice requests answered with retrievable evidence."
     ),
+    "websocket_reconnect_total": "Total inspection WebSocket connections.",
+    "websocket_reconciled_events_total": "Total alert events sent during reconciliation.",
 }
 _STANDARD_GAUGES: Final = {
     "task_queue_depth": "Current number of outstanding tasks (PENDING or RETRYING).",
+    "websocket_active_connections": "Current active inspection WebSocket connections.",
 }
 _STANDARD_HISTOGRAMS: Final = {
     "vision_inference_seconds": (
@@ -83,6 +86,10 @@ class Gauge:
     def set(self, value: float) -> None:
         with self._lock:
             self._value = float(value)
+
+    def add(self, value: float) -> None:
+        with self._lock:
+            self._value += float(value)
 
     def snapshot(self) -> float:
         with self._lock:
@@ -171,6 +178,12 @@ class MetricRegistry:
         if not isinstance(metric, Gauge):
             raise TypeError(f"Metric {name} is a {type(metric).__name__}, not a gauge.")
         metric.set(value)
+
+    def add(self, name: str, value: float) -> None:
+        metric = self._get_or_create(name, Gauge)
+        if not isinstance(metric, Gauge):
+            raise TypeError(f"Metric {name} is a {type(metric).__name__}, not a gauge.")
+        metric.add(value)
 
     def observe(self, name: str, value: float) -> None:
         """Record an observation in the named histogram, registering it on first use."""

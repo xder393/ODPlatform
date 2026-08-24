@@ -48,20 +48,22 @@ class RedisStreamInspectionAlertFeed:
         self._client.xadd(self._stream_name, fields)
 
     def list(
-        self, organization_id: UUID, updated_after: datetime | None = None
+        self, organization_id: UUID, after_cursor: str | datetime | None = None, limit: int = 100
     ) -> list[StoredInspectionAlert]:
         alerts: list[StoredInspectionAlert] = []
-        for _, fields in self._client.xrange(self._stream_name):
-            stored = _stored_alert(fields)
+        for stream_cursor, fields in self._client.xrange(self._stream_name):
+            stored = _stored_alert(stream_cursor, fields)
             if stored.alert.organization_id != organization_id:
                 continue
-            if updated_after is not None and stored.updated_at <= _as_utc(updated_after):
+            if isinstance(after_cursor, datetime) and stored.updated_at <= _as_utc(after_cursor):
+                continue
+            if isinstance(after_cursor, str) and stored.cursor <= after_cursor:
                 continue
             alerts.append(stored)
-        return alerts
+        return alerts[:limit]
 
 
-def _stored_alert(fields: Mapping[str | bytes, str | bytes]) -> StoredInspectionAlert:
+def _stored_alert(cursor: str, fields: Mapping[str | bytes, str | bytes]) -> StoredInspectionAlert:
     normalized = {
         _decode(key): _decode(value)
         for key, value in fields.items()
@@ -69,6 +71,7 @@ def _stored_alert(fields: Mapping[str | bytes, str | bytes]) -> StoredInspection
     alert = InspectionAlert.model_validate_json(normalized["alert"])
     line_id = normalized.get("line_id")
     return StoredInspectionAlert(
+        cursor=cursor,
         alert=alert,
         updated_at=_as_utc(datetime.fromisoformat(normalized["updated_at"])),
         line_id=UUID(line_id) if line_id else None,

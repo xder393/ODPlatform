@@ -85,7 +85,7 @@ def test_websocket_accepts_a_bearer_issued_ticket() -> None:
     ).json()["ticket"]
     with client.websocket_connect(f"/ws/inspection-events?ticket={ticket}") as websocket:
         payload = websocket.receive_json()
-        assert payload["defect_class"] == "scratch"
+        assert payload["alert"]["defect_class"] == "scratch"
 
 
 def test_websocket_rejects_missing_ticket() -> None:

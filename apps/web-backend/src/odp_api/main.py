@@ -17,7 +17,8 @@ from odp_api.adapters.auth.sqlite_security import (
     SqliteWebSocketTicketStore,
 )
 from odp_api.adapters.generation.mock import MockLLMAdapter
-from odp_api.adapters.notifications.redis_stream import RedisStreamInspectionAlertFeed
+from odp_api.adapters.notifications.sqlite_feed import SqliteInspectionAlertFeed
+from odp_api.adapters.notifications.redis_durable_feed import RedisDurableInspectionAlertFeed
 from odp_api.adapters.persistence.models import Base
 from odp_api.adapters.persistence.repositories import (
     SqlAlchemyActorRepository,
@@ -133,7 +134,14 @@ def create_app(
         RedisStreamTaskAlertPublisher(runtime_stream_client),
     )
     task_service.recover_unpublished()
-    inspection_alert_feed = RedisStreamInspectionAlertFeed(runtime_stream_client)
+    # Facts are always database-backed. Redis is deliberately not used as the
+    # source of truth, so a transient stream outage cannot erase reconciliation.
+    sqlite_alert_feed = SqliteInspectionAlertFeed(session_factory)
+    inspection_alert_feed = (
+        RedisDurableInspectionAlertFeed(sqlite_alert_feed, runtime_stream_client)
+        if runtime_settings.environment.lower() in {"production", "docker", "staging"}
+        else sqlite_alert_feed
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -212,6 +220,8 @@ def create_app(
     app.state.advice_service = advice_service
     app.state.inspection_service = inspection_service
     app.state.case_repository = case_repository
+    app.state.inspection_alert_feed = inspection_alert_feed
+    app.state.metric_registry = registry
 
     app.include_router(
         create_cases_router(

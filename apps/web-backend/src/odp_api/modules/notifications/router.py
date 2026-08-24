@@ -1,10 +1,10 @@
 """Transport adapters for the process-local inspection alert feed."""
 
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, WebSocket
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket
+from starlette.websockets import WebSocketDisconnect
 from odp_api.modules.identity.models import Actor
 from odp_api.modules.identity.policies import AuthorizationDenied, authorize
 from odp_api.modules.identity.service import (
@@ -28,43 +28,51 @@ class InMemoryInspectionAlertRepository:
         line_ids = line_ids or {}
         self._alerts = tuple(
             StoredInspectionAlert(
+                cursor=str(index + 1),
                 alert=alert,
                 updated_at=alert.occurred_at,
                 line_id=line_ids.get(alert.event_id),
             )
-            for alert in alerts
+            for index, alert in enumerate(alerts)
         )
 
     def list(
-        self, organization_id: UUID, updated_after: datetime | None = None
+        self, organization_id: UUID, after_cursor: str | None = None, limit: int = 100
     ) -> list[StoredInspectionAlert]:
         return [
             stored
             for stored in self._alerts
             if stored.alert.organization_id == organization_id
-            and (updated_after is None or stored.updated_at > updated_after)
-        ]
+            and (after_cursor is None or int(stored.cursor) > int(after_cursor))
+        ][:limit]
+
+    def publish(self, alert: InspectionAlert, line_id: UUID | None) -> str:
+        raise RuntimeError("In-memory notification repository is read-only")
+
+    async def subscribe(self, after_cursor: str | None):
+        if False:
+            yield None
 
 
 def create_notifications_router(
     repository: InspectionAlertFeedPort,
     actor_provider: Callable[[], Actor] = get_current_actor,
 ) -> APIRouter:
-    """Expose reconciliation and one-delivery websocket views of inspection alerts."""
+    """Expose cursor reconciliation and continuous ticket-authenticated delivery."""
     router = APIRouter(tags=["inspection-events"])
 
-    @router.get("/api/v1/inspection-events", response_model=list[InspectionAlert])
+    @router.get("/api/v1/inspection-events")
     def list_inspection_events(
-        updated_after: datetime | None = Query(default=None),
+        after_cursor: str | None = Query(default=None),
+        limit: int = Query(default=100),
         actor: Actor = Depends(actor_provider),
-    ) -> list[InspectionAlert]:
-        if updated_after is not None and updated_after.tzinfo is None:
-            updated_after = updated_after.replace(tzinfo=UTC)
-        return [
-            stored.alert
-            for stored in repository.list(actor.organization_id, updated_after)
-            if _is_authorized(actor, stored)
-        ]
+    ) -> dict[str, object]:
+        try:
+            stored = repository.list(actor.organization_id, after_cursor, limit)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail="Invalid cursor or limit") from error
+        items = [_envelope(item) for item in stored if _is_authorized(actor, item)]
+        return {"items": items, "next_cursor": items[-1]["cursor"] if items else after_cursor}
 
     @router.websocket("/ws/inspection-events")
     async def inspection_events_socket(websocket: WebSocket) -> None:
@@ -74,11 +82,27 @@ def create_notifications_router(
             await websocket.close(code=1008)
             return
         await websocket.accept()
-        # The server emits each available event once per connection.  Recovery is
-        # intentionally REST-based; there is no delivery acknowledgement protocol.
-        for stored in repository.list(actor.organization_id):
-            if _is_authorized(actor, stored):
-                await websocket.send_json(stored.alert.model_dump(mode="json"))
+        cursor = websocket.query_params.get("cursor")
+        registry = getattr(websocket.app.state, "metric_registry", None)
+        if registry is not None:
+            registry.inc("websocket_reconnect_total")
+            registry.add("websocket_active_connections", 1)
+        try:
+            subscription_cursor = cursor
+            for stored in repository.list(actor.organization_id, cursor, 100):
+                subscription_cursor = stored.cursor
+                if _is_authorized(actor, stored):
+                    await websocket.send_json(_envelope(stored))
+                    if registry is not None:
+                        registry.inc("websocket_reconciled_events_total")
+            async for stored in repository.subscribe(subscription_cursor):
+                if _is_authorized(actor, stored):
+                    await websocket.send_json(_envelope(stored))
+        except (WebSocketDisconnect, RuntimeError):
+            return
+        finally:
+            if registry is not None:
+                registry.add("websocket_active_connections", -1)
 
     return router
 
@@ -103,3 +127,7 @@ def _is_authorized(actor: Actor, stored: StoredInspectionAlert) -> bool:
     except AuthorizationDenied:
         return False
     return True
+
+
+def _envelope(stored: StoredInspectionAlert) -> dict[str, object]:
+    return {"cursor": stored.cursor, "alert": stored.alert.model_dump(mode="json")}

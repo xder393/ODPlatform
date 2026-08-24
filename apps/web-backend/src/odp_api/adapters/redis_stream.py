@@ -56,6 +56,17 @@ class SQLiteStreamClient:
             )
         return f"{cursor.lastrowid}-0"
 
+    def xadd_bounded(self, stream: str, fields: dict[str, str], maxlen: int = 10_000) -> str:
+        """SQLite transport compatibility; durable feed remains the source of truth."""
+        entry = self.xadd(stream, fields)
+        with self._lock, self._connection:
+            self._connection.execute(
+                "DELETE FROM stream_entries WHERE stream_name = ? AND entry_id NOT IN "
+                "(SELECT entry_id FROM stream_entries WHERE stream_name = ? ORDER BY entry_id DESC LIMIT ?)",
+                (stream, stream, maxlen),
+            )
+        return entry
+
     def xadd_once(self, stream: str, claim_key: str, fields: dict[str, str]) -> str | None:
         """Claim and append in one SQLite transaction."""
         with self._lock, self._connection:
@@ -123,6 +134,15 @@ class RedisSocketStreamClient:
             command.extend((key, value))
         result = self._execute(*command)
         return _decode(result)
+
+    def xadd_bounded(self, stream: str, fields: dict[str, str], maxlen: int = 10_000) -> str:
+        command = ["XADD", stream, "MAXLEN", "~", str(maxlen), "*"]
+        for key, value in fields.items():
+            command.extend((key, value))
+        return _decode(self._execute(*command))
+
+    def xread(self, stream: str, cursor: str, block_ms: int = 15_000) -> object:
+        return self._execute("XREAD", "BLOCK", str(block_ms), "COUNT", "100", "STREAMS", stream, cursor)
 
     def xadd_once(self, stream: str, claim_key: str, fields: dict[str, str]) -> str | None:
         """Retry a pending append while suppressing completed event publications."""
