@@ -97,6 +97,15 @@ class InMemoryKnowledgeIndex:
             raise ValueError("Only failed documents may be recorded as ingestion failures.")
         self._documents[document.document_id] = document
 
+    def record_failure_atomically(self, document: KnowledgeDocument) -> KnowledgeDocument:
+        with self._ingest_lock:
+            failed = replace(
+                document,
+                version=self.next_version(document.organization_id, document.source_name),
+            )
+            self.record_failure(failed)
+            return failed
+
     def documents(self) -> tuple[KnowledgeDocument, ...]:
         return tuple(self._documents.values())
 

@@ -231,6 +231,18 @@ class PgVectorPostgresAdapter:
             raise ValueError("Only failed documents may be recorded as ingestion failures.")
         self._persist_document(document, _document_parameters(document))
 
+    def record_failure_atomically(self, document: KnowledgeDocument) -> KnowledgeDocument:
+        if document.status != "FAILED":
+            raise ValueError("Only failed documents may be recorded as ingestion failures.")
+        with self._executor.transaction() as executor:
+            executor.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%(source_lock)s, 0))",
+                {"source_lock": f"{document.organization_id}:{document.source_name}"},
+            )
+            failed = replace(document, version=_next_version(executor, document.organization_id, document.source_name))
+            self._persist_document_with_executor(executor, failed, _document_parameters(failed))
+            return failed
+
     def search(
         self,
         query: str,
@@ -510,6 +522,12 @@ class PgVectorRetrievalAdapter:
         if document.status != "FAILED":
             raise ValueError("Only failed documents may be recorded as ingestion failures.")
         self._documents[document.document_id] = document
+
+    def record_failure_atomically(self, document: KnowledgeDocument) -> KnowledgeDocument:
+        with self._ingest_lock:
+            failed = replace(document, version=self.next_version(document.organization_id, document.source_name))
+            self.record_failure(failed)
+            return failed
 
     def document(self, document_id: UUID) -> KnowledgeDocument:
         return self._documents[document_id]

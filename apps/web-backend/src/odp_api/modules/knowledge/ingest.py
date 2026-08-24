@@ -97,14 +97,9 @@ class KnowledgeIngestionService:
             if not chunks:
                 raise ValueError("Document does not contain extractable text.")
         except ValueError as error:
-            failed = replace(
-                document,
-                version=self._index.next_version(organization_id, source_name),
-                status="FAILED",
-                failure_reason=str(error),
+            return self._index.record_failure_atomically(
+                replace(document, status="FAILED", failure_reason=str(error))
             )
-            self._index.record_failure(failed)
-            return failed
 
         return self._index.index_atomically(document, parents, chunks)
 

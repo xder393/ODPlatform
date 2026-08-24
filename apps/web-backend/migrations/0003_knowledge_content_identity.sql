@@ -5,4 +5,5 @@ SET content_sha256 = encode(digest(document_id::text || ':' || source_name, 'sha
 WHERE content_sha256 IS NULL;
 ALTER TABLE knowledge_documents ALTER COLUMN content_sha256 SET NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS knowledge_documents_content_identity_uq
-    ON knowledge_documents (organization_id, source_name, content_sha256);
+    ON knowledge_documents (organization_id, source_name, content_sha256)
+    WHERE status = 'INDEXED';

@@ -89,6 +89,8 @@ class KnowledgeIndexPort(RAGRetrievalPort, Protocol):
         chunks: Sequence[KnowledgeChunk],
     ) -> KnowledgeDocument: ...
 
+    def record_failure_atomically(self, document: KnowledgeDocument) -> KnowledgeDocument: ...
+
     def index(
         self,
         document: KnowledgeDocument,
