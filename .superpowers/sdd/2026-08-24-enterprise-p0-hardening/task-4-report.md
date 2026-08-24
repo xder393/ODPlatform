@@ -71,6 +71,16 @@ Commit: `feat: stream durable inspection alerts in realtime` (recorded after thi
 - Added the Redis runtime dependency and regenerated `uv.lock`.
 - Full backend: 125 passed, 1 existing skip.
 
+## Fix round 2 acceptance tests
+
+- `test_redis_highwater_interleaving_publishes_before_first_xread` proves an
+  event inserted after high-water capture and before the first durable query
+  is returned without waiting for XREAD timeout.
+- `test_redis_timeout_requeries_and_cancellation_closes_client` and
+  `test_redis_xread_failure_propagates_and_closes_client` prove timeout wake,
+  cancellation cleanup, and error propagation.
+- Focused: 22 passed. Full backend: 128 passed, 1 existing skip.
+
 ## Fix round 2 (migration/interface)
 
 - Restored immutable 0004 migration contents and moved tenant-scoped uniqueness
