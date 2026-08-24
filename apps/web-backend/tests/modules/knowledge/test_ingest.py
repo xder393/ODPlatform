@@ -425,7 +425,12 @@ def test_postgres_retrieval_executes_tenant_scoped_normalized_hybrid_query() -> 
     assert [result.score for result in results] == [0.875]
     sql, parameters = executor.calls[-1]
     assert "WHERE c.organization_id = %(organization_id)s" in sql
-    assert "d.evidence_kind = %(evidence_kind)s" in sql
+    assert "%(evidence_kind)s::text IS NULL" in sql
+    assert "d.evidence_kind = %(evidence_kind)s::text" in sql
+    assert "%(line_id)s::uuid IS NULL" in sql
+    assert "d.applicable_line_id = %(line_id)s::uuid" in sql
+    assert "%(product_category)s::text IS NULL" in sql
+    assert "%(exclude_product_category)s::text IS NULL" in sql
     assert "NOT %(require_exact_line_scope)s" in sql
     assert "NOT %(require_exact_product_scope)s" in sql
     assert "vector_score" in sql and "bm25_score" in sql and "combined_score" in sql

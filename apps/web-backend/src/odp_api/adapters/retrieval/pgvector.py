@@ -29,23 +29,23 @@ WITH scoped AS (
     WHERE c.organization_id = %(organization_id)s
       AND d.organization_id = %(organization_id)s
       AND d.status = %(document_status)s
-      AND (%(evidence_kind)s IS NULL OR d.evidence_kind = %(evidence_kind)s)
+      AND (%(evidence_kind)s::text IS NULL OR d.evidence_kind = %(evidence_kind)s::text)
       AND (NOT %(require_evidence_kind)s OR d.evidence_kind IS NOT NULL)
       AND (
-          %(line_id)s IS NULL
-          OR d.applicable_line_id = %(line_id)s
+          %(line_id)s::uuid IS NULL
+          OR d.applicable_line_id = %(line_id)s::uuid
           OR (NOT %(require_exact_line_scope)s AND d.applicable_line_id IS NULL)
       )
       AND (
-          %(product_category)s IS NULL
-          OR d.product_category = %(product_category)s
+          %(product_category)s::text IS NULL
+          OR d.product_category = %(product_category)s::text
           OR (NOT %(require_exact_product_scope)s AND d.product_category IS NULL)
       )
       AND (
-          %(exclude_product_category)s IS NULL
+          %(exclude_product_category)s::text IS NULL
           OR (
               d.product_category IS NOT NULL
-              AND d.product_category <> %(exclude_product_category)s
+              AND d.product_category <> %(exclude_product_category)s::text
           )
       )
 ),
