@@ -2,6 +2,7 @@
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -75,6 +76,21 @@ def test_same_event_id_is_idempotent_only_inside_its_tenant(feed) -> None:
 
 def test_concurrent_duplicate_publish_returns_the_committed_winner(feed) -> None:
     """A racing uniqueness conflict must roll back then return the stored cursor."""
+    alert = _alert()
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        cursors = list(executor.map(lambda _: feed.publish(alert, LINE_ID), range(2)))
+    assert cursors[0] == cursors[1]
+    assert len(feed.list(ORG_ID, None, 100)) == 1
+
+
+def test_barrier_forces_duplicate_unique_race_and_returns_winner(feed, monkeypatch) -> None:
+    """Both writers cross the absent check before one loses the DB unique race."""
+    original = feed._existing; barrier = Barrier(2)
+    def raced(session, org, event):
+        result = original(session, org, event)
+        if result is None: barrier.wait(timeout=1)
+        return result
+    monkeypatch.setattr(feed, "_existing", raced)
     alert = _alert()
     with ThreadPoolExecutor(max_workers=2) as executor:
         cursors = list(executor.map(lambda _: feed.publish(alert, LINE_ID), range(2)))

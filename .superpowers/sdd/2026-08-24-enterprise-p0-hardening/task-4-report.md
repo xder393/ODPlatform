@@ -81,6 +81,16 @@ Commit: `feat: stream durable inspection alerts in realtime` (recorded after thi
   cancellation cleanup, and error propagation.
 - Focused: 22 passed. Full backend: 128 passed, 1 existing skip.
 
+## Final round-2 regression coverage
+
+- `test_bad_cursor_does_not_consume_ticket` proves a rejected negative cursor
+  leaves the same one-time ticket usable by a valid connection.
+- `test_backlog_over_100_counts_every_reconciled_event` verifies pagination and
+  the exact 101-event reconciliation metric delta.
+- `test_barrier_forces_duplicate_unique_race_and_returns_winner` synchronizes
+  both absent checks with `threading.Barrier` before the unique collision.
+- Focused: 18 passed. Full backend: 131 passed, 1 existing skip.
+
 ## Fix round 2 (migration/interface)
 
 - Restored immutable 0004 migration contents and moved tenant-scoped uniqueness

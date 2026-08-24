@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 from odp_api.main import create_app
@@ -66,3 +67,29 @@ def test_idle_disconnect_cancels_subscription_and_restores_active_gauge(tmp_path
         with client.websocket_connect(f"/ws/inspection-events?ticket={ticket}&cursor=10"):
             pass
     assert app.state.metric_registry._metrics["websocket_active_connections"].snapshot() == 0
+
+
+def test_bad_cursor_does_not_consume_ticket(tmp_path: Path) -> None:
+    """Cursor validation happens before one-time ticket consumption."""
+    from starlette.websockets import WebSocketDisconnect
+    with TestClient(create_app(settings=_settings(tmp_path), seed=build_demo_seed())) as client:
+        ticket = client.post("/api/v1/auth/websocket-ticket", headers={"Authorization": f"Bearer {_token(client)}"}).json()["ticket"]
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(f"/ws/inspection-events?ticket={ticket}&cursor=-1"):
+                pass
+        with client.websocket_connect(f"/ws/inspection-events?ticket={ticket}&cursor=10"):
+            pass
+
+
+def test_backlog_over_100_counts_every_reconciled_event(tmp_path: Path) -> None:
+    """Pagination must not undercount the second reconciliation page."""
+    app = create_app(settings=_settings(tmp_path), seed=build_demo_seed())
+    with TestClient(app) as client:
+        for _ in range(101):
+            app.state.inspection_alert_feed.publish(InspectionAlert(event_id=uuid4(), organization_id=DEMO_ORG_ID, camera_id=uuid4(), occurred_at=datetime.now(UTC), defect_class="bulk", confidence=.99), DEMO_LINE_ID)
+        ticket = client.post("/api/v1/auth/websocket-ticket", headers={"Authorization": f"Bearer {_token(client)}"}).json()["ticket"]
+        before = app.state.metric_registry._metrics["websocket_reconciled_events_total"].snapshot()
+        with client.websocket_connect(f"/ws/inspection-events?ticket={ticket}&cursor=10") as websocket:
+            for _ in range(101): websocket.receive_json()
+        after = app.state.metric_registry._metrics["websocket_reconciled_events_total"].snapshot()
+    assert after - before == 101

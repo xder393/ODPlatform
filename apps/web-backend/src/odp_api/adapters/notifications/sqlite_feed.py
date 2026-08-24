@@ -36,10 +36,7 @@ class SqliteInspectionAlertFeed:
         """Persist before any notification and deduplicate by the event identity."""
         try:
             with self._sessions.begin() as session:
-                row = session.scalar(select(InspectionAlertFeedRow).where(
-                    InspectionAlertFeedRow.organization_id == alert.organization_id,
-                    InspectionAlertFeedRow.event_id == alert.event_id,
-                ))
+                row = self._existing(session, alert.organization_id, alert.event_id)
                 if row is None:
                     row = InspectionAlertFeedRow(
                         event_id=alert.event_id, organization_id=alert.organization_id,
@@ -50,10 +47,7 @@ class SqliteInspectionAlertFeed:
                     session.flush()
         except IntegrityError:
             with self._sessions() as session:
-                row = session.scalar(select(InspectionAlertFeedRow).where(
-                    InspectionAlertFeedRow.organization_id == alert.organization_id,
-                    InspectionAlertFeedRow.event_id == alert.event_id,
-                ))
+                row = self._existing(session, alert.organization_id, alert.event_id)
                 if row is None:
                     raise
         with self._condition:
@@ -94,6 +88,13 @@ class SqliteInspectionAlertFeed:
         ).order_by(InspectionAlertFeedRow.cursor)
         with self._sessions() as session:
             return [_stored(row) for row in session.scalars(statement)]
+
+    @staticmethod
+    def _existing(session: Session, organization_id: UUID, event_id: UUID) -> InspectionAlertFeedRow | None:
+        return session.scalar(select(InspectionAlertFeedRow).where(
+            InspectionAlertFeedRow.organization_id == organization_id,
+            InspectionAlertFeedRow.event_id == event_id,
+        ))
 
     def _snapshot_generation(self) -> int:
         with self._condition:
