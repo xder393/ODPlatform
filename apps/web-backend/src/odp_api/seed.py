@@ -13,6 +13,7 @@ share the Latin token space. Source names and UI labels remain Chinese.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from io import BytesIO
 from typing import Literal
@@ -20,7 +21,16 @@ from uuid import UUID, uuid5
 
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
 
+from odp_api.adapters.persistence.models import (
+    ActorLineGrantRow,
+    ActorRow,
+    DefectCaseRow,
+    InspectionEventRow,
+    PasswordCredentialRow,
+)
 from odp_api.adapters.vision.mock import MockVisionAdapter
 from odp_api.modules.identity.models import Actor, Role
 from odp_api.modules.inspection.models import DefectCase
@@ -153,6 +163,89 @@ def build_demo_seed() -> DemoSeed:
         documents=documents,
         model_release=MODEL_RELEASE,
     )
+
+
+def seed_business_data(
+    session_factory: sessionmaker[Session],
+    seed: DemoSeed,
+    hash_password: Callable[[str], str],
+) -> None:
+    """Persist durable demo identities and inspection data exactly once.
+
+    IDs in ``DemoSeed`` are deterministic.  Existing actors, credentials,
+    cases, and events are therefore deliberately left untouched during a
+    restart; in particular, a password hash is never rotated by a seed run.
+    """
+    with session_factory.begin() as session:
+        for actor in seed.actors:
+            actor_row = session.get(ActorRow, actor.actor_id)
+            if actor_row is None:
+                existing_email = (
+                    session.scalar(select(ActorRow).where(ActorRow.email == actor.email))
+                    if actor.email is not None
+                    else None
+                )
+                if existing_email is None:
+                    actor_row = ActorRow(
+                        actor_id=actor.actor_id,
+                        organization_id=actor.organization_id,
+                        role=actor.role.value,
+                        email=actor.email,
+                    )
+                    session.add(actor_row)
+                else:
+                    actor_row = existing_email
+            if actor_row.actor_id != actor.actor_id:
+                continue
+            for line_id in actor.line_ids:
+                if session.get(ActorLineGrantRow, (actor.actor_id, line_id)) is None:
+                    session.add(
+                        ActorLineGrantRow(
+                            actor_id=actor.actor_id,
+                            line_id=line_id,
+                            organization_id=actor.organization_id,
+                        )
+                    )
+            if session.get(PasswordCredentialRow, actor.actor_id) is None:
+                session.add(
+                    PasswordCredentialRow(
+                        actor_id=actor.actor_id,
+                        organization_id=actor.organization_id,
+                        password_hash=hash_password(seed.passwords[actor.actor_id]),
+                    )
+                )
+
+        for case in seed.cases:
+            if session.get(DefectCaseRow, case.case_id) is None:
+                session.add(
+                    DefectCaseRow(
+                        case_id=case.case_id,
+                        organization_id=case.organization_id,
+                        status=case.status,
+                        assignee_id=case.assignee_id,
+                        last_transition_actor_id=case.last_transition_actor_id,
+                        line_id=case.line_id,
+                        product_category=case.product_category,
+                    )
+                )
+            for event in case.inspection_events:
+                if session.get(InspectionEventRow, event.event_id) is None:
+                    session.add(
+                        InspectionEventRow(
+                            event_id=event.event_id,
+                            case_id=case.case_id,
+                            organization_id=event.organization_id,
+                            camera_id=event.camera_id,
+                            occurred_at=event.occurred_at,
+                            defect_class=event.defect_class,
+                            confidence=event.confidence,
+                            model_release=event.model_release,
+                            preprocessing_parameters=[list(item) for item in event.preprocessing_parameters],
+                            threshold=event.threshold,
+                            input_frame_sha256=event.input_frame_sha256,
+                            line_id=event.line_id,
+                        )
+                    )
 
 
 def _pdf_bytes(paragraphs: tuple[str, ...]) -> bytes:

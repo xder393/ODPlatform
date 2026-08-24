@@ -9,6 +9,7 @@ services:
     environment:
       ODP_ENVIRONMENT: docker
       ODP_REDIS_URL: redis://redis:6379/0
+      ODP_DATABASE_URL: postgresql+psycopg://odp:odp@postgres:5432/odp
       ODP_TASK_DATABASE_PATH: /data/odp-tasks.sqlite3
       ODP_POSTGRES_URL: postgresql://odp:odp@postgres:5432/odp
       ODP_RETRIEVAL_BACKEND: pgvector

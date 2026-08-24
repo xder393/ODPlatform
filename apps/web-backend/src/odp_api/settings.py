@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     environment: str = "local"
     auth_jwt_secret: str | None = None
     redis_url: str = "redis://redis:6379/0"
+    database_url: str = "sqlite:////tmp/odp-quality-inspection.sqlite3"
     task_database_path: str = "/tmp/odp-tasks.sqlite3"
     # "inmemory" keeps local demos and tests fully offline; "pgvector" uses
     # PostgreSQL with the pgvector extension through a lazily imported driver.
