@@ -5,7 +5,7 @@ Revises: 0004_durable_inspection_alert_feed
 """
 
 import sqlalchemy as sa
-from alembic import op
+from alembic import context, op
 
 revision = "0005_alert_event_tenant_uniqueness"
 down_revision = "0004_durable_inspection_alert_feed"
@@ -29,6 +29,12 @@ def upgrade() -> None:
         op.rename_table("inspection_alerts_new", "inspection_alerts")
         op.create_index("ix_inspection_alerts_organization_id", "inspection_alerts", ["organization_id"])
         op.create_index("ix_inspection_alerts_line_id", "inspection_alerts", ["line_id"])
+        return
+    if context.is_offline_mode():
+        # PostgreSQL names the anonymous ``unique=True`` constraint from 0004
+        # after its table and column. Offline SQL has no inspector connection.
+        op.drop_constraint("inspection_alerts_event_id_key", "inspection_alerts", type_="unique")
+        op.create_unique_constraint("uq_inspection_alerts_org_event", "inspection_alerts", ["organization_id", "event_id"])
         return
     inspector = sa.inspect(op.get_bind())
     old_unique = next(

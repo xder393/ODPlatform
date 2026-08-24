@@ -14,6 +14,10 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # Alembic creates this ledger as VARCHAR(32), but this revision ID is
+    # longer. Widen before Alembic stamps 0004, inside the same transaction.
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute("ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(64)")
     op.create_table(
         "inspection_alerts",
         sa.Column("cursor", sa.Integer(), primary_key=True, autoincrement=True),
@@ -29,3 +33,5 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_table("inspection_alerts")
+    # Deliberately retain VARCHAR(64): shrinking a migration ledger can
+    # truncate stamps from another compatible branch during a downgrade.

@@ -27,6 +27,23 @@ jobs:
   # Web 后端（企业质检 API）测试
   backend-web:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: odp
+          POSTGRES_USER: odp
+          POSTGRES_PASSWORD: odp
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U odp -d odp"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      ODP_POSTGRES_URL: postgresql://odp:odp@localhost:5432/odp
+      ODP_POSTGRES_TEST_URL: postgresql+psycopg://odp:odp@localhost:5432/odp
     steps:
       - uses: actions/checkout@v4
 
@@ -42,6 +59,12 @@ jobs:
       - name: Upgrade a clean SQLite runtime schema
         run: |
           ODP_DATABASE_URL=sqlite:////tmp/odp-ci.db \
+            bash -c 'cd apps/web-backend && alembic upgrade head'
+
+      - name: Upgrade the PostgreSQL knowledge and business schemas
+        run: |
+          python -m odp_api.migrations
+          ODP_DATABASE_URL="$ODP_POSTGRES_TEST_URL" \
             bash -c 'cd apps/web-backend && alembic upgrade head'
 
       - name: Lint touched backend integration code

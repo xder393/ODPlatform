@@ -5,7 +5,7 @@ services:
     volumes:
       - ..:/workspace
       - task-state:/data
-    command: ["sh", "-c", "pip install -e /workspace/apps/web-backend -e /workspace/packages/shared-schemas && (cd /workspace/apps/web-backend && alembic upgrade head) && python -m odp_api.seed && uvicorn odp_api.main:create_app --factory --host 0.0.0.0 --port 8000 --log-config /workspace/apps/web-backend/src/odp_api/observability/uvicorn_logging.json"]
+    command: ["sh", "-c", "pip install -e /workspace/apps/web-backend -e /workspace/packages/shared-schemas && python -m odp_api.migrations && (cd /workspace/apps/web-backend && alembic upgrade head) && python -m odp_api.seed && uvicorn odp_api.main:create_app --factory --host 0.0.0.0 --port 8000 --log-config /workspace/apps/web-backend/src/odp_api/observability/uvicorn_logging.json"]
     environment:
       ODP_ENVIRONMENT: docker
       ODP_REDIS_URL: redis://redis:6379/0
