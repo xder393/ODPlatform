@@ -21,6 +21,7 @@ from odp_api.adapters.persistence.repositories import (
 )
 from odp_api.adapters.persistence.unit_of_work import SqlAlchemyBusinessUnitOfWork
 from odp_api.db import create_engine_and_session
+from odp_api.modules.audit.models import AuditCommand
 from odp_api.modules.audit.service import AuditAppendBlocked, AuditService, AuditWriteError
 from odp_api.modules.cases.application import AuditContext, CaseApplicationService
 from odp_api.modules.cases.errors import InvalidCaseTransition
@@ -165,6 +166,39 @@ def test_non_utc_context_round_trips_as_canonical_utc_and_keeps_chain_valid(tmp_
         restarted_engine.dispose()
 
 
+def test_standalone_durable_audit_append_round_trips_non_utc_time_as_canonical_utc(tmp_path) -> None:
+    """A standalone AuditService append must not reinterpret +08 wall time as UTC after restart."""
+    database_url = f"sqlite:///{tmp_path / 'standalone-audit.db'}"
+    expected = datetime(2026, 8, 24, 1, 30, tzinfo=UTC)
+    command = AuditCommand(
+        organization_id=DEMO_ORG_ID,
+        resource_type="defect_case",
+        resource_id=UUID("50000000-0000-4000-8000-000000000001"),
+        action="defect_case.transition",
+        change_summary="{}",
+        actor_id=UUID("50000000-0000-4000-8000-000000000002"),
+        occurred_at=datetime(2026, 8, 24, 9, 30, tzinfo=timezone(timedelta(hours=8))),
+        correlation_id=UUID("50000000-0000-4000-8000-000000000003"),
+        request_ip="203.0.113.20",
+    )
+    engine, sessions = create_engine_and_session(database_url)
+    Base.metadata.create_all(engine)
+    try:
+        appended = AuditService(SqlAlchemyAuditRepository(sessions)).append(command)
+        assert appended.occurred_at == expected
+    finally:
+        engine.dispose()
+
+    restarted_engine, restarted_sessions = create_engine_and_session(database_url)
+    try:
+        service = AuditService(SqlAlchemyAuditRepository(restarted_sessions))
+        entry = service.repository.read_consistent_chain(DEMO_ORG_ID).entries[-1]
+        assert entry.occurred_at == expected
+        assert service.verify_organization_chain(DEMO_ORG_ID).is_valid
+    finally:
+        restarted_engine.dispose()
+
+
 def test_append_guard_prevents_a_blocked_organization_from_bypassing_a_running_transition(tmp_path) -> None:
     """Releasing the health lock after the check lets a later block race past the commit."""
     engine, sessions = _seeded_sessions(tmp_path)
@@ -254,8 +288,8 @@ def test_sqlite_begin_immediate_serializes_two_case_writers(tmp_path) -> None:
     not os.getenv("ODP_POSTGRES_TEST_URL"),
     reason="requires the dedicated ODP_POSTGRES_TEST_URL CI database",
 )
-def test_postgresql_case_load_executes_a_row_lock_contract() -> None:
-    """CI-only contract: the durable writer must issue SELECT ... FOR UPDATE on PostgreSQL."""
+def test_postgresql_case_transition_locks_case_and_audit_head_then_commits_once() -> None:
+    """CI-only contract: a live PostgreSQL transition locks both rows and commits all facts."""
     database_url = os.environ["ODP_POSTGRES_TEST_URL"]
     engine, sessions = create_engine_and_session(database_url)
     statements: list[str] = []
@@ -267,9 +301,28 @@ def test_postgresql_case_load_executes_a_row_lock_contract() -> None:
     try:
         Base.metadata.create_all(engine)
         seed_business_data(sessions, build_demo_seed(), PasswordHasher().hash)
-        with SqlAlchemyBusinessUnitOfWork(sessions) as unit_of_work:
-            assert unit_of_work.cases.get(build_demo_seed().cases[0].case_id, DEMO_ORG_ID)
-        assert any("FOR UPDATE" in statement.upper() for statement in statements)
+        seed = build_demo_seed()
+        audit = AuditService(SqlAlchemyAuditRepository(sessions))
+        stored = CaseApplicationService(
+            lambda: SqlAlchemyBusinessUnitOfWork(sessions), audit
+        ).transition(seed.cases[0].case_id, "IN_REVIEW", seed.actors[0], _audit_context())
+
+        assert stored is not None
+        assert any(
+            "FROM defect_cases" in statement and "FOR UPDATE" in statement.upper()
+            for statement in statements
+        )
+        assert any(
+            "FROM audit_chain_heads" in statement and "FOR UPDATE" in statement.upper()
+            for statement in statements
+        )
+        restored = SqlAlchemyCaseRepository(sessions).get(seed.cases[0].case_id, DEMO_ORG_ID)
+        assert restored is not None
+        assert restored.history[-1].to_status == "IN_REVIEW"
+        snapshot = audit.repository.read_consistent_chain(DEMO_ORG_ID)
+        assert len(snapshot.entries) == 1
+        assert snapshot.head.last_sequence == 1
+        assert snapshot.head.head_hash == snapshot.entries[0].entry_hash
     finally:
         event.remove(engine, "before_cursor_execute", record_statement)
         engine.dispose()

@@ -33,6 +33,7 @@ class AuditCommand:
 
     def __post_init__(self) -> None:
         canonical_timestamp(self.occurred_at)
+        object.__setattr__(self, "occurred_at", self.occurred_at.astimezone(UTC))
 
 
 @dataclass(frozen=True, slots=True)
