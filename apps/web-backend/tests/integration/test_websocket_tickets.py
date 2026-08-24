@@ -184,6 +184,56 @@ def test_uvicorn_websocket_access_logs_strip_valid_reused_and_legacy_credentials
         assert all(secret not in record.getMessage() for record in caplog.records)
 
 
+def test_uvicorn_error_websocket_handshake_logs_strip_query_credentials(caplog, capsys) -> None:
+    """Uvicorn 0.52 logs WebSocket acceptance/rejection on ``uvicorn.error``."""
+    configure_uvicorn_access_logging()
+    error_logger = logging.getLogger("uvicorn.error")
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    error_logger.addHandler(stdout_handler)
+    error_logger.addHandler(stderr_handler)
+    error_logger.addHandler(caplog.handler)
+    previous_level = error_logger.level
+    previous_propagate = error_logger.propagate
+    error_logger.setLevel(logging.INFO)
+    error_logger.propagate = False
+    valid_ticket = "valid-error-ticket-secret"
+    reused_ticket = "reused-error-ticket-secret"
+    legacy_jwt = "legacy-error-jwt-secret"
+    try:
+        # These are Uvicorn 0.52.4's real WebSocket handshake log records.
+        error_logger.info(
+            '%s - "WebSocket %s" [accepted]',
+            "testclient",
+            f"/ws/inspection-events?ticket={valid_ticket}",
+        )
+        error_logger.info(
+            '%s - "WebSocket %s" 403',
+            "testclient",
+            f"/ws/inspection-events?ticket={reused_ticket}",
+        )
+        error_logger.info(
+            '%s - "WebSocket %s" 403',
+            "testclient",
+            f"/ws/inspection-events?token={legacy_jwt}",
+        )
+        error_logger.info("%s", "non-WebSocket lifecycle log remains readable")
+        captured = capsys.readouterr()
+    finally:
+        error_logger.removeHandler(stdout_handler)
+        error_logger.removeHandler(stderr_handler)
+        error_logger.removeHandler(caplog.handler)
+        error_logger.setLevel(previous_level)
+        error_logger.propagate = previous_propagate
+
+    for secret in (valid_ticket, reused_ticket, legacy_jwt):
+        assert secret not in captured.out
+        assert secret not in captured.err
+        assert secret not in caplog.text
+        assert all(secret not in record.getMessage() for record in caplog.records)
+    assert "non-WebSocket lifecycle log remains readable" in captured.out
+
+
 def test_reauthentication_marker_survives_a_local_runtime_restart(tmp_path: Path) -> None:
     """Replacing durable markers with a process-local dictionary loses high-risk authorization."""
     settings = _settings(tmp_path)

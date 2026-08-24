@@ -18,10 +18,11 @@ class UvicornAccessSecretFilter(logging.Filter):
 
 
 def configure_uvicorn_access_logging() -> None:
-    """Install the sanitizing filter exactly once for the Uvicorn access logger."""
-    access_logger = logging.getLogger("uvicorn.access")
-    if not any(isinstance(item, UvicornAccessSecretFilter) for item in access_logger.filters):
-        access_logger.addFilter(UvicornAccessSecretFilter())
+    """Install query sanitization on both Uvicorn HTTP and WebSocket loggers."""
+    for logger_name in ("uvicorn.access", "uvicorn.error"):
+        logger = logging.getLogger(logger_name)
+        if not any(isinstance(item, UvicornAccessSecretFilter) for item in logger.filters):
+            logger.addFilter(UvicornAccessSecretFilter())
 
 
 def _strip_query(value: object) -> object:
