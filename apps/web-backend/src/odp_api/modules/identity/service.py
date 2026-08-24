@@ -8,10 +8,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 from odp_api.modules.identity.models import Actor
+from odp_api.modules.identity.ports import REAUTHENTICATION_TTL_SECONDS, ReauthenticationStorePort
 from odp_api.modules.identity.tickets import WebSocketTicketService
-
-REAUTHENTICATION_TTL_SECONDS = 300
-
 
 class RecentReauthenticationRequired(PermissionError):
     """Raised when a simulated high-risk command lacks a five-minute marker."""
@@ -60,14 +58,8 @@ class InMemoryReauthenticationStore:
         return occurred_at
 
 
-class ReauthenticationStore(Protocol):
-    def set_last_reauth_at(self, actor_id: UUID, occurred_at: datetime) -> None: ...
-
-    def get_last_reauth_at(self, actor_id: UUID, now: datetime) -> datetime | None: ...
-
-
 class ReauthenticationService:
-    def __init__(self, store: ReauthenticationStore) -> None:
+    def __init__(self, store: ReauthenticationStorePort) -> None:
         self._store = store
 
     def record_success(self, actor_id: UUID, now: datetime) -> None:

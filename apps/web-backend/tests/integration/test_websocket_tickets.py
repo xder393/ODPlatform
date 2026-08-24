@@ -1,17 +1,23 @@
 """End-to-end contracts for opaque, one-time WebSocket tickets."""
 
 from datetime import UTC, datetime, timedelta
+import logging
 from pathlib import Path
+import sys
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
 from starlette.websockets import WebSocketDisconnect
 
 from odp_api.adapters.auth.redis_security import RedisWebSocketTicketStore
+from odp_api.adapters.auth.sqlite_security import SqliteWebSocketTicketStore
+from odp_api.adapters.persistence.models import WebSocketTicketRow
 from odp_api.adapters.persistence.repositories import SqlAlchemyPasswordCredentialRepository
 from odp_api.main import create_app
-from odp_api.modules.identity.tickets import InvalidWebSocketTicket, SqliteWebSocketTicketStore, WebSocketTicketService
+from odp_api.modules.identity.tickets import InvalidWebSocketTicket, WebSocketTicketService
+from odp_api.observability.logging import configure_uvicorn_access_logging
 from odp_api.seed import DEMO_ACCOUNTS, build_demo_seed
 from odp_api.settings import Settings
 
@@ -57,6 +63,24 @@ def test_ticket_service_consumes_once_and_rejects_expiry(tmp_path: Path) -> None
     expired = service.issue(actor_id, NOW)
     with pytest.raises(InvalidWebSocketTicket):
         service.consume(expired, NOW + timedelta(seconds=61))
+
+
+def test_sqlite_ticket_store_prunes_expired_rows_on_consume_and_issue(tmp_path: Path) -> None:
+    """Without expiry cleanup, durable ticket rows grow indefinitely after their TTL."""
+    app = create_app(settings=_settings(tmp_path), seed=build_demo_seed())
+    service = WebSocketTicketService(SqliteWebSocketTicketStore(app.state.session_factory))
+    actor_id = uuid4()
+
+    expired = service.issue(actor_id, NOW)
+    with pytest.raises(InvalidWebSocketTicket):
+        service.consume(expired, NOW + timedelta(seconds=61))
+    with app.state.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(WebSocketTicketRow)) == 0
+
+    service.issue(actor_id, NOW)
+    service.issue(actor_id, NOW + timedelta(seconds=61))
+    with app.state.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(WebSocketTicketRow)) == 1
 
 
 def test_redis_ticket_store_uses_digest_key_ttl_and_atomic_consumption() -> None:
@@ -121,6 +145,43 @@ def test_ticket_endpoint_is_bearer_protected_single_use_and_does_not_echo_ticket
             with client.websocket_connect(f"/ws/inspection-events?token={token}"):
                 pass
         assert legacy.value.code == 1008
+
+
+def test_uvicorn_websocket_access_logs_strip_valid_reused_and_legacy_credentials(
+    caplog, capsys
+) -> None:
+    """Uvicorn's access logger must never format a WebSocket query credential."""
+    configure_uvicorn_access_logging()
+    access_logger = logging.getLogger("uvicorn.access")
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    access_logger.addHandler(stderr_handler)
+    previous_level = access_logger.level
+    previous_propagate = access_logger.propagate
+    access_logger.setLevel(logging.INFO)
+    access_logger.propagate = True
+    caplog.set_level(logging.INFO, logger="uvicorn.access")
+    valid_ticket = "valid-ticket-secret"
+    reused_ticket = "reused-ticket-secret"
+    legacy_jwt = "legacy-jwt-secret"
+    try:
+        for path in (
+            f"/ws/inspection-events?ticket={valid_ticket}",
+            f"/ws/inspection-events?ticket={reused_ticket}",
+            f"/ws/inspection-events?token={legacy_jwt}",
+        ):
+            # This is Uvicorn's actual access-log argument shape for a handshake.
+            access_logger.info('%s - "%s %s HTTP/%s" %d', "testclient", "GET", path, "1.1", 101)
+        captured = capsys.readouterr()
+    finally:
+        access_logger.removeHandler(stderr_handler)
+        access_logger.setLevel(previous_level)
+        access_logger.propagate = previous_propagate
+
+    for secret in (valid_ticket, reused_ticket, legacy_jwt):
+        assert secret not in captured.out
+        assert secret not in captured.err
+        assert secret not in caplog.text
+        assert all(secret not in record.getMessage() for record in caplog.records)
 
 
 def test_reauthentication_marker_survives_a_local_runtime_restart(tmp_path: Path) -> None:

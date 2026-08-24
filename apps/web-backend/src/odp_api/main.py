@@ -12,6 +12,10 @@ from odp_api.adapters.auth.redis_security import (
     RedisReauthenticationStore,
     RedisWebSocketTicketStore,
 )
+from odp_api.adapters.auth.sqlite_security import (
+    SqliteReauthenticationStore,
+    SqliteWebSocketTicketStore,
+)
 from odp_api.adapters.generation.mock import MockLLMAdapter
 from odp_api.adapters.notifications.redis_stream import RedisStreamInspectionAlertFeed
 from odp_api.adapters.persistence.models import Base
@@ -40,11 +44,7 @@ from odp_api.modules.identity.service import (
     ReauthenticationService,
     create_auth_router,
 )
-from odp_api.modules.identity.tickets import (
-    SqliteReauthenticationStore,
-    SqliteWebSocketTicketStore,
-    WebSocketTicketService,
-)
+from odp_api.modules.identity.tickets import WebSocketTicketService
 from odp_api.modules.inspection.service import InspectionService
 from odp_api.modules.knowledge.ingest import KnowledgeIngestionService
 from odp_api.modules.notifications.router import create_notifications_router
@@ -55,6 +55,7 @@ from odp_api.observability.metrics import (
     RegistryTaskMetrics,
     register_standard_metrics,
 )
+from odp_api.observability.logging import configure_uvicorn_access_logging
 from odp_api.observability.router import create_metrics_router
 from odp_api.observability.tracing import CorrelationIdMiddleware
 from odp_api.ports.retrieval import KnowledgeIndexPort
@@ -112,6 +113,7 @@ def create_app(
     single hard-coded fixture case.
     """
     runtime_settings = settings or Settings()
+    configure_uvicorn_access_logging()
     active_seed = seed if seed is not None else (
         build_demo_seed() if runtime_settings.seed_demo else None
     )

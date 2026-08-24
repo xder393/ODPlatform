@@ -5,7 +5,7 @@ from hashlib import sha256
 from typing import Protocol
 from uuid import UUID
 
-from odp_api.modules.identity.service import REAUTHENTICATION_TTL_SECONDS
+from odp_api.modules.identity.ports import REAUTHENTICATION_TTL_SECONDS, WebSocketTicketStorePort
 from odp_api.modules.identity.tickets import WEBSOCKET_TICKET_TTL_SECONDS
 
 
@@ -37,7 +37,7 @@ class RedisReauthenticationStore:
         return occurred_at if occurred_at + timedelta(seconds=REAUTHENTICATION_TTL_SECONDS) >= now else None
 
 
-class RedisWebSocketTicketStore:
+class RedisWebSocketTicketStore(WebSocketTicketStorePort):
     """Digest-keyed Redis ticket store using SET EX NX and atomic GETDEL."""
 
     def __init__(self, client: RedisSecurityClient) -> None:
