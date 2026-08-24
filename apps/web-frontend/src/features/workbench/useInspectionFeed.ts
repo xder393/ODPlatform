@@ -8,6 +8,8 @@ export type { InspectionAlert } from "../../api/types";
 const CURSOR_STORAGE_PREFIX = "odp_alert_cursor:";
 const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as const;
 const STABLE_CONNECTION_MS = 5_000;
+const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ISO_DATETIME_WITH_TIMEZONE = /^(\d{4})-(\d{2})-(\d{2})T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/i;
 
 function actorScope(token: string): string {
   try {
@@ -46,10 +48,10 @@ function isEnvelope(value: unknown): value is InspectionAlertEnvelope {
     return false;
   }
   const alert = envelope.alert as Partial<InspectionAlert>;
-  return isNonEmptyString(alert.event_id)
-    && isNonEmptyString(alert.organization_id)
-    && isNonEmptyString(alert.camera_id)
-    && isNonEmptyString(alert.occurred_at)
+  return isCanonicalUuid(alert.event_id)
+    && isCanonicalUuid(alert.organization_id)
+    && isCanonicalUuid(alert.camera_id)
+    && isValidOccurredAt(alert.occurred_at)
     && isNonEmptyString(alert.defect_class)
     && typeof alert.confidence === "number"
     && Number.isFinite(alert.confidence)
@@ -59,6 +61,22 @@ function isEnvelope(value: unknown): value is InspectionAlertEnvelope {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function isCanonicalUuid(value: unknown): value is string {
+  return isNonEmptyString(value) && CANONICAL_UUID.test(value);
+}
+
+function isValidOccurredAt(value: unknown): value is string {
+  if (!isNonEmptyString(value)) return false;
+  const parts = ISO_DATETIME_WITH_TIMEZONE.exec(value);
+  if (!parts) return false;
+  const year = Number(parts[1]);
+  const month = Number(parts[2]);
+  const day = Number(parts[3]);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return year >= 1 && day >= 1 && day <= daysInMonth[month - 1] && Number.isFinite(Date.parse(value));
 }
 
 /**

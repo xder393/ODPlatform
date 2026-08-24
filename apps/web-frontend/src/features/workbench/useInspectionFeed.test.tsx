@@ -5,6 +5,8 @@ import { useInspectionFeed } from "./useInspectionFeed";
 
 const ACTOR_A = "11111111-1111-4111-8111-111111111111";
 const ACTOR_B = "22222222-2222-4222-8222-222222222222";
+const EVENT_A = "40000000-0000-4000-8000-000000000001";
+const EVENT_B = "40000000-0000-4000-8000-000000000002";
 
 const cursorKey = (actorId: string) => `odp_alert_cursor:${actorId}`;
 
@@ -12,7 +14,7 @@ function tokenFor(actorId: string): string {
   return `header.${btoa(JSON.stringify({ sub: actorId }))}.signature`;
 }
 
-function envelope(cursor: string, eventId = `event-${cursor}`) {
+function envelope(cursor: string, eventId = EVENT_A) {
   return {
     cursor,
     alert: {
@@ -71,7 +73,7 @@ describe("useInspectionFeed", () => {
     expect(FakeWebSocket.instances[0].url).toContain("ticket=ticket-1");
     expect(FakeWebSocket.instances[0].url).not.toContain(token);
     expect(FakeWebSocket.instances[0].url).not.toContain("token=");
-    expect(result.current.alerts.map((alert) => alert.event_id)).toEqual(["event-12"]);
+    expect(result.current.alerts.map((alert) => alert.event_id)).toEqual([EVENT_A]);
     expect(localStorage.getItem(cursorKey(ACTOR_A))).toBe("12");
   });
 
@@ -93,11 +95,11 @@ describe("useInspectionFeed", () => {
     );
 
     act(() => {
-      FakeWebSocket.instances[0].onmessage?.({ data: JSON.stringify(envelope("45", "duplicate")) } as MessageEvent<string>);
-      FakeWebSocket.instances[0].onmessage?.({ data: JSON.stringify(envelope("43", "duplicate")) } as MessageEvent<string>);
+      FakeWebSocket.instances[0].onmessage?.({ data: JSON.stringify(envelope("45", EVENT_B)) } as MessageEvent<string>);
+      FakeWebSocket.instances[0].onmessage?.({ data: JSON.stringify(envelope("43", EVENT_B)) } as MessageEvent<string>);
     });
 
-    await waitFor(() => expect(result.current.alerts.map((alert) => alert.event_id)).toEqual(["duplicate"]));
+    await waitFor(() => expect(result.current.alerts.map((alert) => alert.event_id)).toEqual([EVENT_B]));
     expect(localStorage.getItem(cursorKey(ACTOR_A))).toBe("45");
   });
 
@@ -142,15 +144,15 @@ describe("useInspectionFeed", () => {
     expect(requestSignal?.aborted).toBe(true);
   });
 
-  it("rejects malformed REST and WebSocket envelopes without mutating UI, dedupe state, or cursor", async () => {
+  it("rejects malformed REST and WebSocket UUID/date envelopes without mutating UI, dedupe state, or cursor", async () => {
     localStorage.setItem("odp_token", tokenFor(ACTOR_A));
-    const invalidRest = {
-      cursor: "broken-rest",
-      alert: { ...envelope("ignored").alert, confidence: Number.NaN },
-    };
+    const invalidRest = [
+      { cursor: "bad-rest-uuid", alert: { ...envelope("ignored").alert, organization_id: "not-a-uuid" } },
+      { cursor: "bad-rest-date", alert: { ...envelope("ignored").alert, occurred_at: "2026-02-30T12:00:00Z" } },
+    ];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       if (String(input) === "/api/v1/inspection-events") {
-        return { ok: true, json: async () => ({ items: [invalidRest], next_cursor: "broken-rest" }) };
+        return { ok: true, json: async () => ({ items: invalidRest, next_cursor: "bad-rest-date" }) };
       }
       return { ok: true, json: async () => ({ ticket: "ticket-validation", expires_in: 60 }) };
     }));
@@ -162,13 +164,37 @@ describe("useInspectionFeed", () => {
 
     act(() => {
       FakeWebSocket.instances[0].onmessage?.({
-        data: JSON.stringify({ cursor: "broken-ws", alert: { ...envelope("ignored").alert, event_id: "", confidence: 1.2 } }),
+        data: JSON.stringify({ cursor: "bad-ws-uuid", alert: { ...envelope("ignored", EVENT_B).alert, event_id: "not-a-uuid" } }),
       } as MessageEvent<string>);
-      FakeWebSocket.instances[0].onmessage?.({ data: JSON.stringify(envelope("valid", "same-id")) } as MessageEvent<string>);
+      FakeWebSocket.instances[0].onmessage?.({
+        data: JSON.stringify({ cursor: "bad-ws-date", alert: { ...envelope("ignored", EVENT_B).alert, occurred_at: "not-a-date" } }),
+      } as MessageEvent<string>);
+      FakeWebSocket.instances[0].onmessage?.({ data: JSON.stringify(envelope("valid", EVENT_B)) } as MessageEvent<string>);
     });
 
-    await waitFor(() => expect(result.current.alerts.map((alert) => alert.event_id)).toEqual(["same-id"]));
+    await waitFor(() => expect(result.current.alerts.map((alert) => alert.event_id)).toEqual([EVENT_B]));
     expect(localStorage.getItem(cursorKey(ACTOR_A))).toBe("valid");
+  });
+
+  it("accepts canonical UUIDs permitted by the shared schema regardless of case or version nibble", async () => {
+    localStorage.setItem("odp_token", tokenFor(ACTOR_A));
+    const schemaValid = {
+      cursor: "schema-valid",
+      alert: {
+        ...envelope("ignored").alert,
+        event_id: "00000000-0000-0000-0000-000000000001",
+        organization_id: "10000000-0000-4000-8000-000000000001".toUpperCase(),
+        camera_id: "30000000-0000-4000-8000-000000000001".toUpperCase(),
+      },
+    };
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/v1/inspection-events") return { ok: true, json: async () => ({ items: [schemaValid], next_cursor: "schema-valid" }) };
+      return { ok: true, json: async () => ({ ticket: "ticket-schema", expires_in: 60 }) };
+    }));
+
+    const { result } = renderHook(() => useInspectionFeed("2026-01-01T00:00:00Z"));
+    await waitFor(() => expect(result.current.alerts.map((alert) => alert.event_id)).toEqual([schemaValid.alert.event_id]));
+    expect(localStorage.getItem(cursorKey(ACTOR_A))).toBe("schema-valid");
   });
 
   it("uses a fresh ticket for every reconnect, bounds backoff, and resets only after stability", async () => {
@@ -185,16 +211,34 @@ describe("useInspectionFeed", () => {
     expect(FakeWebSocket.instances).toHaveLength(1);
 
     for (const delay of [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000]) {
+      const socketsBeforeDelay = FakeWebSocket.instances.length;
+      const ticketsBeforeDelay = tickets;
       act(() => FakeWebSocket.instances.at(-1)?.onclose?.());
-      await vi.advanceTimersByTimeAsync(delay);
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      expect(FakeWebSocket.instances).toHaveLength(socketsBeforeDelay);
+      expect(tickets).toBe(ticketsBeforeDelay);
+      await vi.advanceTimersByTimeAsync(1);
       expect(FakeWebSocket.instances).toHaveLength(tickets);
       expect(FakeWebSocket.instances.at(-1)?.url).toContain(`ticket=ticket-${tickets}`);
     }
 
     act(() => FakeWebSocket.instances.at(-1)?.onopen?.());
+    await vi.advanceTimersByTimeAsync(4_999);
+    act(() => FakeWebSocket.instances.at(-1)?.onclose?.());
+    const socketsBeforeUnstableClose = FakeWebSocket.instances.length;
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(FakeWebSocket.instances).toHaveLength(socketsBeforeUnstableClose);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(FakeWebSocket.instances).toHaveLength(socketsBeforeUnstableClose + 1);
+
+    act(() => FakeWebSocket.instances.at(-1)?.onopen?.());
     await vi.advanceTimersByTimeAsync(5_000);
     act(() => FakeWebSocket.instances.at(-1)?.onclose?.());
-    await vi.advanceTimersByTimeAsync(1_000);
+    const socketsBeforeStableClose = FakeWebSocket.instances.length;
+    await vi.advanceTimersByTimeAsync(999);
+    expect(FakeWebSocket.instances).toHaveLength(socketsBeforeStableClose);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(FakeWebSocket.instances).toHaveLength(socketsBeforeStableClose + 1);
     expect(FakeWebSocket.instances.at(-1)?.url).toContain(`ticket=ticket-${tickets}`);
   });
 
@@ -212,7 +256,11 @@ describe("useInspectionFeed", () => {
     for (const delay of [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000]) {
       await vi.advanceTimersByTimeAsync(0);
       expect(FakeWebSocket.instances).toHaveLength(0);
-      await vi.advanceTimersByTimeAsync(delay);
+      const attemptsBeforeDelay = ticketAttempts;
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      expect(ticketAttempts).toBe(attemptsBeforeDelay);
+      expect(FakeWebSocket.instances).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(1);
     }
     expect(ticketAttempts).toBe(8);
     expect(FakeWebSocket.instances).toHaveLength(0);

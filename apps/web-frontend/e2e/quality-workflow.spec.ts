@@ -1,5 +1,11 @@
 import { expect, test, type WebSocket as PlaywrightWebSocket } from "@playwright/test";
 
+declare global {
+  interface Window {
+    __odpInspectionSocketOpenUrls?: string[];
+  }
+}
+
 /**
  * 确定性闭环：登录 → 实时告警 → 选中工单 → AI 处置建议（可信度 + 引用来源）
  * → 确认复检（时间线 待确认 → 复核中）→ 完成处置（状态已处置）。
@@ -8,6 +14,25 @@ import { expect, test, type WebSocket as PlaywrightWebSocket } from "@playwright
  * 服务由 CI 的 docker compose 统一拉起（E2E_BASE_URL 指向 nginx 前端入口）。
  */
 test("质检员在同一实时连接中接收新告警并完成处置", async ({ page }) => {
+  await page.addInitScript(() => {
+    const NativeWebSocket = window.WebSocket;
+    window.__odpInspectionSocketOpenUrls = [];
+    class ObservedWebSocket extends NativeWebSocket {
+      constructor(url: string | URL, protocols?: string | string[]) {
+        super(url, protocols);
+        this.addEventListener("open", () => {
+          if (this.url.includes("/ws/inspection-events?ticket=")) {
+            window.__odpInspectionSocketOpenUrls?.push(this.url);
+          }
+        }, { once: true });
+      }
+    }
+    // `extends` preserves the native prototype chain and inherited static
+    // constants (CONNECTING/OPEN/CLOSING/CLOSED); invalid construction still
+    // follows the browser's native constructor validation through `super`.
+    Object.defineProperty(ObservedWebSocket, "name", { value: "WebSocket" });
+    window.WebSocket = ObservedWebSocket;
+  });
   const receivedFrames: string[] = [];
   let selectedSocket: PlaywrightWebSocket | undefined;
   const inspectionSocket = new Promise<PlaywrightWebSocket>((resolve) => {
@@ -36,9 +61,9 @@ test("质检员在同一实时连接中接收新告警并完成处置", async ({
   await expect(page.getByRole("heading", { name: "实时质检工作台" })).toBeVisible();
   await expect(page.getByText("疑似表面划痕").first()).toBeVisible();
   const connectedSocket = await inspectionSocket;
-  // The server sends seeded backlog only after the handshake accepts this exact
-  // socket, so receiving a frame proves its connection is established.
-  await expect.poll(() => receivedFrames.length).toBeGreaterThan(0);
+  await page.waitForFunction(
+    () => window.__odpInspectionSocketOpenUrls?.some((url) => url.includes("/ws/inspection-events?ticket=")),
+  );
   postLoginNavigations = 0;
   postLoginLoads = 0;
   const navigationEntries = await page.evaluate(
