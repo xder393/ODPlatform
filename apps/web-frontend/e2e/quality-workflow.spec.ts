@@ -107,8 +107,8 @@ test("质检员在同一实时连接中接收新告警并完成处置", async ({
   await page.getByRole("button", { name: /待确认/ }).first().click();
   const advicePanel = page.getByRole("region", { name: "AI 处置建议" });
   await expect(advicePanel.getByText("可信度高")).toBeVisible();
-  await expect(advicePanel.getByText(/文档版本 \d+/)).toBeVisible();
-  await expect(advicePanel.getByText(/第 \d+ 页第 \d+ 段/)).toBeVisible();
+  await expect(advicePanel.getByText(/文档版本 \d+/).first()).toBeVisible();
+  await expect(advicePanel.getByText(/第 \d+ 页第 \d+ 段/).first()).toBeVisible();
 
   // 5. 确认复检 → 时间线出现「待确认 → 复核中」
   await page.getByRole("button", { name: "确认复检" }).click();
