@@ -73,6 +73,13 @@ class RAGRetrievalPort(Protocol):
 class KnowledgeIndexPort(RAGRetrievalPort, Protocol):
     """The persistence boundary used by document ingestion."""
 
+    def find_indexed_document(
+        self,
+        organization_id: UUID,
+        source_name: str,
+        content_sha256: str,
+    ) -> KnowledgeDocument | None: ...
+
     def next_version(self, organization_id: UUID, source_name: str) -> int: ...
 
     def index(

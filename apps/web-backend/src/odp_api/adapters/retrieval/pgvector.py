@@ -9,6 +9,7 @@ import re
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
+from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
@@ -131,6 +132,29 @@ class PgVectorPostgresAdapter:
     ) -> None:
         self._executor = executor
         self._embed = embed
+
+    def find_indexed_document(
+        self,
+        organization_id: UUID,
+        source_name: str,
+        content_sha256: str,
+    ) -> KnowledgeDocument | None:
+        rows = self._executor.fetch_all(
+            """SELECT document_id, organization_id, source_name, filename, version, media_type,
+                      content_sha256, status, indexed_at, evidence_kind, applicable_line_id,
+                      product_category, failure_reason
+               FROM knowledge_documents
+               WHERE organization_id = %(organization_id)s AND source_name = %(source_name)s
+                 AND content_sha256 = %(content_sha256)s AND status = 'INDEXED'
+               ORDER BY version DESC
+               LIMIT 1""",
+            {
+                "organization_id": organization_id,
+                "source_name": source_name,
+                "content_sha256": content_sha256,
+            },
+        )
+        return _knowledge_document_from_row(rows[0]) if rows else None
 
     def next_version(self, organization_id: UUID, source_name: str) -> int:
         rows = self._executor.fetch_all(
@@ -264,6 +288,31 @@ def _document_parameters(document: KnowledgeDocument) -> dict[str, object]:
     }
 
 
+def _knowledge_document_from_row(row: Mapping[str, object]) -> KnowledgeDocument:
+    indexed_at = row["indexed_at"]
+    if not isinstance(indexed_at, datetime):
+        indexed_at = datetime.fromisoformat(str(indexed_at).replace("Z", "+00:00"))
+    return KnowledgeDocument(
+        document_id=UUID(str(row["document_id"])),
+        organization_id=UUID(str(row["organization_id"])),
+        source_name=str(row["source_name"]),
+        filename=str(row["filename"]),
+        version=int(row["version"]),
+        media_type=str(row["media_type"]),
+        content_sha256=str(row["content_sha256"]),
+        status=str(row["status"]),
+        indexed_at=indexed_at,
+        evidence_kind=(str(row["evidence_kind"]) if row["evidence_kind"] is not None else None),
+        applicable_line_id=(
+            UUID(str(row["applicable_line_id"])) if row["applicable_line_id"] is not None else None
+        ),
+        product_category=(
+            str(row["product_category"]) if row["product_category"] is not None else None
+        ),
+        failure_reason=(str(row["failure_reason"]) if row["failure_reason"] is not None else None),
+    )
+
+
 def _vector_parameter(vector: Sequence[float]) -> str:
     if len(vector) != PGVECTOR_EMBEDDING_DIMENSIONS:
         raise ValueError(f"Embeddings must contain exactly {PGVECTOR_EMBEDDING_DIMENSIONS} dimensions.")
@@ -307,6 +356,22 @@ class PgVectorRetrievalAdapter:
         self._documents: dict[UUID, KnowledgeDocument] = {}
         self._parents: dict[UUID, KnowledgeParentChunk] = {}
         self._chunks: dict[UUID, KnowledgeChunk] = {}
+
+    def find_indexed_document(
+        self,
+        organization_id: UUID,
+        source_name: str,
+        content_sha256: str,
+    ) -> KnowledgeDocument | None:
+        matches = (
+            document
+            for document in self._documents.values()
+            if document.organization_id == organization_id
+            and document.source_name == source_name
+            and document.content_sha256 == content_sha256
+            and document.status == "INDEXED"
+        )
+        return max(matches, key=lambda document: document.version, default=None)
 
     def next_version(self, organization_id: UUID, source_name: str) -> int:
         versions = [

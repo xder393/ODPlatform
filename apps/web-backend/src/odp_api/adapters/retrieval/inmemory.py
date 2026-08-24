@@ -29,6 +29,22 @@ class InMemoryKnowledgeIndex:
         self._parents: dict[UUID, KnowledgeParentChunk] = {}
         self._chunks: dict[UUID, KnowledgeChunk] = {}
 
+    def find_indexed_document(
+        self,
+        organization_id: UUID,
+        source_name: str,
+        content_sha256: str,
+    ) -> KnowledgeDocument | None:
+        matches = (
+            document
+            for document in self._documents.values()
+            if document.organization_id == organization_id
+            and document.source_name == source_name
+            and document.content_sha256 == content_sha256
+            and document.status == "INDEXED"
+        )
+        return max(matches, key=lambda document: document.version, default=None)
+
     def next_version(self, organization_id: UUID, source_name: str) -> int:
         versions = [
             document.version

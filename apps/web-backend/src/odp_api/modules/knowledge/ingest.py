@@ -66,6 +66,13 @@ class KnowledgeIngestionService:
         Parser failures intentionally produce a durable ``FAILED`` document rather
         than placing partially extracted chunks into a retrieval provider.
         """
+        content_sha256 = hashlib.sha256(_normalised_raw_content(content)).hexdigest()
+        existing = self._index.find_indexed_document(
+            organization_id, source_name, content_sha256
+        )
+        if existing is not None:
+            return existing
+
         media_type = content_type or _media_type_for(filename)
         now = datetime.now(UTC)
         document = KnowledgeDocument(
@@ -75,7 +82,7 @@ class KnowledgeIngestionService:
             filename=filename,
             version=self._index.next_version(organization_id, source_name),
             media_type=media_type,
-            content_sha256=hashlib.sha256(content).hexdigest(),
+            content_sha256=content_sha256,
             status="INDEXED",
             indexed_at=now,
             evidence_kind=evidence_kind,
@@ -135,6 +142,16 @@ class KnowledgeIngestionService:
                 if start + self._chunk_size_words >= len(words):
                     break
         return parents, children
+
+
+def _normalised_raw_content(content: bytes) -> bytes:
+    """Canonicalize line endings before hashing original upload bytes.
+
+    The hash deliberately precedes PDF/DOCX extraction: parser output can vary
+    across library versions, while normalized upload bytes are stable and keep
+    source revisions auditable.
+    """
+    return content.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
 
 
 def _media_type_for(filename: str) -> str:

@@ -12,6 +12,7 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 WEB_BACKEND_SRC = Path(__file__).parents[3] / "src"
 sys.path.insert(0, str(WEB_BACKEND_SRC))
 
+from odp_api.adapters.retrieval.inmemory import InMemoryKnowledgeIndex
 from odp_api.adapters.retrieval.pgvector import (
     PGVECTOR_EMBEDDING_DIMENSIONS,
     PgVectorPostgresAdapter,
@@ -56,8 +57,10 @@ def make_two_page_pdf() -> bytes:
     return output.getvalue()
 
 
-def make_service() -> tuple[KnowledgeIngestionService, PgVectorRetrievalAdapter]:
-    index = PgVectorRetrievalAdapter()
+def make_service(
+    index: PgVectorRetrievalAdapter | InMemoryKnowledgeIndex | None = None,
+) -> tuple[KnowledgeIngestionService, PgVectorRetrievalAdapter | InMemoryKnowledgeIndex]:
+    index = index or PgVectorRetrievalAdapter()
     return KnowledgeIngestionService(index, chunk_size_words=4, overlap_words=2), index
 
 
@@ -123,6 +126,35 @@ class RecordingPostgresExecutor:
         self.calls.append((sql, parameters))
 
 
+class IndexedDocumentPostgresExecutor:
+    def __init__(self, document: KnowledgeDocument) -> None:
+        self.document = document
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def fetch_all(self, sql: str, parameters: dict[str, object]) -> list[dict[str, object]]:
+        self.calls.append((sql, parameters))
+        return [
+            {
+                "document_id": self.document.document_id,
+                "organization_id": self.document.organization_id,
+                "source_name": self.document.source_name,
+                "filename": self.document.filename,
+                "version": self.document.version,
+                "media_type": self.document.media_type,
+                "content_sha256": self.document.content_sha256,
+                "status": self.document.status,
+                "indexed_at": self.document.indexed_at,
+                "evidence_kind": self.document.evidence_kind,
+                "applicable_line_id": self.document.applicable_line_id,
+                "product_category": self.document.product_category,
+                "failure_reason": self.document.failure_reason,
+            }
+        ]
+
+    def execute(self, sql: str, parameters: dict[str, object]) -> None:
+        raise AssertionError(f"Unexpected write: {sql}")
+
+
 def test_ingests_a_two_page_pdf_with_parent_child_overlap_and_provenance() -> None:
     service, index = make_service()
     organization_id = uuid4()
@@ -177,13 +209,85 @@ def test_new_source_version_supersedes_the_previous_document() -> None:
         organization_id=organization_id,
         source_name="press rules",
         filename="press-rules-revised.pdf",
-        content=make_two_page_pdf(),
+        content=make_two_page_pdf() + b"\n% revised source content\n",
     )
 
     assert index.document(first.document_id).status == "SUPERSEDED"
     assert second.status == "INDEXED"
     assert (first.version, second.version) == (1, 2)
     assert index.document(first.document_id).status == "SUPERSEDED"
+
+
+@pytest.mark.parametrize("index", [PgVectorRetrievalAdapter(), InMemoryKnowledgeIndex()])
+def test_same_content_reuses_one_active_document_with_stable_provenance(index) -> None:
+    service, index = make_service(index)
+    organization_id = uuid4()
+    content = make_two_page_pdf()
+
+    first = service.ingest(
+        organization_id=organization_id,
+        source_name="press rules",
+        filename="press-rules.pdf",
+        content=content,
+    )
+    first_provenance = [
+        (chunk.document_id, chunk.document_version, chunk.page_number, chunk.paragraph_number)
+        for chunk in index.search("pressure limit", organization_id, RetrievalFilters())
+    ]
+    second = service.ingest(
+        organization_id=organization_id,
+        source_name="press rules",
+        filename="press-rules.pdf",
+        content=content,
+    )
+
+    assert second == first
+    assert len(index._documents) == 1
+    assert [document.version for document in index._documents.values()] == [1]
+    assert [document.status for document in index._documents.values()] == ["INDEXED"]
+    assert [
+        (chunk.document_id, chunk.document_version, chunk.page_number, chunk.paragraph_number)
+        for chunk in index.search("pressure limit", organization_id, RetrievalFilters())
+    ] == first_provenance
+
+
+def test_line_ending_normalized_upload_bytes_reuse_the_same_document() -> None:
+    service, index = make_service()
+    organization_id = uuid4()
+    raw_pdf = make_two_page_pdf()
+
+    first = service.ingest(
+        organization_id=organization_id,
+        source_name="press rules",
+        filename="press-rules.pdf",
+        content=raw_pdf + b"\r\n% stable seed comment\r\n",
+    )
+    second = service.ingest(
+        organization_id=organization_id,
+        source_name="press rules",
+        filename="press-rules.pdf",
+        content=raw_pdf + b"\n% stable seed comment\n",
+    )
+
+    assert second == first
+    assert len(index._documents) == 1
+
+
+@pytest.mark.parametrize("index", [PgVectorRetrievalAdapter(), InMemoryKnowledgeIndex()])
+def test_identical_content_is_not_reused_across_tenants(index) -> None:
+    service, index = make_service(index)
+    content = make_two_page_pdf()
+
+    first = service.ingest(
+        organization_id=uuid4(), source_name="press rules", filename="press-rules.pdf", content=content
+    )
+    second = service.ingest(
+        organization_id=uuid4(), source_name="press rules", filename="press-rules.pdf", content=content
+    )
+
+    assert first.document_id != second.document_id
+    assert (first.version, second.version) == (1, 1)
+    assert sorted(document.status for document in index._documents.values()) == ["INDEXED", "INDEXED"]
 
 
 def test_ingests_a_valid_docx_and_retains_paragraph_provenance() -> None:
@@ -381,3 +485,32 @@ def test_postgres_index_persists_tenant_scoped_document_parent_and_child_rows() 
     with pytest.raises(ValueError, match="64 dimensions"):
         rejected_adapter.index(document, [parent], [child])
     assert rejected_executor.calls == []
+
+
+def test_postgres_adapter_reuses_only_the_matching_indexed_document() -> None:
+    organization_id = uuid4()
+    document = KnowledgeDocument(
+        document_id=uuid4(),
+        organization_id=organization_id,
+        source_name="press rules",
+        filename="press-rules.pdf",
+        version=3,
+        media_type="application/pdf",
+        content_sha256="b" * 64,
+        status="INDEXED",
+        indexed_at=datetime.now(UTC),
+    )
+    executor = IndexedDocumentPostgresExecutor(document)
+    adapter = PgVectorPostgresAdapter(executor, embed=lambda _: valid_embedding())
+
+    reused = adapter.find_indexed_document(organization_id, "press rules", "b" * 64)
+
+    assert reused == document
+    sql, parameters = executor.calls[0]
+    assert "content_sha256 = %(content_sha256)s" in sql
+    assert "status = 'INDEXED'" in sql
+    assert parameters == {
+        "organization_id": organization_id,
+        "source_name": "press rules",
+        "content_sha256": "b" * 64,
+    }
