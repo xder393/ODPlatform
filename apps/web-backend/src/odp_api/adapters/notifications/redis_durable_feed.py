@@ -29,6 +29,8 @@ class RedisDurableInspectionAlertFeed:
         return self._facts.list(organization_id, after_cursor, limit, authorized_line_ids)
 
     async def subscribe(self, after_cursor: str | None) -> AsyncIterator[StoredInspectionAlert]:
+        if after_cursor is not None and (not after_cursor.isdigit() or int(after_cursor) < 0):
+            raise ValueError("invalid cursor")
         cursor = int(after_cursor or "0")
         stream_cursor = "$"
         while True:

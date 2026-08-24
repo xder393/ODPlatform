@@ -30,8 +30,13 @@ def upgrade() -> None:
         op.create_index("ix_inspection_alerts_organization_id", "inspection_alerts", ["organization_id"])
         op.create_index("ix_inspection_alerts_line_id", "inspection_alerts", ["line_id"])
         return
+    inspector = sa.inspect(op.get_bind())
+    old_unique = next(
+        constraint["name"] for constraint in inspector.get_unique_constraints("inspection_alerts")
+        if constraint.get("column_names") == ["event_id"]
+    )
     with op.batch_alter_table("inspection_alerts") as batch:
-        batch.drop_constraint("uq_inspection_alerts_event_id", type_="unique")
+        batch.drop_constraint(old_unique, type_="unique")
         batch.create_unique_constraint("uq_inspection_alerts_org_event", ["organization_id", "event_id"])
 
 

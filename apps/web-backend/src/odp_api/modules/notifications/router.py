@@ -41,6 +41,8 @@ class InMemoryInspectionAlertRepository:
     def list(
         self, organization_id: UUID, after_cursor: str | None = None, limit: int = 100, authorized_line_ids=None
     ) -> list[StoredInspectionAlert]:
+        if after_cursor is not None and (not after_cursor.isdigit() or int(after_cursor) < 0):
+            raise ValueError("invalid cursor")
         return [
             stored
             for stored in self._alerts

@@ -59,3 +59,12 @@ Commit: `feat: stream durable inspection alerts in realtime` (recorded after thi
   sent backlog item; live events remain excluded from that counter.
 - Added idle gauge-lifecycle and concurrent duplicate-publish coverage.
 - Focused: 19 passed. Full backend: 125 passed, 1 existing skip.
+
+## Fix round 2 (migration/interface)
+
+- Restored immutable 0004 migration contents and moved tenant-scoped uniqueness
+  conversion entirely into 0005; PostgreSQL looks up the actual old unique
+  constraint name while SQLite rebuilds the table safely.
+- The feed port now declares line authorization filtering, and provider cursor
+  parsing rejects negative/malformed cursors consistently.
+- Focused: 19 passed. Full backend: 125 passed, 1 existing skip.
