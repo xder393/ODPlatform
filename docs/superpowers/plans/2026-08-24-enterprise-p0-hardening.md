@@ -72,8 +72,8 @@
 
 ```python
 def test_sqlite_actor_and_credential_survive_new_session(tmp_path):
-    _, sessions = create_engine_and_session(f"sqlite:///{tmp_path / 'runtime.db'}")
-    Base.metadata.create_all(sessions.kw["bind"])
+    engine, sessions = create_engine_and_session(f"sqlite:///{tmp_path / 'runtime.db'}")
+    Base.metadata.create_all(engine)
     seed_business_data(sessions, build_demo_seed(), hasher.hash)
     actor = SqlAlchemyActorRepository(sessions).get_by_email("inspector@example.test")
     assert actor is not None
@@ -159,12 +159,12 @@ def test_transition_history_and_audit_survive_app_restart(sqlite_settings, seed)
         assert payload["history"][-1]["to_status"] == "IN_REVIEW"
         assert restarted.app.state.audit_service.verify_organization_chain(DEMO_ORG_ID).is_valid
 
-def test_audit_failure_rolls_back_case_and_history(uow_factory):
-    service = CaseApplicationService(uow_factory)
+def test_audit_failure_rolls_back_case_and_history(failing_audit_uow_factory):
+    service = CaseApplicationService(failing_audit_uow_factory)
     with pytest.raises(AuditWriteError):
-        service.transition(CASE_ID, "IN_REVIEW", ACTOR, context(), fail_audit=True)
-    assert load_case(uow_factory).status == "PENDING_CONFIRMATION"
-    assert load_history(uow_factory) == []
+        service.transition(CASE_ID, "IN_REVIEW", ACTOR, context())
+    assert load_case(failing_audit_uow_factory).status == "PENDING_CONFIRMATION"
+    assert load_history(failing_audit_uow_factory) == []
 ```
 
 - [ ] **Step 2: Run tests and verify RED.**
@@ -409,7 +409,7 @@ Run Alembic before seed/start, set `ODP_DATABASE_URL=postgresql+psycopg://odp:od
 
 - [ ] **Step 5: Extend Playwright and CI.**
 
-The E2E test logs in, observes an alert, causes a new alert to be published after the socket is open through a deterministic test/demo endpoint guarded to non-production environments, verifies it arrives without page reload, transitions a case, restarts the API container, and verifies status/history remain. CI runs Alembic, backend tests, frontend tests/build, Ruff for newly touched backend/frontend integration files, Compose E2E and teardown.
+The Playwright E2E test logs in, observes an alert, causes a new alert to be published after the socket is open through a deterministic test/demo endpoint guarded to non-production environments, verifies it arrives without page reload, and transitions a case. After Playwright completes, a CI shell step restarts the API container and calls an authenticated persistence-check endpoint sequence to verify status/history remain. CI runs Alembic, backend tests, frontend tests/build, Ruff for newly touched backend/frontend integration files, Compose E2E, restart verification and teardown.
 
 - [ ] **Step 6: Run the complete verification set.**
 
