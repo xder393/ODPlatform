@@ -4,7 +4,7 @@ services:
     working_dir: /workspace
     volumes:
       - ..:/workspace
-    command: ["sh", "-c", "pip install -e /workspace/apps/web-backend -e /workspace/packages/shared-schemas && python -m odp_api.database_roles --bootstrap-only && python -m odp_api.migrations && (cd /workspace/apps/web-backend && alembic upgrade head) && python -m odp_api.database_roles && ODP_DATABASE_URL=$$ODP_RUNTIME_DATABASE_URL python -m odp_api.seed && ODP_POSTGRES_URL=$$ODP_RUNTIME_POSTGRES_URL python -m odp_api.seed_knowledge"]
+    command: ["sh", "-c", "pip install -e /workspace/apps/web-backend -e /workspace/packages/shared-schemas && python -m odp_api.database_roles --bootstrap-only && python -m odp_api.migrations && (cd /workspace/apps/web-backend && alembic upgrade head) && python -m odp_api.database_roles && ODP_DATABASE_URL=$$ODP_RUNTIME_DATABASE_URL python -m odp_api.seed && ODP_DATABASE_URL=$$ODP_RUNTIME_DATABASE_URL python -m odp_api.seed_alerts && ODP_POSTGRES_URL=$$ODP_RUNTIME_POSTGRES_URL python -m odp_api.seed_knowledge"]
     environment:
       # Owner credentials remain compatible with existing postgres-data volumes.
       ODP_RUNTIME_DATABASE_URL: postgresql+psycopg://odp_app:odp_app_dev@postgres:5432/odp

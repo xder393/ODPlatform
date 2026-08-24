@@ -283,10 +283,6 @@ def create_app(
         )
     )
     app.include_router(create_advice_router(case_repository, advice_service))
-    if managed_database:
-        for case in initial_cases:
-            for event in case.inspection_events:
-                inspection_alert_feed.publish(event.to_alert(), event.line_id)
     app.include_router(
         create_notifications_router(inspection_alert_feed)
     )
