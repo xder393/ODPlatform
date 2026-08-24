@@ -38,7 +38,11 @@ class CorrelationIdMiddleware:
         if scope["type"] not in {"http", "websocket"}:
             await self._app(scope, receive, send)
             return
-        correlation_id = Headers(scope=scope).get(CORRELATION_ID_HEADER) or str(uuid.uuid4())
+        supplied_correlation_id = Headers(scope=scope).get(CORRELATION_ID_HEADER)
+        try:
+            correlation_id = str(uuid.UUID(supplied_correlation_id)) if supplied_correlation_id else str(uuid.uuid4())
+        except ValueError:
+            correlation_id = str(uuid.uuid4())
         response_status: list[int | None] = [None]
 
         async def send_with_correlation(message) -> None:

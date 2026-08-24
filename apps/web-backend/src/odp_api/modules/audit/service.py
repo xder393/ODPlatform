@@ -22,6 +22,10 @@ class AuditAppendBlocked(RuntimeError):
     """Raised while a failed verification puts an organization in P0 hold."""
 
 
+class AuditWriteError(RuntimeError):
+    """Raised by an audit persistence adapter when an append cannot be stored."""
+
+
 class AuditRecoveryRejected(RuntimeError):
     """Raised when recovery is requested before the organization chain is valid."""
 
@@ -122,17 +126,20 @@ class AuditService:
         self._health_lock = RLock()
 
     def append(self, command: AuditCommand) -> AuditLog:
+        self.ensure_append_allowed(command.organization_id)
+        return self.repository.append_under_head_lock(
+            command,
+            lambda sequence, previous_hash: audit_log_from_command(
+                command, sequence=sequence, previous_hash=previous_hash
+            ),
+        )
+
+    def ensure_append_allowed(self, organization_id: UUID) -> None:
         with self._health_lock:
-            if command.organization_id in self._blocked_organizations:
+            if organization_id in self._blocked_organizations:
                 raise AuditAppendBlocked(
-                    f"Audit appends for organization {command.organization_id} are blocked pending explicit recovery."
+                    f"Audit appends for organization {organization_id} are blocked pending explicit recovery."
                 )
-            return self.repository.append_under_head_lock(
-                command,
-                lambda sequence, previous_hash: audit_log_from_command(
-                    command, sequence=sequence, previous_hash=previous_hash
-                ),
-            )
 
     def verify_organization_chain(self, organization_id: UUID) -> VerificationResult:
         from odp_api.modules.audit.verify import verify_organization_chain

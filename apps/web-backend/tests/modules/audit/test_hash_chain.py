@@ -181,7 +181,10 @@ def test_managed_daily_verifier_runs_and_blocks_a_failed_organization() -> None:
 
 
 def test_app_lifespan_starts_and_stops_the_managed_daily_full_verifier() -> None:
-    app = create_app(daily_verification_interval_seconds=0.001)
+    app = create_app(
+        daily_verification_interval_seconds=0.001,
+        audit_repository=InMemoryAuditRepository(),
+    )
     service = app.state.audit_service
     repository = service.repository
 

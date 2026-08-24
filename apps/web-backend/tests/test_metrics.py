@@ -24,7 +24,10 @@ from odp_api.settings import Settings
 
 
 def make_settings(tmp_path) -> Settings:
-    return Settings(task_database_path=str(tmp_path / "odp-tasks.sqlite3"))
+    return Settings(
+        database_url=f"sqlite:///{tmp_path / 'odp-runtime.sqlite3'}",
+        task_database_path=str(tmp_path / "odp-tasks.sqlite3"),
+    )
 
 
 def test_registry_renders_valid_prometheus_exposition_format() -> None:

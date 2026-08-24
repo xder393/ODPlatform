@@ -5,14 +5,14 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from odp_api.modules.ai_orchestration.service import AdviceResponse, AdviceService
-from odp_api.modules.cases.router import InMemoryCaseRepository
+from odp_api.modules.cases.ports import CaseRepositoryPort
 from odp_api.modules.identity.models import Actor
 from odp_api.modules.identity.policies import AuthorizationDenied, authorize
 from odp_api.modules.identity.service import get_current_actor
 
 
 def create_advice_router(
-    repository: InMemoryCaseRepository,
+    repository: CaseRepositoryPort,
     advice_service: AdviceService,
     actor_provider: Callable[[], Actor] = get_current_actor,
 ) -> APIRouter:

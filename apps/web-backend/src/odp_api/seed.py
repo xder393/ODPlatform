@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from io import BytesIO
 from typing import Literal
 from uuid import UUID, uuid5
@@ -229,6 +230,7 @@ def seed_business_data(
                         last_transition_actor_id=case.last_transition_actor_id,
                         line_id=case.line_id,
                         product_category=case.product_category,
+                        updated_at=datetime.now(UTC),
                     )
                 )
             for event in case.inspection_events:

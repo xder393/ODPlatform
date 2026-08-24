@@ -17,11 +17,12 @@ from odp_api.modules.identity.models import Actor, Role
 from odp_api.modules.identity.service import get_current_actor
 from odp_api.modules.inspection.models import DefectCase, InspectionEvent
 from odp_schemas.events import InspectionAlert
+from odp_api.settings import Settings
 
 
-def test_fixture_case_can_be_listed_with_reproducible_detection_metadata_and_reviewed() -> None:
+def test_fixture_case_can_be_listed_with_reproducible_detection_metadata_and_reviewed(tmp_path) -> None:
     """A missing fixture-to-case workflow or transition route makes this fail."""
-    app = create_app()
+    app = create_app(Settings(database_url=f"sqlite:///{tmp_path / 'runtime.db'}"))
     app.dependency_overrides[get_current_actor] = lambda: Actor(
         UUID("00000000-0000-0000-0000-000000000003"),
         UUID("00000000-0000-0000-0000-000000000001"),

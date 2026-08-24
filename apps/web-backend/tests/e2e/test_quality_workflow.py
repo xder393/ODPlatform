@@ -21,8 +21,16 @@ INSPECTOR_PASSWORD = DEMO_ACCOUNTS[0][1]
 E2E_SECRET = "e2e-demo-secret"
 
 
-def _demo_app(**overrides: object) -> "object":
-    return create_app(settings=Settings(auth_jwt_secret=E2E_SECRET), seed=build_demo_seed(), **overrides)
+def _demo_app(tmp_path, **overrides: object) -> "object":
+    return create_app(
+        settings=Settings(
+            auth_jwt_secret=E2E_SECRET,
+            database_url=f"sqlite:///{tmp_path / 'runtime.db'}",
+            task_database_path=str(tmp_path / "tasks.db"),
+        ),
+        seed=build_demo_seed(),
+        **overrides,
+    )
 
 
 def _login(client: TestClient) -> dict[str, str]:
@@ -34,8 +42,8 @@ def _login(client: TestClient) -> dict[str, str]:
     return {"Authorization": f"Bearer {response.json()['access_token']}"}
 
 
-def test_seeded_inspector_resolves_a_case_with_cited_advice_and_audit_trail() -> None:
-    app = _demo_app()
+def test_seeded_inspector_resolves_a_case_with_cited_advice_and_audit_trail(tmp_path) -> None:
+    app = _demo_app(tmp_path)
     client = TestClient(app)
     headers = _login(client)
 
@@ -96,7 +104,7 @@ def test_seeded_inspector_resolves_a_case_with_cited_advice_and_audit_trail() ->
     assert "case_resolution_seconds" in metrics_text
 
 
-def test_advice_is_tenant_scoped_across_organizations() -> None:
+def test_advice_is_tenant_scoped_across_organizations(tmp_path) -> None:
     """An actor from another organization cannot see this organization's cases."""
     seed = build_demo_seed()
     outsider = Actor(
@@ -107,7 +115,11 @@ def test_advice_is_tenant_scoped_across_organizations() -> None:
         email="outsider@example.test",
     )
     app = create_app(
-        settings=Settings(auth_jwt_secret=E2E_SECRET),
+        settings=Settings(
+            auth_jwt_secret=E2E_SECRET,
+            database_url=f"sqlite:///{tmp_path / 'runtime.db'}",
+            task_database_path=str(tmp_path / "tasks.db"),
+        ),
         seed=seed,
         actor_repository=InMemoryActorRepository(
             {**{actor.actor_id: actor for actor in seed.actors}, outsider.actor_id: outsider}

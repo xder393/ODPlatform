@@ -4,10 +4,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from odp_api.adapters.persistence.models import Base
-from odp_api.settings import Settings
-
 config = context.config
-config.set_main_option("sqlalchemy.url", Settings().database_url)
 target_metadata = Base.metadata
 
 
