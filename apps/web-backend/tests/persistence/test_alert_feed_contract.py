@@ -137,6 +137,14 @@ def test_alembic_upgrades_original_0004_alert_data_to_tenant_scoped_uniqueness(t
     engine.dispose()
 
 
+def test_fresh_alert_feed_migrations_match_sqlalchemy_metadata(tmp_path: Path) -> None:
+    """A model-only event_id index would make fresh Alembic environments drift."""
+    config = Config(str(Path(__file__).parents[2] / "alembic.ini"))
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{tmp_path / 'fresh.db'}")
+    command.upgrade(config, "head")
+    command.check(config)
+
+
 def test_authorized_line_filter_applies_before_limit(feed) -> None:
     """Post-limit filtering lets an inaccessible first page starve authorized events."""
     feed.publish(_alert(), uuid4())

@@ -134,7 +134,7 @@ class InspectionAlertFeedRow(Base):
     cursor: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     __table_args__ = (UniqueConstraint("organization_id", "event_id", name="uq_inspection_alerts_org_event"),)
 
-    event_id: Mapped[UUID] = mapped_column(Uuid, index=True)
+    event_id: Mapped[UUID] = mapped_column(Uuid)
     organization_id: Mapped[UUID] = mapped_column(Uuid, index=True)
     line_id: Mapped[UUID | None] = mapped_column(Uuid, index=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON)

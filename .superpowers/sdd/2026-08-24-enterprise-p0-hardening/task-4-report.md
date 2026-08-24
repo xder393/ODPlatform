@@ -122,3 +122,13 @@ Commit: `feat: stream durable inspection alerts in realtime` (recorded after thi
 - The feed port now declares line authorization filtering, and provider cursor
   parsing rejects negative/malformed cursors consistently.
 - Focused: 19 passed. Full backend: 125 passed, 1 existing skip.
+
+## Final metadata-drift verification
+
+- RED: fresh SQLite `alembic upgrade head` followed by `alembic check` detected
+  an un-migrated `ix_inspection_alerts_event_id` index.
+- GREEN: removed the redundant model-only index; composite `(organization_id,
+  event_id)` remains the idempotency key.
+- `test_fresh_alert_feed_migrations_match_sqlalchemy_metadata` now executes a
+  real fresh upgrade plus check. Final focused: 16 passed; `alembic check` has
+  no new operations; full backend: 137 passed, 1 existing skip.
