@@ -10,7 +10,18 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, true
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    true,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import Uuid
 
@@ -60,6 +71,9 @@ class DefectCaseRow(Base):
 
 class InspectionEventRow(Base):
     __tablename__ = "inspection_events"
+    __table_args__ = (
+        UniqueConstraint("source_result_id", name="uq_inspection_event_source_result"),
+    )
 
     event_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
     case_id: Mapped[UUID] = mapped_column(ForeignKey("defect_cases.case_id"), index=True)
@@ -73,6 +87,17 @@ class InspectionEventRow(Base):
     threshold: Mapped[float] = mapped_column(Float)
     input_frame_sha256: Mapped[str] = mapped_column(String(64))
     line_id: Mapped[UUID | None] = mapped_column(Uuid, index=True)
+    source_result_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            "published_inference_results.result_id",
+            name="fk_inspection_events_source_result",
+        ),
+        index=True,
+    )
+    evidence_artifact_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("frame_artifacts.artifact_id", name="fk_inspection_events_evidence_artifact"),
+        index=True,
+    )
 
 
 class CaseTransitionRow(Base):

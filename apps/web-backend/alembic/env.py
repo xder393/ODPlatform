@@ -1,11 +1,9 @@
-from __future__ import with_statement
-
 import os
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
-
+from odp_api.adapters.persistence import task_models as _task_models  # noqa: F401
 from odp_api.adapters.persistence.models import Base
+from sqlalchemy import engine_from_config, pool
 
 config = context.config
 target_metadata = Base.metadata
