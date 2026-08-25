@@ -43,6 +43,7 @@ class CameraInferenceStateRow(Base):
             name="uq_camera_inference_state_tenant_camera",
         ),
         CheckConstraint("ready_count >= 0", name="ck_camera_state_ready_nonnegative"),
+        CheckConstraint("ready_count <= 2", name="ck_camera_state_ready_maximum"),
         CheckConstraint("version >= 0", name="ck_camera_state_version_nonnegative"),
     )
 
@@ -78,7 +79,7 @@ class InspectionSessionRow(Base):
     session_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
     organization_id: Mapped[UUID] = mapped_column(Uuid, nullable=False, index=True)
     camera_id: Mapped[UUID] = mapped_column(Uuid, nullable=False, index=True)
-    line_id: Mapped[UUID | None] = mapped_column(Uuid, index=True)
+    line_id: Mapped[UUID] = mapped_column(Uuid, nullable=False, index=True)
     source_type: Mapped[str] = mapped_column(String(64), nullable=False)
     sanitized_uri: Mapped[str] = mapped_column(String(2048), nullable=False)
     secret_reference: Mapped[str | None] = mapped_column(String(255))
@@ -156,7 +157,9 @@ class InferenceTaskRow(Base):
     task_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
     organization_id: Mapped[UUID] = mapped_column(Uuid, nullable=False, index=True)
     camera_id: Mapped[UUID] = mapped_column(Uuid, nullable=False, index=True)
-    artifact_id: Mapped[UUID | None] = mapped_column(ForeignKey("frame_artifacts.artifact_id"))
+    artifact_id: Mapped[UUID] = mapped_column(
+        ForeignKey("frame_artifacts.artifact_id"), nullable=False
+    )
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     dispatch_seq: Mapped[int] = mapped_column(
@@ -339,7 +342,7 @@ class MessageQuarantineRow(Base):
     quarantine_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
     stream_name: Mapped[str] = mapped_column(String(255), nullable=False)
     message_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    event_id: Mapped[UUID | None] = mapped_column(Uuid)
+    event_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
     event_type: Mapped[str] = mapped_column(String(255), nullable=False)
     schema_version: Mapped[str] = mapped_column(String(32), nullable=False)
     raw_payload: Mapped[bytes] = mapped_column(LargeBinary(length=65536), nullable=False)
