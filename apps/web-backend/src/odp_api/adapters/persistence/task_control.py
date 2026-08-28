@@ -1,0 +1,558 @@
+"""PostgreSQL-owned camera admission and upload-completion transactions."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4
+
+from odp_api.adapters.persistence.task_models import (
+    CameraInferenceStateRow,
+    FrameArtifactRow,
+    InferenceTaskRow,
+    InspectionSessionRow,
+    OutboxEventRow,
+)
+from odp_api.modules.tasks.models import (
+    ArtifactLifecycle,
+    ArtifactState,
+    TaskRecord,
+    TaskStatus,
+)
+from odp_api.ports.tasks import (
+    AdmissionRejected,
+    AdmissionRequest,
+    AdmissionReservation,
+    CameraAdmissionPort,
+)
+from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.orm import Session, sessionmaker
+
+RESERVATION_TTL_SECONDS = 30
+TASK_TYPE = "vision_inference"
+INFERENCE_REQUEST_EVENT = "vision.inference.requested.v1"
+EVENT_SCHEMA_VERSION = "v1"
+
+
+class SqlAlchemyTaskControlRepository(CameraAdmissionPort):
+    """Persist admission facts with one serialized camera-state lock.
+
+    Lock order for all admission operations is deliberately explicit:
+    ``camera_inference_state`` first, then the Artifact, then any Task/Outbox
+    rows.  Task 3's claim, renewal, and finalize operations must follow this
+    same order before acquiring task or attempt locks.
+    """
+
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        self._session_factory = session_factory
+
+    def reserve(self, request: AdmissionRequest, now: datetime) -> AdmissionReservation:
+        """Reserve one upload slot and persist a PENDING Artifact atomically."""
+
+        _validate_request(request)
+        current_time = _as_utc(now)
+        with self._session_factory() as session:
+            try:
+                state = self._lock_camera_state(
+                    session, request.organization_id, request.camera_id
+                )
+                self._require_session(session, request)
+
+                existing = session.scalar(
+                    select(FrameArtifactRow)
+                    .where(
+                        FrameArtifactRow.organization_id == request.organization_id,
+                        FrameArtifactRow.camera_id == request.camera_id,
+                        FrameArtifactRow.stream_session_id == request.stream_session_id,
+                        FrameArtifactRow.frame_sequence == request.frame_sequence,
+                    )
+                    .with_for_update()
+                )
+                if existing is not None:
+                    if (
+                        existing.sha256 == request.content_sha256
+                        and existing.state == ArtifactState.PENDING.value
+                        and state.reservation_id == existing.artifact_id
+                    ):
+                        session.commit()
+                        return _reservation_from_artifact(existing)
+                    raise AdmissionRejected("FRAME_ALREADY_ADMITTED")
+
+                if state.reservation_id is not None:
+                    if (
+                        state.reservation_expires_at is not None
+                        and _as_utc(state.reservation_expires_at) <= current_time
+                    ):
+                        self._expire_reservation(session, state, current_time)
+                    else:
+                        raise AdmissionRejected("ADMISSION_IN_PROGRESS")
+
+                ready_count = self._sync_ready_count(session, state)
+                evicted_task_id: UUID | None = None
+                while ready_count >= 2:
+                    evicted_task_id = self._evict_oldest_ready(
+                        session,
+                        request.organization_id,
+                        request.camera_id,
+                        current_time,
+                    )
+                    if evicted_task_id is None:
+                        raise AdmissionRejected("READY_WINDOW_FULL")
+                    ready_count = self._sync_ready_count(session, state)
+
+                artifact_id = uuid4()
+                artifact = FrameArtifactRow(
+                    artifact_id=artifact_id,
+                    organization_id=request.organization_id,
+                    camera_id=request.camera_id,
+                    stream_session_id=request.stream_session_id,
+                    frame_sequence=request.frame_sequence,
+                    captured_at=_as_utc(request.captured_at),
+                    object_key=None,
+                    sha256=request.content_sha256,
+                    content_length=None,
+                    state=ArtifactState.PENDING.value,
+                    lifecycle=ArtifactLifecycle.PROCESSING.value,
+                    retention_until=None,
+                    created_at=current_time,
+                    updated_at=current_time,
+                )
+                session.add(artifact)
+                state.reservation_id = artifact_id
+                state.reservation_expires_at = current_time + timedelta(
+                    seconds=RESERVATION_TTL_SECONDS
+                )
+                state.version += 1
+                state.updated_at = current_time
+                session.commit()
+                return AdmissionReservation(
+                    reservation_id=artifact_id,
+                    artifact_id=artifact_id,
+                    organization_id=request.organization_id,
+                    camera_id=request.camera_id,
+                    stream_session_id=request.stream_session_id,
+                    frame_sequence=request.frame_sequence,
+                    captured_at=_as_utc(request.captured_at),
+                    content_sha256=request.content_sha256,
+                    evicted_task_id=evicted_task_id,
+                )
+            except BaseException:
+                session.rollback()
+                raise
+
+    def complete_upload(
+        self,
+        reservation_id: UUID,
+        object_key: str,
+        content_length: int,
+        now: datetime,
+    ) -> TaskRecord:
+        """Promote an uploaded Artifact and create its READY Task and Outbox."""
+
+        if not object_key.strip():
+            raise AdmissionRejected("INVALID_OBJECT_KEY")
+        if content_length < 0:
+            raise AdmissionRejected("INVALID_CONTENT_LENGTH")
+        current_time = _as_utc(now)
+        with self._session_factory() as session:
+            try:
+                # The reservation capability identifies the camera row. Lock it
+                # before reading/updating the Artifact to preserve the shared
+                # admission -> claim -> finalize lock order.
+                state = self._lock_camera_state_for_reservation(session, reservation_id)
+                if state is None or state.reservation_id != reservation_id:
+                    raise AdmissionRejected("RESERVATION_NOT_FOUND")
+                artifact = session.scalar(
+                    select(FrameArtifactRow)
+                    .where(
+                        FrameArtifactRow.artifact_id == reservation_id,
+                        FrameArtifactRow.organization_id == state.organization_id,
+                        FrameArtifactRow.camera_id == state.camera_id,
+                    )
+                    .with_for_update()
+                )
+                if artifact is None:
+                    raise AdmissionRejected("RESERVATION_NOT_FOUND")
+                if artifact.state != ArtifactState.PENDING.value:
+                    raise AdmissionRejected("ARTIFACT_NOT_PENDING")
+
+                artifact.state = ArtifactState.AVAILABLE.value
+                artifact.object_key = object_key
+                artifact.content_length = content_length
+                artifact.updated_at = current_time
+
+                task = session.scalar(
+                    select(InferenceTaskRow)
+                    .where(
+                        InferenceTaskRow.organization_id == state.organization_id,
+                        InferenceTaskRow.camera_id == state.camera_id,
+                        InferenceTaskRow.artifact_id == artifact.artifact_id,
+                    )
+                    .with_for_update()
+                )
+                if task is None:
+                    task = InferenceTaskRow(
+                        task_id=uuid4(),
+                        organization_id=state.organization_id,
+                        camera_id=state.camera_id,
+                        artifact_id=artifact.artifact_id,
+                        idempotency_key=_task_idempotency_key(artifact),
+                        status=TaskStatus.READY.value,
+                        dispatch_seq=1,
+                        attempt_count=0,
+                        next_attempt_at=None,
+                        last_dispatched_at=None,
+                        lease_owner=None,
+                        fence_token=0,
+                        lease_expires_at=None,
+                        error_code=None,
+                        error_detail=None,
+                        created_at=current_time,
+                        updated_at=current_time,
+                    )
+                    session.add(task)
+                    session.flush()
+                elif task.status != TaskStatus.READY.value:
+                    raise AdmissionRejected("TASK_ALREADY_FINALIZED")
+
+                outbox = session.scalar(
+                    select(OutboxEventRow)
+                    .where(
+                        OutboxEventRow.organization_id == state.organization_id,
+                        OutboxEventRow.task_id == task.task_id,
+                        OutboxEventRow.dispatch_seq == 1,
+                        OutboxEventRow.event_type == INFERENCE_REQUEST_EVENT,
+                    )
+                    .with_for_update()
+                )
+                if outbox is None:
+                    session.add(
+                        OutboxEventRow(
+                            outbox_id=uuid4(),
+                            organization_id=state.organization_id,
+                            aggregate_type="inference_task",
+                            aggregate_id=task.task_id,
+                            task_id=task.task_id,
+                            dispatch_seq=1,
+                            event_type=INFERENCE_REQUEST_EVENT,
+                            schema_version=EVENT_SCHEMA_VERSION,
+                            payload={
+                                "task_id": str(task.task_id),
+                                "dispatch_seq": 1,
+                            },
+                            available_at=current_time,
+                            claim_owner=None,
+                            claim_expires_at=None,
+                            publish_attempts=0,
+                            published_at=None,
+                            last_error=None,
+                            created_at=current_time,
+                            updated_at=current_time,
+                        )
+                    )
+
+                state.reservation_id = None
+                state.reservation_expires_at = None
+                state.last_admitted_at = current_time
+                state.version += 1
+                state.updated_at = current_time
+                state.ready_count = self._sync_ready_count(session, state)
+                if state.ready_count > 2:
+                    raise AdmissionRejected("READY_WINDOW_FULL")
+                result = _task_record(task)
+                session.commit()
+                return result
+            except BaseException:
+                session.rollback()
+                raise
+
+    def fail_upload(self, reservation_id: UUID, error_code: str, now: datetime) -> None:
+        """Mark a pending Artifact failed and release its camera reservation."""
+
+        if not error_code.strip():
+            raise AdmissionRejected("INVALID_ERROR_CODE")
+        current_time = _as_utc(now)
+        with self._session_factory() as session:
+            try:
+                state = self._lock_camera_state_for_reservation(session, reservation_id)
+                if state is None or state.reservation_id != reservation_id:
+                    raise AdmissionRejected("RESERVATION_NOT_FOUND")
+                artifact = session.scalar(
+                    select(FrameArtifactRow)
+                    .where(
+                        FrameArtifactRow.artifact_id == reservation_id,
+                        FrameArtifactRow.organization_id == state.organization_id,
+                        FrameArtifactRow.camera_id == state.camera_id,
+                    )
+                    .with_for_update()
+                )
+                if artifact is None:
+                    raise AdmissionRejected("RESERVATION_NOT_FOUND")
+                if artifact.state == ArtifactState.PENDING.value:
+                    artifact.state = ArtifactState.FAILED.value
+                    artifact.error_code = error_code
+                    artifact.error_detail = error_code
+                    artifact.updated_at = current_time
+                elif artifact.state != ArtifactState.FAILED.value:
+                    raise AdmissionRejected("ARTIFACT_NOT_PENDING")
+                state.reservation_id = None
+                state.reservation_expires_at = None
+                state.version += 1
+                state.updated_at = current_time
+                session.commit()
+            except BaseException:
+                session.rollback()
+                raise
+
+    def get_task(self, task_id: UUID, organization_id: UUID) -> TaskRecord | None:
+        """Read a task only inside its tenant scope."""
+
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(InferenceTaskRow).where(
+                    InferenceTaskRow.task_id == task_id,
+                    InferenceTaskRow.organization_id == organization_id,
+                )
+            )
+            return _task_record(row) if row is not None else None
+
+    @staticmethod
+    def _lock_camera_state(
+        session: Session, organization_id: UUID, camera_id: UUID
+    ) -> CameraInferenceStateRow:
+        """Upsert then lock the one tenant/camera serialization anchor."""
+
+        state = session.scalar(
+            select(CameraInferenceStateRow)
+            .where(
+                CameraInferenceStateRow.organization_id == organization_id,
+                CameraInferenceStateRow.camera_id == camera_id,
+            )
+            .with_for_update()
+        )
+        if state is not None:
+            return state
+
+        values = {
+            "organization_id": organization_id,
+            "camera_id": camera_id,
+            "running_task_id": None,
+            "ready_count": 0,
+            "reservation_id": None,
+            "reservation_expires_at": None,
+            "last_admitted_at": None,
+            "version": 0,
+        }
+        dialect = session.get_bind().dialect.name
+        if dialect == "postgresql":
+            session.execute(
+                postgresql_insert(CameraInferenceStateRow)
+                .values(**values)
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        CameraInferenceStateRow.organization_id,
+                        CameraInferenceStateRow.camera_id,
+                    ]
+                )
+            )
+        elif dialect == "sqlite":
+            session.execute(
+                sqlite_insert(CameraInferenceStateRow)
+                .values(**values)
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        CameraInferenceStateRow.organization_id,
+                        CameraInferenceStateRow.camera_id,
+                    ]
+                )
+            )
+        else:
+            session.add(CameraInferenceStateRow(**values))
+        session.flush()
+        state = session.scalar(
+            select(CameraInferenceStateRow)
+            .where(
+                CameraInferenceStateRow.organization_id == organization_id,
+                CameraInferenceStateRow.camera_id == camera_id,
+            )
+            .with_for_update()
+        )
+        if state is None:
+            raise AdmissionRejected("CAMERA_STATE_UNAVAILABLE")
+        return state
+
+    @classmethod
+    def _lock_camera_state_for_reservation(
+        cls, session: Session, reservation_id: UUID
+    ) -> CameraInferenceStateRow | None:
+        """Lock the camera anchor first, using the opaque reservation ID."""
+
+        return session.scalar(
+            select(CameraInferenceStateRow)
+            .where(CameraInferenceStateRow.reservation_id == reservation_id)
+            .with_for_update()
+        )
+
+    @staticmethod
+    def _require_session(session: Session, request: AdmissionRequest) -> None:
+        row = session.scalar(
+            select(InspectionSessionRow).where(
+                InspectionSessionRow.session_id == request.stream_session_id,
+                InspectionSessionRow.organization_id == request.organization_id,
+                InspectionSessionRow.camera_id == request.camera_id,
+            )
+        )
+        if row is None:
+            raise AdmissionRejected("SESSION_NOT_FOUND")
+
+    @staticmethod
+    def _sync_ready_count(session: Session, state: CameraInferenceStateRow) -> int:
+        count = session.scalar(
+            select(func.count())
+            .select_from(InferenceTaskRow)
+            .where(
+                InferenceTaskRow.organization_id == state.organization_id,
+                InferenceTaskRow.camera_id == state.camera_id,
+                InferenceTaskRow.status == TaskStatus.READY.value,
+            )
+        )
+        ready_count = int(count or 0)
+        state.ready_count = ready_count
+        return ready_count
+
+    @staticmethod
+    def _evict_oldest_ready(
+        session: Session,
+        organization_id: UUID,
+        camera_id: UUID,
+        now: datetime,
+    ) -> UUID | None:
+        oldest = session.scalar(
+            select(InferenceTaskRow)
+            .where(
+                InferenceTaskRow.organization_id == organization_id,
+                InferenceTaskRow.camera_id == camera_id,
+                InferenceTaskRow.status == TaskStatus.READY.value,
+            )
+            .order_by(InferenceTaskRow.created_at.asc(), InferenceTaskRow.task_id.asc())
+            .with_for_update()
+        )
+        if oldest is None:
+            return None
+        result = session.execute(
+            update(InferenceTaskRow)
+            .where(
+                InferenceTaskRow.task_id == oldest.task_id,
+                InferenceTaskRow.organization_id == organization_id,
+                InferenceTaskRow.camera_id == camera_id,
+                InferenceTaskRow.status == TaskStatus.READY.value,
+            )
+            .values(
+                status=TaskStatus.SKIPPED_BACKPRESSURE.value,
+                error_code=TaskStatus.SKIPPED_BACKPRESSURE.value,
+                error_detail="oldest READY task evicted for latest-frame-wins admission",
+                updated_at=now,
+            )
+        )
+        if result.rowcount != 1:
+            return None
+        return oldest.task_id
+
+    @staticmethod
+    def _expire_reservation(
+        session: Session, state: CameraInferenceStateRow, now: datetime
+    ) -> None:
+        reservation_id = state.reservation_id
+        if reservation_id is not None:
+            artifact = session.scalar(
+                select(FrameArtifactRow)
+                .where(
+                    FrameArtifactRow.artifact_id == reservation_id,
+                    FrameArtifactRow.organization_id == state.organization_id,
+                    FrameArtifactRow.camera_id == state.camera_id,
+                )
+                .with_for_update()
+            )
+            if artifact is not None and artifact.state == ArtifactState.PENDING.value:
+                artifact.state = ArtifactState.FAILED.value
+                artifact.error_code = "ADMISSION_RESERVATION_EXPIRED"
+                artifact.error_detail = "upload reservation expired before completion"
+                artifact.updated_at = now
+        state.reservation_id = None
+        state.reservation_expires_at = None
+        state.version += 1
+        state.updated_at = now
+
+
+def _validate_request(request: AdmissionRequest) -> None:
+    if request.frame_sequence < 1:
+        raise AdmissionRejected("INVALID_FRAME_SEQUENCE")
+    if not request.content_sha256.strip():
+        raise AdmissionRejected("INVALID_CONTENT_SHA256")
+
+
+def _reservation_from_artifact(artifact: FrameArtifactRow) -> AdmissionReservation:
+    return AdmissionReservation(
+        reservation_id=artifact.artifact_id,
+        artifact_id=artifact.artifact_id,
+        organization_id=artifact.organization_id,
+        camera_id=artifact.camera_id,
+        stream_session_id=artifact.stream_session_id,
+        frame_sequence=artifact.frame_sequence,
+        captured_at=_as_utc(artifact.captured_at),
+        content_sha256=artifact.sha256,
+    )
+
+
+def _task_idempotency_key(artifact: FrameArtifactRow) -> str:
+    return ":".join(
+        (
+            str(artifact.organization_id),
+            str(artifact.camera_id),
+            str(artifact.stream_session_id),
+            str(artifact.frame_sequence),
+            TASK_TYPE,
+        )
+    )
+
+
+def _task_record(row: InferenceTaskRow) -> TaskRecord:
+    return TaskRecord(
+        task_id=row.task_id,
+        task_type=TASK_TYPE,
+        idempotency_key=row.idempotency_key,
+        payload={
+            "task_id": str(row.task_id),
+            "artifact_id": str(row.artifact_id),
+            "dispatch_seq": row.dispatch_seq,
+        },
+        status=TaskStatus(row.status),
+        attempt_count=row.attempt_count,
+        created_at=_as_utc(row.created_at),
+        next_attempt_at=_optional_utc(row.next_attempt_at),
+        last_error=row.error_detail,
+        frame_status=None,
+        published_at=None,
+        organization_id=row.organization_id,
+        camera_id=row.camera_id,
+        artifact_id=row.artifact_id,
+        dispatch_seq=row.dispatch_seq,
+        last_dispatched_at=_optional_utc(row.last_dispatched_at),
+        lease_owner=row.lease_owner,
+        fence_token=row.fence_token,
+        lease_expires_at=_optional_utc(row.lease_expires_at),
+        error_code=row.error_code,
+        error_detail=row.error_detail,
+        updated_at=_optional_utc(row.updated_at),
+    )
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _optional_utc(value: datetime | None) -> datetime | None:
+    return _as_utc(value) if value is not None else None
