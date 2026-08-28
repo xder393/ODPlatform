@@ -51,9 +51,9 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort):
         """Reserve one upload slot and persist a PENDING Artifact atomically."""
 
         _validate_request(request)
-        current_time = _as_utc(now)
         with self._session_factory() as session:
             try:
+                current_time = self._db_now(session)
                 state = self._lock_camera_state(
                     session, request.organization_id, request.camera_id
                 )
@@ -144,6 +144,7 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort):
     def complete_upload(
         self,
         reservation_id: UUID,
+        organization_id: UUID,
         object_key: str,
         content_length: int,
         now: datetime,
@@ -154,13 +155,13 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort):
             raise AdmissionRejected("INVALID_OBJECT_KEY")
         if content_length < 0:
             raise AdmissionRejected("INVALID_CONTENT_LENGTH")
-        current_time = _as_utc(now)
         with self._session_factory() as session:
             try:
+                current_time = self._db_now(session)
                 # The reservation capability identifies the camera row. Lock it
                 # before reading/updating the Artifact to preserve the shared
                 # admission -> claim -> finalize lock order.
-                state = self._lock_camera_state_for_reservation(session, reservation_id)
+                state = self._lock_camera_state_for_reservation(session, organization_id, reservation_id)
                 if state is None or state.reservation_id != reservation_id:
                     raise AdmissionRejected("RESERVATION_NOT_FOUND")
                 artifact = session.scalar(
@@ -267,15 +268,15 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort):
                 session.rollback()
                 raise
 
-    def fail_upload(self, reservation_id: UUID, error_code: str, now: datetime) -> None:
+    def fail_upload(self, reservation_id: UUID, organization_id: UUID, error_code: str, now: datetime) -> None:
         """Mark a pending Artifact failed and release its camera reservation."""
 
         if not error_code.strip():
             raise AdmissionRejected("INVALID_ERROR_CODE")
-        current_time = _as_utc(now)
         with self._session_factory() as session:
             try:
-                state = self._lock_camera_state_for_reservation(session, reservation_id)
+                current_time = self._db_now(session)
+                state = self._lock_camera_state_for_reservation(session, organization_id, reservation_id)
                 if state is None or state.reservation_id != reservation_id:
                     raise AdmissionRejected("RESERVATION_NOT_FOUND")
                 artifact = session.scalar(
@@ -382,15 +383,21 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort):
             raise AdmissionRejected("CAMERA_STATE_UNAVAILABLE")
         return state
 
+    @staticmethod
+    def _db_now(session: Session) -> datetime:
+        value = session.scalar(select(func.now()))
+        return _as_utc(value)
+
     @classmethod
     def _lock_camera_state_for_reservation(
-        cls, session: Session, reservation_id: UUID
+        cls, session: Session, organization_id: UUID, reservation_id: UUID
     ) -> CameraInferenceStateRow | None:
         """Lock the camera anchor first, using the opaque reservation ID."""
 
         return session.scalar(
             select(CameraInferenceStateRow)
-            .where(CameraInferenceStateRow.reservation_id == reservation_id)
+            .where(CameraInferenceStateRow.organization_id == organization_id,
+                   CameraInferenceStateRow.reservation_id == reservation_id)
             .with_for_update()
         )
 

@@ -21,7 +21,7 @@ from odp_api.adapters.persistence.task_models import (
     InspectionSessionRow,
 )
 from odp_api.db import create_engine_and_session
-from odp_api.ports.tasks import AdmissionRequest
+from odp_api.ports.tasks import AdmissionRejected, AdmissionRequest
 
 
 def _request(organization_id, camera_id, session_id, frame_sequence):
@@ -66,9 +66,11 @@ def test_postgresql_camera_admission_serializes_eviction_and_keeps_two_ready_tas
 
         repository = SqlAlchemyTaskControlRepository(sessions)
         first = repository.reserve(_request(organization_id, camera_id, session_id, 1), now)
-        first_task = repository.complete_upload(first.reservation_id, "frames/1.jpg", 10, now)
+        with pytest.raises(AdmissionRejected, match="RESERVATION_NOT_FOUND"):
+            repository.complete_upload(first.reservation_id, uuid4(), "frames/1.jpg", 10, now)
+        first_task = repository.complete_upload(first.reservation_id, organization_id, "frames/1.jpg", 10, now)
         second = repository.reserve(_request(organization_id, camera_id, session_id, 2), now)
-        second_task = repository.complete_upload(second.reservation_id, "frames/2.jpg", 10, now)
+        second_task = repository.complete_upload(second.reservation_id, organization_id, "frames/2.jpg", 10, now)
 
         barrier = Barrier(2)
 
@@ -79,6 +81,7 @@ def test_postgresql_camera_admission_serializes_eviction_and_keeps_two_ready_tas
             )
             return repository.complete_upload(
                 reservation.reservation_id,
+                organization_id,
                 f"frames/{frame_sequence}.jpg",
                 10,
                 now,

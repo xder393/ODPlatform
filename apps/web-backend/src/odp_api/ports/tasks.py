@@ -53,12 +53,13 @@ class CameraAdmissionPort(Protocol):
     def complete_upload(
         self,
         reservation_id: UUID,
+        organization_id: UUID,
         object_key: str,
         content_length: int,
         now: datetime,
     ) -> TaskRecord: ...
 
-    def fail_upload(self, reservation_id: UUID, error_code: str, now: datetime) -> None: ...
+    def fail_upload(self, reservation_id: UUID, organization_id: UUID, error_code: str, now: datetime) -> None: ...
 
 
 class TaskQueuePort(Protocol):
