@@ -8,13 +8,10 @@ from uuid import UUID, uuid4
 from odp_api.adapters.persistence.task_models import (
     CameraInferenceStateRow,
     FrameArtifactRow,
-    InferenceAttemptRow,
     InferenceTaskRow,
     InspectionSessionRow,
     OutboxEventRow,
-    PublishedInferenceResultRow,
 )
-from odp_api.modules.tasks.commands import LeaseClaim, PublishInferenceCommand
 from odp_api.modules.tasks.models import (
     ArtifactLifecycle,
     ArtifactState,
@@ -26,7 +23,6 @@ from odp_api.ports.tasks import (
     AdmissionRequest,
     AdmissionReservation,
     CameraAdmissionPort,
-    StaleLease,
 )
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
@@ -34,9 +30,6 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
 RESERVATION_TTL_SECONDS = 30
-LEASE_SECONDS = 20
-RENEW_INTERVAL_SECONDS = 5
-INFERENCE_TIMEOUT_SECONDS = 10
 TASK_TYPE = "vision_inference"
 INFERENCE_REQUEST_EVENT = "vision.inference.requested.v1"
 EVENT_SCHEMA_VERSION = "v1"
@@ -61,7 +54,9 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort):
         with self._session_factory() as session:
             try:
                 current_time = self._db_now(session)
-                state = self._lock_camera_state(session, request.organization_id, request.camera_id)
+                state = self._lock_camera_state(
+                    session, request.organization_id, request.camera_id
+                )
                 self._require_session(session, request)
 
                 existing = session.scalar(
@@ -166,9 +161,7 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort):
                 # The reservation capability identifies the camera row. Lock it
                 # before reading/updating the Artifact to preserve the shared
                 # admission -> claim -> finalize lock order.
-                state = self._lock_camera_state_for_reservation(
-                    session, organization_id, reservation_id
-                )
+                state = self._lock_camera_state_for_reservation(session, organization_id, reservation_id)
                 if state is None or state.reservation_id != reservation_id:
                     raise AdmissionRejected("RESERVATION_NOT_FOUND")
                 artifact = session.scalar(
@@ -275,9 +268,7 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort):
                 session.rollback()
                 raise
 
-    def fail_upload(
-        self, reservation_id: UUID, organization_id: UUID, error_code: str, now: datetime
-    ) -> None:
+    def fail_upload(self, reservation_id: UUID, organization_id: UUID, error_code: str, now: datetime) -> None:
         """Mark a pending Artifact failed and release its camera reservation."""
 
         if not error_code.strip():
@@ -285,9 +276,7 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort):
         with self._session_factory() as session:
             try:
                 current_time = self._db_now(session)
-                state = self._lock_camera_state_for_reservation(
-                    session, organization_id, reservation_id
-                )
+                state = self._lock_camera_state_for_reservation(session, organization_id, reservation_id)
                 if state is None or state.reservation_id != reservation_id:
                     raise AdmissionRejected("RESERVATION_NOT_FOUND")
                 artifact = session.scalar(
@@ -328,248 +317,6 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort):
                 )
             )
             return _task_record(row) if row is not None else None
-
-    def claim(
-        self, task_id: UUID, organization_id: UUID, worker_id: str, now: datetime
-    ) -> LeaseClaim | None:
-        with self._session_factory() as session:
-            try:
-                current = self._db_now(session)
-                task = session.scalar(
-                    select(InferenceTaskRow)
-                    .where(
-                        InferenceTaskRow.task_id == task_id,
-                        InferenceTaskRow.organization_id == organization_id,
-                    )
-                    .with_for_update()
-                )
-                if task is None:
-                    session.commit()
-                    return None
-                state = self._lock_camera_state(session, organization_id, task.camera_id)
-                live = state.running_task_id is not None
-                if (
-                    live
-                    and state.running_task_id == task_id
-                    and task.lease_expires_at
-                    and _as_utc(task.lease_expires_at) > current
-                ):
-                    session.commit()
-                    return None
-                if live or task.status != TaskStatus.READY.value:
-                    session.commit()
-                    return None
-                task.status = TaskStatus.RUNNING.value
-                task.attempt_count += 1
-                task.fence_token += 1
-                task.lease_owner = worker_id
-                task.lease_expires_at = current + timedelta(seconds=LEASE_SECONDS)
-                task.updated_at = current
-                attempt = InferenceAttemptRow(
-                    attempt_id=uuid4(),
-                    task_id=task.task_id,
-                    organization_id=organization_id,
-                    worker_id=worker_id,
-                    attempt_no=task.attempt_count,
-                    fence_token=task.fence_token,
-                    started_at=current,
-                    finished_at=None,
-                    outcome=None,
-                    error_code=None,
-                    error_detail=None,
-                    duration_ms=None,
-                )
-                session.add(attempt)
-                state.running_task_id = task_id
-                state.version += 1
-                state.updated_at = current
-                session.commit()
-                return LeaseClaim(
-                    task_id,
-                    organization_id,
-                    task.artifact_id,
-                    attempt.attempt_id,
-                    task.attempt_count,
-                    task.fence_token,
-                    worker_id,
-                    _as_utc(task.lease_expires_at),
-                )
-            except BaseException:
-                session.rollback()
-                raise
-
-    def renew(self, claim: LeaseClaim, now: datetime) -> LeaseClaim | None:
-        with self._session_factory() as session:
-            current = self._db_now(session)
-            state = session.scalar(
-                select(CameraInferenceStateRow)
-                .where(
-                    CameraInferenceStateRow.organization_id == claim.organization_id,
-                    CameraInferenceStateRow.running_task_id == claim.task_id,
-                )
-                .with_for_update()
-            )
-            if state is None:
-                session.rollback()
-                return None
-            result = session.execute(
-                update(InferenceTaskRow)
-                .where(
-                    InferenceTaskRow.task_id == claim.task_id,
-                    InferenceTaskRow.organization_id == claim.organization_id,
-                    InferenceTaskRow.status == TaskStatus.RUNNING.value,
-                    InferenceTaskRow.lease_owner == claim.lease_owner,
-                    InferenceTaskRow.fence_token == claim.fence_token,
-                    InferenceTaskRow.lease_expires_at > current,
-                )
-                .values(
-                    lease_expires_at=current + timedelta(seconds=LEASE_SECONDS), updated_at=current
-                )
-            )
-            if result.rowcount != 1:
-                session.rollback()
-                return None
-            session.commit()
-            return LeaseClaim(
-                task_id=claim.task_id,
-                organization_id=claim.organization_id,
-                artifact_id=claim.artifact_id,
-                attempt_id=claim.attempt_id,
-                attempt_no=claim.attempt_no,
-                fence_token=claim.fence_token,
-                lease_owner=claim.lease_owner,
-                lease_expires_at=current + timedelta(seconds=LEASE_SECONDS),
-            )
-
-    def complete_no_defect(self, command: PublishInferenceCommand) -> None:
-        self._finalize(command, "SUCCEEDED")
-
-    def publish_success(self, command: PublishInferenceCommand) -> None:
-        self._finalize(command, "SUCCEEDED")
-
-    def _finalize(self, command: PublishInferenceCommand, outcome: str) -> None:
-        claim = command.claim
-        with self._session_factory() as session:
-            current = self._db_now(session)
-            state = session.scalar(
-                select(CameraInferenceStateRow)
-                .where(
-                    CameraInferenceStateRow.organization_id == claim.organization_id,
-                    CameraInferenceStateRow.running_task_id == claim.task_id,
-                )
-                .with_for_update()
-            )
-            task = session.scalar(
-                select(InferenceTaskRow)
-                .where(
-                    InferenceTaskRow.task_id == claim.task_id,
-                    InferenceTaskRow.organization_id == claim.organization_id,
-                )
-                .with_for_update()
-            )
-            if (
-                state is None
-                or task is None
-                or task.status != TaskStatus.RUNNING.value
-                or task.lease_owner != claim.lease_owner
-                or task.fence_token != claim.fence_token
-                or not task.lease_expires_at
-                or _as_utc(task.lease_expires_at) <= current
-            ):
-                session.rollback()
-                raise StaleLease("lease is no longer current")
-            attempt = session.get(InferenceAttemptRow, claim.attempt_id, with_for_update=True)
-            if attempt is None:
-                session.rollback()
-                raise StaleLease("attempt is missing")
-            attempt.finished_at = current
-            attempt.outcome = outcome
-            task.status = TaskStatus.SUCCEEDED.value
-            task.lease_owner = None
-            task.lease_expires_at = None
-            task.updated_at = current
-            state.running_task_id = None
-            state.version += 1
-            state.updated_at = current
-            if outcome == "SUCCEEDED":
-                c = command.execution_contract
-                session.add(
-                    PublishedInferenceResultRow(
-                        result_id=uuid4(),
-                        organization_id=claim.organization_id,
-                        task_id=claim.task_id,
-                        attempt_id=claim.attempt_id,
-                        artifact_id=claim.artifact_id,
-                        model_release=c.model_release,
-                        model_sha256=c.model_sha256,
-                        onnxruntime_version=c.onnxruntime_version,
-                        execution_provider=c.execution_provider,
-                        actual_input_shape=list(c.actual_input_shape),
-                        preprocessing_version=c.preprocessing_version,
-                        postprocessing_version=c.postprocessing_version,
-                        confidence_threshold=c.confidence_threshold,
-                        iou_threshold=c.iou_threshold,
-                        nms_mode=c.nms_mode,
-                        nms_in_model=c.nms_in_model,
-                        class_map_version=c.class_map_version,
-                        frame_sha256=command.frame_sha256,
-                        input_frame_sha256=command.frame_sha256,
-                        detections=list(command.detections),
-                        stage_durations=dict(command.stage_durations),
-                        correlation_id=command.correlation_id,
-                        published_at=current,
-                        created_at=current,
-                    )
-                )
-            session.commit()
-
-    def record_failure(self, claim: LeaseClaim, failure: object, now: datetime) -> None:
-        with self._session_factory() as session:
-            current = self._db_now(session)
-            task = session.scalar(
-                select(InferenceTaskRow)
-                .where(
-                    InferenceTaskRow.task_id == claim.task_id,
-                    InferenceTaskRow.organization_id == claim.organization_id,
-                )
-                .with_for_update()
-            )
-            state = session.scalar(
-                select(CameraInferenceStateRow)
-                .where(
-                    CameraInferenceStateRow.organization_id == claim.organization_id,
-                    CameraInferenceStateRow.running_task_id == claim.task_id,
-                )
-                .with_for_update()
-            )
-            if (
-                task is None
-                or state is None
-                or task.status != TaskStatus.RUNNING.value
-                or task.lease_owner != claim.lease_owner
-                or task.fence_token != claim.fence_token
-                or not task.lease_expires_at
-                or _as_utc(task.lease_expires_at) <= current
-            ):
-                session.rollback()
-                raise StaleLease("lease is no longer current")
-            attempt = session.get(InferenceAttemptRow, claim.attempt_id, with_for_update=True)
-            if attempt is None:
-                session.rollback()
-                raise StaleLease("attempt is missing")
-            detail = str(failure)
-            attempt.finished_at = current
-            attempt.outcome = "FAILED"
-            attempt.error_detail = detail
-            task.status = TaskStatus.RETRY_WAIT.value
-            task.error_detail = detail
-            task.lease_owner = None
-            task.lease_expires_at = None
-            task.updated_at = current
-            state.running_task_id = None
-            state.version += 1
-            state.updated_at = current
-            session.commit()
 
     @staticmethod
     def _lock_camera_state(
@@ -649,10 +396,8 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort):
 
         return session.scalar(
             select(CameraInferenceStateRow)
-            .where(
-                CameraInferenceStateRow.organization_id == organization_id,
-                CameraInferenceStateRow.reservation_id == reservation_id,
-            )
+            .where(CameraInferenceStateRow.organization_id == organization_id,
+                   CameraInferenceStateRow.reservation_id == reservation_id)
             .with_for_update()
         )
 

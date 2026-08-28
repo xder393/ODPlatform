@@ -6,7 +6,6 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
-from odp_api.modules.tasks.commands import LeaseClaim, PublishInferenceCommand
 from odp_api.modules.tasks.models import TaskDeadLetterAlert, TaskRecord
 
 
@@ -60,9 +59,7 @@ class CameraAdmissionPort(Protocol):
         now: datetime,
     ) -> TaskRecord: ...
 
-    def fail_upload(
-        self, reservation_id: UUID, organization_id: UUID, error_code: str, now: datetime
-    ) -> None: ...
+    def fail_upload(self, reservation_id: UUID, organization_id: UUID, error_code: str, now: datetime) -> None: ...
 
 
 class TaskQueuePort(Protocol):
@@ -99,16 +96,3 @@ class TaskRepositoryPort(Protocol):
     def outstanding(self) -> Sequence[TaskRecord]: ...
 
     def unpublished(self) -> Sequence[TaskRecord]: ...
-
-
-class StaleLease(RuntimeError):
-    """The worker no longer owns a live fencing lease."""
-
-
-class TaskExecutionPort(Protocol):
-    def claim(
-        self, task_id: UUID, organization_id: UUID, worker_id: str, now: datetime
-    ) -> LeaseClaim | None: ...
-    def renew(self, claim: LeaseClaim, now: datetime) -> LeaseClaim | None: ...
-    def complete_no_defect(self, command: PublishInferenceCommand) -> None: ...
-    def record_failure(self, claim: LeaseClaim, failure: object, now: datetime) -> None: ...
