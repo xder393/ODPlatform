@@ -70,9 +70,11 @@ class SqlAlchemyInspectionEffects:
                 )
                 contract = command.execution_contract
                 if old:
-                    stored = (old.model_release,old.model_sha256,old.onnxruntime_version,old.execution_provider,tuple(old.actual_input_shape),old.preprocessing_version,old.postprocessing_version,old.confidence_threshold,old.iou_threshold,old.nms_mode,old.nms_in_model,old.class_map_version,old.frame_sha256,old.detections,old.stage_durations)
-                    incoming = (contract.model_release,contract.model_sha256,contract.onnxruntime_version,contract.execution_provider,tuple(contract.actual_input_shape),contract.preprocessing_version,contract.postprocessing_version,contract.confidence_threshold,contract.iou_threshold,contract.nms_mode,contract.nms_in_model,contract.class_map_version,command.frame_sha256,list(command.detections),dict(command.stage_durations))
-                    if stored != incoming:
+                    if (
+                        old.frame_sha256 != command.frame_sha256
+                        or old.detections != list(command.detections)
+                        or old.model_release != contract.model_release
+                    ):
                         raise PublishConflict("payload differs")
                     ev = s.scalar(
                         select(InspectionEventRow).where(
@@ -197,7 +199,7 @@ class SqlAlchemyInspectionEffects:
                             organization_id=c.organization_id,
                             event_id=eid,
                             alert_type="INSPECTION",
-                            payload={"event_id": str(eid), "organization_id": str(c.organization_id), "camera_id": str(task.camera_id), "occurred_at": now.isoformat(), "defect_class": typ, "confidence": float(d.get("confidence", 0))},
+                            payload=d,
                             created_at=now,
                         )
                     )
@@ -205,7 +207,7 @@ class SqlAlchemyInspectionEffects:
                         InspectionAlertFeedRow(
                             event_id=eid,
                             organization_id=c.organization_id,
-                            payload={"event_id": str(eid), "organization_id": str(c.organization_id), "camera_id": str(task.camera_id), "occurred_at": now.isoformat(), "defect_class": typ, "confidence": float(d.get("confidence", 0))},
+                            payload=d,
                             created_at=now,
                         )
                     )
