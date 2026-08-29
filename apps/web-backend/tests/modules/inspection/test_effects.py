@@ -30,6 +30,9 @@ from odp_api.modules.tasks.commands import InferenceExecutionContract, PublishIn
 from odp_api.modules.tasks.models import TaskStatus
 from odp_api.ports.tasks import StaleLease
 from sqlalchemy import func, select
+from odp_schemas.events import InspectionAlert
+from odp_api.adapters.persistence.repositories import SqlAlchemyAuditRepository
+from odp_api.modules.audit.service import AuditService
 
 
 def _command(claim, now, detections=()):
@@ -138,7 +141,7 @@ def test_no_defect_publishes_result_and_closes_fenced_execution_without_business
 
 def test_defect_creates_event_case_evidence_alert_outbox_and_audit_in_one_effect(runtime):
     now = datetime(2026, 8, 25, 12, tzinfo=UTC)
-    org, _camera, artifact, _task, claim = _running(runtime, now)
+    org, camera, artifact, _task, claim = _running(runtime, now)
     effect = _service(runtime).publish(
         _command(claim, now, ({"defect_type": "scratch", "confidence": 0.91, "spatial_zone": "A"},))
     )
@@ -157,6 +160,11 @@ def test_defect_creates_event_case_evidence_alert_outbox_and_audit_in_one_effect
             )
             == 1
         )
+        alert = InspectionAlert.model_validate(session.scalar(select(InspectionAlertFeedRow).where(InspectionAlertFeedRow.event_id == effect.event_id)).payload)
+        assert alert.event_id == effect.event_id and alert.organization_id == org
+        assert alert.camera_id == camera and alert.defect_class == "scratch"
+        assert alert.confidence == 0.91
+    assert AuditService(SqlAlchemyAuditRepository(runtime)).verify_organization_chain(org).is_valid
 
 
 def test_exact_duplicate_returns_original_ids_but_conflicting_payload_is_rejected(runtime):
