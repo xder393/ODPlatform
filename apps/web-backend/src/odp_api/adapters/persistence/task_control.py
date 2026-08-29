@@ -25,7 +25,7 @@ from odp_api.modules.tasks.models import (
     TaskRecord,
     TaskStatus,
 )
-from odp_api.modules.tasks.recovery import QuarantineResult, ReplayResult
+from odp_api.modules.tasks.recovery import QuarantineResult, ReplayResult, SystemRecoveryScope
 from odp_api.ports.tasks import (
     AdmissionRejected,
     AdmissionRequest,
@@ -680,8 +680,9 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
             state.updated_at = current
             session.commit()
 
-    def release_due_retries(self, now: datetime) -> int:
+    def release_due_retries(self, now: datetime, scope: SystemRecoveryScope) -> int:
         """Turn due retry waits into a fresh durable dispatch using database time."""
+        self._require_system_recovery_scope(scope)
         with self._session_factory() as session:
             try:
                 current = self._db_now(session)
@@ -703,8 +704,9 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                 session.rollback()
                 raise
 
-    def redispatch_stale_ready(self, now: datetime, organization_id: UUID | None = None) -> int:
-        """System-only cross-tenant scan; an optional tenant scopes diagnostics safely."""
+    def redispatch_stale_ready(self, now: datetime, scope: SystemRecoveryScope) -> int:
+        """Perform the explicit system-only cross-tenant stale-ready scan."""
+        self._require_system_recovery_scope(scope)
         with self._session_factory() as session:
             try:
                 current = self._db_now(session)
@@ -714,8 +716,6 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                     InferenceTaskRow.last_dispatched_at
                     <= current - timedelta(seconds=REDISPATCH_AFTER_SECONDS),
                 )
-                if organization_id is not None:
-                    query = query.where(InferenceTaskRow.organization_id == organization_id)
                 rows = session.scalars(query.with_for_update(skip_locked=True)).all()
                 for task in rows:
                     self._add_dispatch_outbox(session, task, current)
@@ -725,19 +725,46 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                 session.rollback()
                 raise
 
-    def expire_leases(self, now: datetime, organization_id: UUID | None = None) -> int:
+    def expire_leases(self, now: datetime, scope: SystemRecoveryScope) -> int:
+        self._require_system_recovery_scope(scope)
         with self._session_factory() as session:
             try:
                 current = self._db_now(session)
-                query = select(InferenceTaskRow).where(
-                    InferenceTaskRow.status == TaskStatus.RUNNING.value,
-                    InferenceTaskRow.lease_expires_at <= current,
-                )
-                if organization_id is not None:
-                    query = query.where(InferenceTaskRow.organization_id == organization_id)
-                tasks = session.scalars(query.with_for_update(skip_locked=True)).all()
-                for task in tasks:
-                    state = self._lock_camera_state(session, task.organization_id, task.camera_id)
+                states = session.scalars(
+                    select(CameraInferenceStateRow)
+                    .join(
+                        InferenceTaskRow,
+                        (InferenceTaskRow.task_id == CameraInferenceStateRow.running_task_id)
+                        & (
+                            InferenceTaskRow.organization_id
+                            == CameraInferenceStateRow.organization_id
+                        ),
+                    )
+                    .where(
+                        InferenceTaskRow.status == TaskStatus.RUNNING.value,
+                        InferenceTaskRow.lease_expires_at <= current,
+                    )
+                    .with_for_update(of=CameraInferenceStateRow, skip_locked=True)
+                ).all()
+                expired = 0
+                for state in states:
+                    if state.running_task_id is None:
+                        continue
+                    task = session.scalar(
+                        select(InferenceTaskRow)
+                        .where(
+                            InferenceTaskRow.task_id == state.running_task_id,
+                            InferenceTaskRow.organization_id == state.organization_id,
+                            InferenceTaskRow.status == TaskStatus.RUNNING.value,
+                        )
+                        .with_for_update()
+                    )
+                    if (
+                        task is None
+                        or task.lease_expires_at is None
+                        or _as_utc(task.lease_expires_at) > current
+                    ):
+                        continue
                     attempt = session.scalar(
                         select(InferenceAttemptRow)
                         .where(
@@ -768,12 +795,12 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                         "worker lease expired",
                         current,
                     )
-                    if state.running_task_id == task.task_id:
-                        state.running_task_id = None
-                        state.version += 1
-                        state.updated_at = current
+                    state.running_task_id = None
+                    state.version += 1
+                    state.updated_at = current
+                    expired += 1
                 session.commit()
-                return len(tasks)
+                return expired
             except BaseException:
                 session.rollback()
                 raise
@@ -793,6 +820,19 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
         with self._session_factory() as session:
             try:
                 current = self._db_now(session)
+                existing = session.scalar(
+                    select(MessageQuarantineRow)
+                    .where(
+                        MessageQuarantineRow.stream_name == stream,
+                        MessageQuarantineRow.message_id == message_id,
+                    )
+                    .with_for_update()
+                )
+                if existing is not None:
+                    if existing.task_id == task_id and existing.organization_id == organization_id:
+                        session.commit()
+                        return QuarantineResult(existing.quarantine_id, ack_after_commit=True)
+                    raise AdmissionRejected("QUARANTINE_MESSAGE_TENANT_MISMATCH")
                 task = session.scalar(
                     select(InferenceTaskRow)
                     .where(
@@ -801,8 +841,8 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                     )
                     .with_for_update()
                 )
-                if task is None:
-                    raise AdmissionRejected("TASK_NOT_FOUND")
+                if task is None or task.status != TaskStatus.READY.value:
+                    raise AdmissionRejected("TASK_NOT_READY_FOR_COMPATIBILITY_BLOCK")
                 quarantine_id = uuid4()
                 session.add(
                     MessageQuarantineRow(
@@ -913,6 +953,11 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
             )
         )
         return outbox_id
+
+    @staticmethod
+    def _require_system_recovery_scope(scope: SystemRecoveryScope) -> None:
+        if not isinstance(scope, SystemRecoveryScope):
+            raise TypeError("recovery scheduler requires a SystemRecoveryScope")
 
     @staticmethod
     def _append_replay_audit(session: Session, command: AuditCommand) -> None:

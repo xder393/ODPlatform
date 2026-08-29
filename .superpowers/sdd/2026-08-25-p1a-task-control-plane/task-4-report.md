@@ -50,3 +50,17 @@ Exact result: `200 passed, 8 skipped in 12.86s`; pytest emitted no warnings. Bec
 Required focused command: `uv run --project apps/web-backend --extra dev --with-editable packages/shared-schemas --with httpx2 pytest apps/web-backend/tests/modules/tasks/test_recovery.py apps/web-backend/tests/persistence/test_task_recovery_transactions.py -q`.
 
 Exact result: `11 passed in 0.40s`. `git diff --check` produced no output before the report-only commit.
+
+### Fix Round 1 — recovery hardening (2026-08-29)
+
+RED command: `uv run --project apps/web-backend --extra dev --with-editable packages/shared-schemas --with httpx2 pytest apps/web-backend/tests/modules/tasks/test_recovery.py apps/web-backend/tests/persistence/test_task_recovery_transactions.py apps/web-backend/tests/persistence/test_postgres_fencing.py -q`.
+
+Exact RED result: collection failed with two `ImportError` failures because `SystemRecoveryScope` did not yet exist. The new coverage is `test_recovery_service_requires_a_typed_system_scope`, `test_recovery_repository_rejects_missing_or_invalid_system_scope`, `test_quarantine_rejects_non_ready_task_without_persisting_a_row`, `test_quarantine_duplicate_message_for_blocked_task_is_idempotently_ackable`, and PostgreSQL-gated `test_postgresql_due_retry_scheduler_skip_locked_creates_one_new_outbox_per_task`.
+
+GREEN focused Task 4 command: `uv run --project apps/web-backend --extra dev --with-editable packages/shared-schemas --with httpx2 pytest apps/web-backend/tests/modules/tasks/test_recovery.py apps/web-backend/tests/persistence/test_task_recovery_transactions.py apps/web-backend/tests/persistence/test_postgres_fencing.py -q` → `18 passed, 5 skipped in 0.55s`. PostgreSQL tests are skipped only because `ODP_POSTGRES_TEST_URL` is unset.
+
+Task 3 regression command: `uv run --project apps/web-backend --extra dev --with-editable packages/shared-schemas --with httpx2 pytest apps/web-backend/tests/modules/tasks/test_fenced_execution.py apps/web-backend/tests/persistence/test_postgres_fencing.py -q` → `12 passed, 5 skipped in 0.41s`.
+
+Exact full backend command: `uv run --project apps/web-backend --extra dev --with-editable packages/shared-schemas --with httpx2 pytest apps/web-backend/tests -q` → `207 passed, 9 skipped in 13.15s` with no warnings. Ruff on all changed source/tests reported `All checks passed!`; `git diff --check` produced no output.
+
+Self-review: quarantine now accepts only a tenant-matching READY task, except that a duplicate matching stream/message already durably quarantined for that task and tenant is idempotently ACKable. Non-READY and wrong-tenant requests create no row or state mutation. `SystemRecoveryScope` is required at both scheduler service and repository boundaries. Lease expiry locks camera anchors first using PostgreSQL `FOR UPDATE OF camera_inference_state SKIP LOCKED`, then locks/revalidates the tenant task and its attempt. The deferred audit-head race was not changed.
