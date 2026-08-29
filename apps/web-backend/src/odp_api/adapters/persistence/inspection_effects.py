@@ -24,6 +24,8 @@ from odp_api.ports.tasks import StaleLease
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
+from odp_schemas.events import InspectionAlert
+
 
 class SqlAlchemyInspectionEffects:
     def __init__(self, session_factory):
@@ -73,7 +75,7 @@ class SqlAlchemyInspectionEffects:
                     or attempt.worker_id != c.lease_owner
                 ):
                     raise StaleLease("attempt identity mismatch")
-                now = s.scalar(select(func.now())).replace(tzinfo=UTC)
+                now = self._utc(s.scalar(select(func.now())))
                 old = s.scalar(
                     select(PublishedInferenceResultRow)
                     .where(PublishedInferenceResultRow.task_id == task.task_id)
@@ -235,20 +237,21 @@ class SqlAlchemyInspectionEffects:
                     )
                     s.add(event)
                     artifact.lifecycle = "EVIDENCE"
+                    alert_payload = InspectionAlert(
+                        event_id=eid,
+                        organization_id=c.organization_id,
+                        camera_id=task.camera_id,
+                        occurred_at=now,
+                        defect_class=typ,
+                        confidence=float(d.get("confidence", 0)),
+                    ).model_dump(mode="json")
                     s.add(
                         AlertRow(
                             alert_id=eid,
                             organization_id=c.organization_id,
                             event_id=eid,
                             alert_type="INSPECTION",
-                            payload={
-                                "event_id": str(eid),
-                                "organization_id": str(c.organization_id),
-                                "camera_id": str(task.camera_id),
-                                "occurred_at": now.isoformat(),
-                                "defect_class": typ,
-                                "confidence": float(d.get("confidence", 0)),
-                            },
+                            payload=alert_payload,
                             created_at=now,
                         )
                     )
@@ -256,14 +259,7 @@ class SqlAlchemyInspectionEffects:
                         InspectionAlertFeedRow(
                             event_id=eid,
                             organization_id=c.organization_id,
-                            payload={
-                                "event_id": str(eid),
-                                "organization_id": str(c.organization_id),
-                                "camera_id": str(task.camera_id),
-                                "occurred_at": now.isoformat(),
-                                "defect_class": typ,
-                                "confidence": float(d.get("confidence", 0)),
-                            },
+                            payload=alert_payload,
                             created_at=now,
                         )
                     )

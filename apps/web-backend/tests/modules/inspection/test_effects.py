@@ -29,6 +29,7 @@ from odp_api.modules.inspection.effects import InspectionEffectService, PublishC
 from odp_api.modules.tasks.commands import InferenceExecutionContract, PublishInferenceCommand
 from odp_api.modules.tasks.models import TaskStatus
 from odp_api.ports.tasks import StaleLease
+from pydantic import ValidationError
 from sqlalchemy import func, select
 
 
@@ -255,16 +256,40 @@ def test_episode_reuses_open_case_and_expiry_creates_a_new_case(runtime):
     )
     assert third.case_id != first.case_id
 
+
 def test_episode_shell_is_claimed_before_case_creation(runtime):
     now = datetime(2026, 8, 25, 12, tzinfo=UTC)
     org, camera, _artifact, _task, claim = _running(runtime, now)
     with runtime.begin() as session:
-        session.add(DefectEpisodeRow(episode_id=uuid4(), organization_id=org, camera_id=camera, defect_type="scratch", spatial_zone="GLOBAL", current_case_id=None, episode_expires_at=now + timedelta(minutes=5), created_at=now, updated_at=now))
-    effect = _service(runtime).publish(_command(claim, now, ({"defect_type":"scratch","confidence":.9},)))
+        session.add(
+            DefectEpisodeRow(
+                episode_id=uuid4(),
+                organization_id=org,
+                camera_id=camera,
+                defect_type="scratch",
+                spatial_zone="GLOBAL",
+                current_case_id=None,
+                episode_expires_at=now + timedelta(minutes=5),
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    effect = _service(runtime).publish(
+        _command(claim, now, ({"defect_type": "scratch", "confidence": 0.9},))
+    )
     with runtime() as session:
-        episode = session.scalar(select(DefectEpisodeRow).where(DefectEpisodeRow.organization_id == org))
+        episode = session.scalar(
+            select(DefectEpisodeRow).where(DefectEpisodeRow.organization_id == org)
+        )
         assert episode.current_case_id == effect.case_id
-        assert session.scalar(select(func.count()).select_from(DefectCaseRow).where(DefectCaseRow.organization_id == org)) == 1
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(DefectCaseRow)
+                .where(DefectCaseRow.organization_id == org)
+            )
+            == 1
+        )
 
 
 def test_downstream_failure_rolls_back_every_effect(runtime, monkeypatch):
@@ -282,4 +307,17 @@ def test_downstream_failure_rolls_back_every_effect(runtime, monkeypatch):
     with runtime() as session:
         assert session.scalar(select(func.count()).select_from(PublishedInferenceResultRow)) == 0
         assert session.scalar(select(func.count()).select_from(InspectionEventRow)) == 0
+        assert session.get(InferenceTaskRow, task).status == TaskStatus.RUNNING.value
+
+
+@pytest.mark.parametrize("confidence", [-0.1, 1.5])
+def test_invalid_alert_confidence_rolls_back(runtime, confidence):
+    now = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    _org, _camera, _artifact, task, claim = _running(runtime, now)
+    with pytest.raises(ValidationError):
+        _service(runtime).publish(
+            _command(claim, now, ({"defect_type": "scratch", "confidence": confidence},))
+        )
+    with runtime() as session:
+        assert session.scalar(select(func.count()).select_from(PublishedInferenceResultRow)) == 0
         assert session.get(InferenceTaskRow, task).status == TaskStatus.RUNNING.value
