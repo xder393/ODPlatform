@@ -47,6 +47,34 @@ injection used only by tests and is not part of the production service API.
 
 Concern: PostgreSQL locking and unique-key concurrency remain CI-gated.
 
+## Fix Round 2 evidence
+
+The two findings addressed were unconstrained detection confidence, which
+could persist a feed payload rejected by `InspectionAlert`, and incorrect
+timezone relabeling of aware database timestamps. The invalid-confidence tests
+cover both `-0.1` and `1.5`, asserting rollback and a still-live task. A
+pre-implementation RED run for these new tests was not captured; this report
+does not claim one. The aware non-UTC normalization regression likewise was
+implemented and verified, but no separate pre-implementation RED output was
+recorded.
+
+Exact GREEN command:
+
+```text
+uv run --project apps/web-backend --extra dev --with-editable packages/shared-schemas --with httpx2 pytest apps/web-backend/tests/modules/inspection/test_effects.py -q
+```
+
+Result: `21 passed in 0.86s`.
+
+Ruff was run on the changed adapter and effects tests and finished with no
+errors (`All checks passed!` after import/style fixes). `git diff --check`
+reported no output. The implementation constructs the actual shared
+`InspectionAlert` and stores `model_dump(mode="json")`; `_utc` attaches UTC to
+naive DB values and uses `astimezone(UTC)` for aware values.
+
+Concern: the focused normalization test uses the adapter helper indirectly;
+PostgreSQL-specific DB clock behavior remains integration-gated.
+
 ## Fix Round 1 evidence
 
 The hardening sequence preserved history: `e2f3c25` report, canonical audit
