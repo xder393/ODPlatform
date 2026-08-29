@@ -15,6 +15,7 @@ from odp_api.adapters.persistence.models import (
     InspectionEventRow,
 )
 from odp_api.adapters.persistence.task_control import SqlAlchemyTaskControlRepository
+from odp_api.adapters.persistence.repositories import SqlAlchemyAuditSessionRepository
 from odp_api.adapters.persistence.task_models import (
     CameraInferenceStateRow,
     DefectEpisodeRow,
@@ -117,7 +118,7 @@ def runtime(tmp_path):
 
 
 def _service(sessions, *, hook=None):
-    return InspectionEffectService(SqlAlchemyInspectionEffects(sessions, failure_hook=hook))
+    return InspectionEffectService(SqlAlchemyInspectionEffects(sessions))
 
 
 def test_no_defect_publishes_result_and_closes_fenced_execution_without_business_effects(runtime):
@@ -211,13 +212,14 @@ def test_episode_reuses_open_case_and_expiry_creates_a_new_case(runtime):
     assert third.case_id != first.case_id
 
 
-def test_downstream_failure_rolls_back_every_effect(runtime):
+def test_downstream_failure_rolls_back_every_effect(runtime, monkeypatch):
     now = datetime(2026, 8, 25, 12, tzinfo=UTC)
     _org, _camera, _artifact, task, claim = _running(runtime, now)
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("injected")
+    monkeypatch.setattr(SqlAlchemyAuditSessionRepository, "append_under_head_lock", fail)
     with pytest.raises(RuntimeError, match="injected"):
-        _service(
-            runtime, hook=lambda _session: (_ for _ in ()).throw(RuntimeError("injected"))
-        ).publish(_command(claim, now, ({"defect_type": "scratch", "confidence": 0.91},)))
+        _service(runtime).publish(_command(claim, now, ({"defect_type": "scratch", "confidence": 0.91},)))
     with runtime() as session:
         assert session.scalar(select(func.count()).select_from(PublishedInferenceResultRow)) == 0
         assert session.scalar(select(func.count()).select_from(InspectionEventRow)) == 0
