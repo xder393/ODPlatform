@@ -81,8 +81,8 @@ jobs:
           ODP_RETRIEVAL_BACKEND=pgvector ODP_POSTGRES_URL=postgresql://odp_app:odp_app_dev@localhost:5432/odp \
             python -m odp_api.seed_knowledge
 
-      - name: Lint touched backend integration code
-        run: ruff check apps/web-backend/src/odp_api/modules/notifications/dev_router.py apps/web-backend/tests/integration/test_dev_event_trigger.py
+      - name: Lint web backend
+        run: ruff check apps/web-backend/src apps/web-backend/tests
 
       - name: Run tests
         run: pytest apps/web-backend/tests -q
