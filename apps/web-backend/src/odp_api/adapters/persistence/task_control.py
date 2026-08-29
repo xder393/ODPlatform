@@ -197,7 +197,6 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort):
                         InferenceTaskRow.camera_id == state.camera_id,
                         InferenceTaskRow.artifact_id == artifact.artifact_id,
                     )
-                    .with_for_update()
                 )
                 if task is None:
                     task = InferenceTaskRow(
@@ -346,7 +345,20 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort):
                 if task is None:
                     session.commit()
                     return None
+                # The camera anchor is the serialization point shared with admission
+                # and finalize.  Do not lock the task before it.
                 state = self._lock_camera_state(session, organization_id, task.camera_id)
+                task = session.scalar(
+                    select(InferenceTaskRow)
+                    .where(
+                        InferenceTaskRow.task_id == task_id,
+                        InferenceTaskRow.organization_id == organization_id,
+                    )
+                    .with_for_update()
+                )
+                if task is None:
+                    session.commit()
+                    return None
                 live = state.running_task_id is not None
                 if (
                     live
@@ -442,12 +454,14 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort):
             )
 
     def complete_no_defect(self, command: PublishInferenceCommand) -> None:
-        self._finalize(command, "SUCCEEDED")
+        self._finalize(command, "SUCCEEDED", publish_result=False)
 
     def publish_success(self, command: PublishInferenceCommand) -> None:
         self._finalize(command, "SUCCEEDED")
 
-    def _finalize(self, command: PublishInferenceCommand, outcome: str) -> None:
+    def _finalize(
+        self, command: PublishInferenceCommand, outcome: str, *, publish_result: bool = True
+    ) -> None:
         claim = command.claim
         with self._session_factory() as session:
             current = self._db_now(session)
@@ -478,7 +492,15 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort):
             ):
                 session.rollback()
                 raise StaleLease("lease is no longer current")
-            attempt = session.get(InferenceAttemptRow, claim.attempt_id, with_for_update=True)
+            attempt = session.scalar(
+                select(InferenceAttemptRow)
+                .where(
+                    InferenceAttemptRow.attempt_id == claim.attempt_id,
+                    InferenceAttemptRow.organization_id == claim.organization_id,
+                    InferenceAttemptRow.task_id == claim.task_id,
+                )
+                .with_for_update()
+            )
             if attempt is None:
                 session.rollback()
                 raise StaleLease("attempt is missing")
@@ -491,7 +513,7 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort):
             state.running_task_id = None
             state.version += 1
             state.updated_at = current
-            if outcome == "SUCCEEDED":
+            if outcome == "SUCCEEDED" and publish_result:
                 c = command.execution_contract
                 session.add(
                     PublishedInferenceResultRow(
@@ -553,7 +575,15 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort):
             ):
                 session.rollback()
                 raise StaleLease("lease is no longer current")
-            attempt = session.get(InferenceAttemptRow, claim.attempt_id, with_for_update=True)
+            attempt = session.scalar(
+                select(InferenceAttemptRow)
+                .where(
+                    InferenceAttemptRow.attempt_id == claim.attempt_id,
+                    InferenceAttemptRow.organization_id == claim.organization_id,
+                    InferenceAttemptRow.task_id == claim.task_id,
+                )
+                .with_for_update()
+            )
             if attempt is None:
                 session.rollback()
                 raise StaleLease("attempt is missing")
