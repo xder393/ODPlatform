@@ -1,14 +1,13 @@
 from datetime import UTC, timedelta
-from hashlib import sha256
 from uuid import uuid4
 
 from odp_api.adapters.persistence.models import (
     AlertRow,
-    AuditLogRow,
     DefectCaseRow,
     InspectionAlertFeedRow,
     InspectionEventRow,
 )
+from odp_api.adapters.persistence.repositories import SqlAlchemyAuditSessionRepository
 from odp_api.adapters.persistence.task_models import (
     CameraInferenceStateRow,
     DefectEpisodeRow,
@@ -18,6 +17,7 @@ from odp_api.adapters.persistence.task_models import (
     OutboxEventRow,
     PublishedInferenceResultRow,
 )
+from odp_api.modules.audit.models import AuditCommand, audit_log_from_command
 from odp_api.modules.inspection.effects import PublishConflict, PublishedEffect
 from odp_api.modules.tasks.models import TaskStatus
 from odp_api.ports.tasks import StaleLease
@@ -223,28 +223,12 @@ class SqlAlchemyInspectionEffects:
                         updated_at=now,
                     )
                     s.add(outbox)
-                    raw = f"{c.organization_id}|{eid}|INSPECTION_PUBLISHED"
-                    prior = s.scalar(
-                        select(AuditLogRow)
-                        .where(AuditLogRow.organization_id == c.organization_id)
-                        .order_by(AuditLogRow.sequence.desc())
-                    )
-                    prev = prior.entry_hash if prior else "0" * 64
-                    seq = (prior.sequence + 1) if prior else 1
-                    s.add(
-                        AuditLogRow(
-                            audit_id=uuid4(),
-                            organization_id=c.organization_id,
-                            sequence=seq,
-                            resource_type="inspection_event",
-                            resource_id=eid,
-                            action="INSPECTION_PUBLISHED",
-                            change_summary=raw,
-                            occurred_at=now,
-                            previous_hash=prev,
-                            entry_hash=sha256((prev + raw).encode()).hexdigest(),
-                        )
-                    )
+                    audit = AuditCommand(c.organization_id, "inspection_event", eid,
+                        "INSPECTION_PUBLISHED", "{}", None, now,
+                        command.correlation_id, None)
+                    SqlAlchemyAuditSessionRepository(s).append_under_head_lock(
+                        audit, lambda sequence, previous_hash: audit_log_from_command(
+                            audit, sequence=sequence, previous_hash=previous_hash))
                 s.flush()
                 if self._failure_hook:
                     self._failure_hook(s)
