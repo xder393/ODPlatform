@@ -31,3 +31,23 @@ Replaced the environment-only placeholder with three `ODP_POSTGRES_TEST_URL`-gat
 The concurrent claim scenario starts two worker calls for two READY tasks on the same tenant/camera behind a `threading.Barrier`; every submitted future is resolved with `future.result()` so worker exceptions propagate. It asserts exactly one LeaseClaim, exactly one RUNNING task, and exactly one attempt for the two-task camera set. The renewal scenario asserts a DB-time lease extension with an unchanged fence token and rejects wrong owner/token. The expiry scenario writes `lease_expires_at = CURRENT_TIMESTAMP - interval '1 second'` through PostgreSQL, then verifies `publish_success` raises `StaleLease` with no PublishedInferenceResult and no task/attempt/camera-state business mutation.
 
 Local exact output: `PYTHONPATH=apps/web-backend/src:packages/shared-schemas/src ../enterprise-ai-quality-inspection/.venv-runtime/bin/pytest apps/web-backend/tests/persistence/test_postgres_fencing.py -q` collected 3 items and reported `3 skipped in 0.13s` because `ODP_POSTGRES_TEST_URL` is absent. `ruff check apps/web-backend/tests/persistence/test_postgres_fencing.py` reported `All checks passed!`; `git diff --check` produced no output. No local RED claim is made because these PostgreSQL tests are correctly skipped without the dedicated database URL.
+
+## Pre-review verification
+
+1. `uv run --project apps/web-backend --with pytest pytest apps/web-backend/tests/modules/tasks/test_fenced_execution.py apps/web-backend/tests/persistence/test_postgres_fencing.py -q`
+
+   Exact result: `collected 10 items`; `7 passed, 3 skipped in 0.34s`.
+
+2. `uv run --project apps/web-backend --with pytest pytest apps/web-backend/tests/modules/tasks/test_camera_admission.py apps/web-backend/tests/persistence/test_postgres_camera_serialization.py -q`
+
+   Exact result: `collected 6 items`; `5 passed, 1 skipped in 0.11s`.
+
+3. `uv run --project apps/web-backend --extra dev --with-editable packages/shared-schemas --with httpx2 pytest apps/web-backend/tests -q`
+
+   Exact result: `collected 191 items`; `184 passed, 7 skipped in 12.42s`.
+
+4. `uv run --project apps/web-backend --extra dev ruff check apps/web-backend/src/odp_api/adapters/persistence/task_control.py apps/web-backend/src/odp_api/modules/tasks/execution.py apps/web-backend/src/odp_api/ports/tasks.py apps/web-backend/tests/modules/tasks/test_fenced_execution.py apps/web-backend/tests/persistence/test_postgres_fencing.py`
+
+   Exact result: `All checks passed!`. Both `git diff --check` and `git diff --check e8862bc..HEAD` produced no output.
+
+Self-review of `e8862bc..HEAD`: all fencing reads/updates are organization-scoped; claim and finalization lock the camera-state anchor before task/attempt locks; `claim`, `renew`, finalization, and failure transitions derive `current` via `_db_now(session)`/database `CURRENT_TIMESTAMP` rather than caller time; and `complete_no_defect` invokes `_finalize(..., publish_result=False)`, which guards the only PublishedInferenceResult write. No concerns found in the reviewed scope. The PostgreSQL-only paths remain unexecuted locally because the dedicated database URL is absent, as reflected in the expected skips.
