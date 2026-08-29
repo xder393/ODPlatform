@@ -22,6 +22,7 @@ from odp_api.modules.inspection.effects import PublishConflict, PublishedEffect
 from odp_api.modules.tasks.models import TaskStatus
 from odp_api.ports.tasks import StaleLease
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 
 class SqlAlchemyInspectionEffects:
@@ -178,6 +179,7 @@ class SqlAlchemyInspectionEffects:
                         str(d.get("defect_type", "UNKNOWN")),
                         str(d.get("spatial_zone") or "GLOBAL"),
                     )
+                    ep = self._claim_episode(s, c.organization_id, task.camera_id, typ, zone, now)
                     ep = s.scalar(
                         select(DefectEpisodeRow)
                         .where(
@@ -309,6 +311,48 @@ class SqlAlchemyInspectionEffects:
             except BaseException:
                 s.rollback()
                 raise
+
+    @staticmethod
+    def _claim_episode(session, organization_id, camera_id, defect_type, spatial_zone, now):
+        row = session.scalar(
+            select(DefectEpisodeRow)
+            .where(
+                DefectEpisodeRow.organization_id == organization_id,
+                DefectEpisodeRow.camera_id == camera_id,
+                DefectEpisodeRow.defect_type == defect_type,
+                DefectEpisodeRow.spatial_zone == spatial_zone,
+            )
+            .with_for_update()
+        )
+        if row is not None:
+            return row
+        try:
+            with session.begin_nested():
+                session.add(
+                    DefectEpisodeRow(
+                        episode_id=uuid4(),
+                        organization_id=organization_id,
+                        camera_id=camera_id,
+                        defect_type=defect_type,
+                        spatial_zone=spatial_zone,
+                        episode_expires_at=now,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                session.flush()
+        except IntegrityError:
+            pass
+        return session.scalar(
+            select(DefectEpisodeRow)
+            .where(
+                DefectEpisodeRow.organization_id == organization_id,
+                DefectEpisodeRow.camera_id == camera_id,
+                DefectEpisodeRow.defect_type == defect_type,
+                DefectEpisodeRow.spatial_zone == spatial_zone,
+            )
+            .with_for_update()
+        )
 
     @staticmethod
     def _utc(value):

@@ -255,6 +255,17 @@ def test_episode_reuses_open_case_and_expiry_creates_a_new_case(runtime):
     )
     assert third.case_id != first.case_id
 
+def test_episode_shell_is_claimed_before_case_creation(runtime):
+    now = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    org, camera, _artifact, _task, claim = _running(runtime, now)
+    with runtime.begin() as session:
+        session.add(DefectEpisodeRow(episode_id=uuid4(), organization_id=org, camera_id=camera, defect_type="scratch", spatial_zone="GLOBAL", current_case_id=None, episode_expires_at=now + timedelta(minutes=5), created_at=now, updated_at=now))
+    effect = _service(runtime).publish(_command(claim, now, ({"defect_type":"scratch","confidence":.9},)))
+    with runtime() as session:
+        episode = session.scalar(select(DefectEpisodeRow).where(DefectEpisodeRow.organization_id == org))
+        assert episode.current_case_id == effect.case_id
+        assert session.scalar(select(func.count()).select_from(DefectCaseRow).where(DefectCaseRow.organization_id == org)) == 1
+
 
 def test_downstream_failure_rolls_back_every_effect(runtime, monkeypatch):
     now = datetime(2026, 8, 25, 12, tzinfo=UTC)
