@@ -53,6 +53,14 @@ Local exact output: `PYTHONPATH=apps/web-backend/src:packages/shared-schemas/src
 Self-review of `e8862bc..HEAD`: all fencing reads/updates are organization-scoped; claim and finalization lock the camera-state anchor before task/attempt locks; `claim`, `renew`, finalization, and failure transitions derive `current` via `_db_now(session)`/database `CURRENT_TIMESTAMP` rather than caller time; and `complete_no_defect` invokes `_finalize(..., publish_result=False)`, which guards the only PublishedInferenceResult write. No concerns found in the reviewed scope. The PostgreSQL-only paths remain unexecuted locally because the dedicated database URL is absent, as reflected in the expected skips.
 ## Fix Round 1 evidence (2026-08-29)
 
-- Local fenced execution tests: 12 passed after reproducing 5 behavioral failures.
-- Implemented DB-time expired-anchor recovery, lease-expiry attempt closure, fenced reclaim, and strict attempt identity checks.
-- Added `ODP_POSTGRES_TEST_URL`-gated PostgreSQL expiry-then-reclaim coverage (skips locally when URL is absent).
+Covering tests are `apps/web-backend/tests/modules/tasks/test_fenced_execution.py::test_expired_same_task_is_reclaimed_with_new_fence_and_attempt`, `::test_expired_other_task_releases_camera_and_claims_ready_target`, and `::test_finalize_rejects_attempt_that_does_not_match_lease_identity`; PostgreSQL coverage is `apps/web-backend/tests/persistence/test_postgres_fencing.py::test_postgresql_expired_fence_is_reclaimed_with_new_attempt`.
+
+RED command: `./.venv/bin/python -m pytest -q tests/modules/tasks/test_fenced_execution.py` (from `apps/web-backend`). Result: 5 failures — same-task reclaim returned `None`; different-task recovery returned `None`; all three parametrized strict Attempt identity cases (`fence_token-999`, `worker_id-impostor`, `attempt_no-999`) failed to raise `StaleLease`.
+
+GREEN focused command: `./.venv/bin/python -m pytest -q tests/modules/tasks/test_fenced_execution.py tests/persistence/test_postgres_fencing.py`. Result: `12 passed, 4 skipped in 0.44s` (PostgreSQL skips are expected without `ODP_POSTGRES_TEST_URL`).
+
+Task 2 regression command: `./.venv/bin/python -m pytest -q tests/modules/tasks/test_camera_admission.py tests/persistence/test_postgres_camera_serialization.py`. Result: `5 passed, 1 skipped`.
+
+Full backend command: `PYTHONPATH=/Users/xder393/ODPlatform/.worktrees/p1-realtime-inference/packages/shared-schemas/src .venv/bin/python -m pytest -q`. Result: `189 passed, 8 skipped in 12.15s`.
+
+Quality commands: `./.venv/bin/ruff check src/odp_api/adapters/persistence/task_control.py tests/modules/tasks/test_fenced_execution.py tests/persistence/test_postgres_fencing.py` — `All checks passed!`; `git diff --check` — no output.
