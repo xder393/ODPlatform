@@ -1,10 +1,11 @@
 """Append-only audit service and an in-memory transactional adapter for tests."""
 
 from collections import defaultdict
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import replace
 from threading import Event, Lock, RLock
-from typing import Callable, Protocol
+from typing import Protocol
 from uuid import UUID
 
 from odp_api.modules.audit.models import (
@@ -147,7 +148,7 @@ class AuditService:
 
     def ensure_append_allowed(self, organization_id: UUID) -> None:
         with self.append_guard(organization_id):
-            return None
+            return
 
     def verify_organization_chain(self, organization_id: UUID) -> VerificationResult:
         from odp_api.modules.audit.verify import verify_organization_chain

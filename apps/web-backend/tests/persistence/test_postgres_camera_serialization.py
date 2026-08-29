@@ -1,14 +1,13 @@
+import os
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
-import os
 from pathlib import Path
-import sys
 from threading import Barrier
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
-
 
 WEB_BACKEND_SRC = Path(__file__).parents[2] / "src"
 sys.path[:0] = [str(WEB_BACKEND_SRC)]

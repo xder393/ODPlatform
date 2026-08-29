@@ -7,6 +7,8 @@ from threading import Barrier
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import func, select
+
 from odp_api.adapters.persistence.inspection_effects import SqlAlchemyInspectionEffects
 from odp_api.adapters.persistence.models import Base, DefectCaseRow, InspectionEventRow
 from odp_api.adapters.persistence.task_control import SqlAlchemyTaskControlRepository
@@ -20,8 +22,10 @@ from odp_api.adapters.persistence.task_models import (
 )
 from odp_api.db import create_engine_and_session
 from odp_api.modules.inspection.effects import InspectionEffectService
-from odp_api.modules.tasks.commands import InferenceExecutionContract, PublishInferenceCommand
-from sqlalchemy import func, select
+from odp_api.modules.tasks.commands import (
+    InferenceExecutionContract,
+    PublishInferenceCommand,
+)
 
 pytestmark = pytest.mark.skipif(
     not environ.get("ODP_POSTGRES_TEST_URL"), reason="ODP_POSTGRES_TEST_URL not configured"

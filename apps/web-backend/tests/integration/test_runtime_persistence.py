@@ -9,7 +9,6 @@ from odp_api.main import create_app
 from odp_api.seed import DEMO_ACCOUNTS, DEMO_ORG_ID, build_demo_seed
 from odp_api.settings import Settings
 
-
 CORRELATION_ID = UUID("40000000-0000-4000-8000-000000000002")
 
 

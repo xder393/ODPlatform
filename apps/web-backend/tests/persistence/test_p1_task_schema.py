@@ -2,10 +2,11 @@
 
 from pathlib import Path
 
-from alembic import command
 from alembic.config import Config
-from odp_api.db import create_engine_and_session
 from sqlalchemy import inspect
+
+from alembic import command
+from odp_api.db import create_engine_and_session
 
 BACKEND_DIR = Path(__file__).parents[2]
 

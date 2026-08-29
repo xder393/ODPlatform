@@ -2,11 +2,21 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import UUID
 
-from alembic import command
 from alembic.config import Config
 from argon2 import PasswordHasher
 from fastapi import APIRouter, FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
+from sqlalchemy import inspect, text
+from sqlalchemy.exc import (
+    DBAPIError,
+    DisconnectionError,
+    IntegrityError,
+    InterfaceError,
+    OperationalError,
+    SQLAlchemyError,
+)
+
+from alembic import command
 from odp_api.adapters.auth.argon2 import Argon2PasswordVerifier
 from odp_api.adapters.auth.jwt import ActorRepository, JwtAuthenticator
 from odp_api.adapters.auth.redis_security import (
@@ -18,7 +28,9 @@ from odp_api.adapters.auth.sqlite_security import (
     SqliteWebSocketTicketStore,
 )
 from odp_api.adapters.generation.mock import MockLLMAdapter
-from odp_api.adapters.notifications.redis_durable_feed import RedisDurableInspectionAlertFeed
+from odp_api.adapters.notifications.redis_durable_feed import (
+    RedisDurableInspectionAlertFeed,
+)
 from odp_api.adapters.notifications.sqlite_feed import SqliteInspectionAlertFeed
 from odp_api.adapters.persistence.models import Base
 from odp_api.adapters.persistence.repositories import (
@@ -31,15 +43,24 @@ from odp_api.adapters.persistence.unit_of_work import SqlAlchemyBusinessUnitOfWo
 from odp_api.adapters.redis_stream import RedisSocketStreamClient, SQLiteStreamClient
 from odp_api.adapters.retrieval.embedding import hash_embedding
 from odp_api.adapters.retrieval.inmemory import InMemoryKnowledgeIndex
-from odp_api.adapters.retrieval.pgvector import PgVectorPostgresAdapter, psycopg_executor
-from odp_api.adapters.tasks.redis_stream import RedisStreamTaskAlertPublisher, RedisStreamTaskQueue
+from odp_api.adapters.retrieval.pgvector import (
+    PgVectorPostgresAdapter,
+    psycopg_executor,
+)
+from odp_api.adapters.tasks.redis_stream import (
+    RedisStreamTaskAlertPublisher,
+    RedisStreamTaskQueue,
+)
 from odp_api.adapters.tasks.sqlite import SQLiteTaskRepository
 from odp_api.adapters.vision.mock import MockVisionAdapter
 from odp_api.db import create_engine_and_session
 from odp_api.modules.ai_orchestration.router import create_advice_router
 from odp_api.modules.ai_orchestration.service import AdviceService
 from odp_api.modules.audit.service import AuditRepository, AuditService
-from odp_api.modules.audit.verify import AuditVerificationMonitor, ManagedDailyAuditVerification
+from odp_api.modules.audit.verify import (
+    AuditVerificationMonitor,
+    ManagedDailyAuditVerification,
+)
 from odp_api.modules.cases.application import CaseApplicationService
 from odp_api.modules.cases.router import create_cases_router
 from odp_api.modules.identity.service import (
@@ -50,7 +71,9 @@ from odp_api.modules.identity.service import (
 from odp_api.modules.identity.tickets import WebSocketTicketService
 from odp_api.modules.inspection.service import InspectionService
 from odp_api.modules.knowledge.ingest import KnowledgeIngestionService
-from odp_api.modules.notifications.dev_router import create_development_notifications_router
+from odp_api.modules.notifications.dev_router import (
+    create_development_notifications_router,
+)
 from odp_api.modules.notifications.router import create_notifications_router
 from odp_api.modules.tasks.service import TaskService
 from odp_api.observability.logging import configure_uvicorn_access_logging
@@ -73,15 +96,6 @@ from odp_api.seed import (
     seed_business_data,
 )
 from odp_api.settings import Settings
-from sqlalchemy import inspect, text
-from sqlalchemy.exc import (
-    DBAPIError,
-    DisconnectionError,
-    IntegrityError,
-    InterfaceError,
-    OperationalError,
-    SQLAlchemyError,
-)
 
 health_router = APIRouter()
 

@@ -4,6 +4,9 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import sessionmaker
+
 from odp_api.adapters.persistence.models import AuditLogRow, Base
 from odp_api.adapters.persistence.task_control import SqlAlchemyTaskControlRepository
 from odp_api.adapters.persistence.task_models import (
@@ -17,8 +20,6 @@ from odp_api.adapters.persistence.task_models import (
 from odp_api.modules.tasks.models import FailureKind, TaskStatus
 from odp_api.modules.tasks.recovery import SystemRecoveryScope
 from odp_api.ports.tasks import AdmissionRejected
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import sessionmaker
 
 
 @pytest.fixture

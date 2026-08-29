@@ -1,12 +1,12 @@
 """Pure, HMAC-SHA256 JWT authentication adapter for the local API runtime."""
 
 import base64
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from hmac import compare_digest, new
-import json
 from typing import Protocol
 from uuid import UUID
 

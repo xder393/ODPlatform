@@ -6,11 +6,11 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from odp_schemas.events import InspectionAlert
 
 from odp_api.main import create_app
 from odp_api.seed import DEMO_ACCOUNTS, DEMO_LINE_ID, DEMO_ORG_ID, build_demo_seed
 from odp_api.settings import Settings
-from odp_schemas.events import InspectionAlert
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -74,9 +74,10 @@ def test_bad_cursor_does_not_consume_ticket(tmp_path: Path) -> None:
     from starlette.websockets import WebSocketDisconnect
     with TestClient(create_app(settings=_settings(tmp_path), seed=build_demo_seed())) as client:
         ticket = client.post("/api/v1/auth/websocket-ticket", headers={"Authorization": f"Bearer {_token(client)}"}).json()["ticket"]
-        with pytest.raises(WebSocketDisconnect):
-            with client.websocket_connect(f"/ws/inspection-events?ticket={ticket}&cursor=-1"):
-                pass
+        with pytest.raises(WebSocketDisconnect), client.websocket_connect(
+            f"/ws/inspection-events?ticket={ticket}&cursor=-1"
+        ):
+            pass
         with client.websocket_connect(f"/ws/inspection-events?ticket={ticket}&cursor=10"):
             pass
 

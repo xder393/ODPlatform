@@ -1,16 +1,15 @@
 """Regression coverage for temporal JWT validation."""
 
 import base64
+import json
 from datetime import UTC, datetime
 from hashlib import sha256
 from hmac import new
-import json
 from uuid import uuid4
 
 import pytest
 
 from odp_api.adapters.auth.jwt import InvalidJwtSubject, extract_subject, issue_token
-
 
 NOW = datetime(2026, 8, 24, 12, tzinfo=UTC)
 SECRET = "jwt-security-test-secret"

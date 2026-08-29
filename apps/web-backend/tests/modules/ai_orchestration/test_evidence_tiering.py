@@ -20,7 +20,11 @@ from odp_api.modules.knowledge.models import (
     KnowledgeDocument,
     KnowledgeParentChunk,
 )
-from odp_api.ports.generation import GeneratedAdvice, GeneratedCitation, GenerationRequest
+from odp_api.ports.generation import (
+    GeneratedAdvice,
+    GeneratedCitation,
+    GenerationRequest,
+)
 from odp_api.ports.retrieval import RetrievalFilters
 
 

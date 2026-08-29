@@ -1,6 +1,5 @@
-from pathlib import Path
 import sys
-
+from pathlib import Path
 
 WEB_BACKEND_SRC = Path(__file__).parents[3] / "src"
 sys.path[:0] = [str(WEB_BACKEND_SRC)]

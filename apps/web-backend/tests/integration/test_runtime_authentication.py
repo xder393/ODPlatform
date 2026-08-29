@@ -2,14 +2,13 @@ import base64
 import hashlib
 import hmac
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
-
 
 WEB_BACKEND_SRC = Path(__file__).parents[2] / "src"
 SHARED_SCHEMAS_SRC = Path(__file__).parents[4] / "packages" / "shared-schemas" / "src"
@@ -121,9 +120,10 @@ def test_runtime_websocket_requires_a_verified_one_time_ticket() -> None:
         assert websocket.receive_json()["alert"]["organization_id"] == str(actor.organization_id)
 
     for query in ("", "?token=legacy-jwt"):
-        with pytest.raises(WebSocketDisconnect) as error:
-            with client.websocket_connect(f"/ws/inspection-events{query}"):
-                pass
+        with pytest.raises(
+            WebSocketDisconnect
+        ) as error, client.websocket_connect(f"/ws/inspection-events{query}"):
+            pass
         assert error.value.code == 1008
 
 

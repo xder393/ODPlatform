@@ -5,9 +5,9 @@ from datetime import UTC, datetime
 from typing import Protocol
 from uuid import UUID
 
-from odp_api.ports.notifications import StoredInspectionAlert
-
 from odp_schemas.events import InspectionAlert
+
+from odp_api.ports.notifications import StoredInspectionAlert
 
 
 class RedisInspectionAlertClient(Protocol):

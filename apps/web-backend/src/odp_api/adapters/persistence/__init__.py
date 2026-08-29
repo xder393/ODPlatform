@@ -5,4 +5,4 @@ metadata.  This keeps ``Base.metadata.create_all`` and Alembic's autogenerate
 view consistent during the P1B adapter migration.
 """
 
-from . import task_models as task_models  # noqa: F401,E402
+from . import task_models as task_models

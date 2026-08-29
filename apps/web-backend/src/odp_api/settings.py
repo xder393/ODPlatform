@@ -3,7 +3,6 @@ from typing import Literal
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 Environment = Literal["local", "test", "docker", "staging", "production"]
 RetrievalBackend = Literal["inmemory", "pgvector"]
 

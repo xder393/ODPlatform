@@ -1,6 +1,10 @@
 from datetime import UTC, timedelta
 from uuid import uuid4
 
+from odp_schemas.events import InspectionAlert
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+
 from odp_api.adapters.persistence.models import (
     AlertRow,
     DefectCaseRow,
@@ -21,10 +25,6 @@ from odp_api.modules.audit.models import AuditCommand, audit_log_from_command
 from odp_api.modules.inspection.effects import PublishConflict, PublishedEffect
 from odp_api.modules.tasks.models import TaskStatus
 from odp_api.ports.tasks import StaleLease
-from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
-
-from odp_schemas.events import InspectionAlert
 
 
 class SqlAlchemyInspectionEffects:

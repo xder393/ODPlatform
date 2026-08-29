@@ -5,13 +5,13 @@ from typing import Annotated
 from uuid import UUID, uuid5
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from odp_schemas.events import InspectionAlert
+from pydantic import BaseModel
+
 from odp_api.modules.identity.models import Actor
 from odp_api.modules.identity.policies import AuthorizationDenied, authorize
 from odp_api.modules.identity.service import get_current_actor
 from odp_api.ports.notifications import InspectionAlertFeedPort
-from pydantic import BaseModel
-
-from odp_schemas.events import InspectionAlert
 
 
 class DevInspectionEventRequest(BaseModel):

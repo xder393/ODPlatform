@@ -13,6 +13,8 @@ from uuid import UUID, uuid4
 from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
 
+from pypdf import PdfReader
+
 from odp_api.modules.knowledge.models import (
     EvidenceKind,
     KnowledgeChunk,
@@ -20,7 +22,6 @@ from odp_api.modules.knowledge.models import (
     KnowledgeParentChunk,
 )
 from odp_api.ports.retrieval import KnowledgeIndexPort
-from pypdf import PdfReader
 
 PDF_MEDIA_TYPE = "application/pdf"
 DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"

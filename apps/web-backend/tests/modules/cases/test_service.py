@@ -1,22 +1,22 @@
-from datetime import UTC, datetime
-from dataclasses import replace
-from pathlib import Path
 import sys
+from dataclasses import replace
+from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
-
 WEB_BACKEND_SRC = Path(__file__).parents[3] / "src"
 SHARED_SCHEMAS_SRC = Path(__file__).parents[5] / "packages" / "shared-schemas" / "src"
 sys.path[:0] = [str(WEB_BACKEND_SRC), str(SHARED_SCHEMAS_SRC)]
+
+from odp_schemas.events import InspectionAlert
 
 from odp_api.modules.cases.errors import InvalidCaseStatus, InvalidCaseTransition
 from odp_api.modules.cases.service import CaseService
 from odp_api.modules.identity.models import Actor, Role
 from odp_api.modules.identity.policies import AuthorizationDenied
 from odp_api.modules.inspection.models import DefectCase, InspectionEvent
-from odp_schemas.events import InspectionAlert
 
 
 def make_case() -> DefectCase:

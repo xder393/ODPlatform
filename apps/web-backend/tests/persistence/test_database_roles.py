@@ -3,12 +3,13 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import ProgrammingError
+
 from odp_api.adapters.persistence.repositories import SqlAlchemyAuditRepository
 from odp_api.db import create_engine_and_session
 from odp_api.modules.audit.models import AuditCommand
 from odp_api.modules.audit.service import AuditService
-from sqlalchemy import text
-from sqlalchemy.exc import ProgrammingError
 
 
 def test_runtime_grant_script_preserves_append_only_audit_boundaries() -> None:
@@ -65,17 +66,15 @@ def test_postgresql_runtime_role_is_not_owner_and_cannot_mutate_audit_rows() -> 
             )
         )
 
-        with pytest.raises(ProgrammingError):
-            with app_engine.begin() as connection:
-                connection.execute(
-                    text("UPDATE audit_logs SET action = 'rewritten' WHERE audit_id = :audit_id"),
-                    {"audit_id": appended.audit_id},
-                )
-        with pytest.raises(ProgrammingError):
-            with app_engine.begin() as connection:
-                connection.execute(
-                    text("DELETE FROM audit_logs WHERE audit_id = :audit_id"),
-                    {"audit_id": appended.audit_id},
-                )
+        with pytest.raises(ProgrammingError), app_engine.begin() as connection:
+            connection.execute(
+                text("UPDATE audit_logs SET action = 'rewritten' WHERE audit_id = :audit_id"),
+                {"audit_id": appended.audit_id},
+            )
+        with pytest.raises(ProgrammingError), app_engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM audit_logs WHERE audit_id = :audit_id"),
+                {"audit_id": appended.audit_id},
+            )
     finally:
         app_engine.dispose()

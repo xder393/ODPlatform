@@ -5,6 +5,9 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
+from sqlalchemy import func, select
+
 from odp_api.adapters.persistence.inspection_effects import SqlAlchemyInspectionEffects
 from odp_api.adapters.persistence.models import (
     AlertRow,
@@ -26,11 +29,12 @@ from odp_api.adapters.persistence.task_models import (
 )
 from odp_api.db import create_engine_and_session
 from odp_api.modules.inspection.effects import InspectionEffectService, PublishConflict
-from odp_api.modules.tasks.commands import InferenceExecutionContract, PublishInferenceCommand
+from odp_api.modules.tasks.commands import (
+    InferenceExecutionContract,
+    PublishInferenceCommand,
+)
 from odp_api.modules.tasks.models import TaskStatus
 from odp_api.ports.tasks import StaleLease
-from pydantic import ValidationError
-from sqlalchemy import func, select
 
 
 def _command(claim, now, detections=()):

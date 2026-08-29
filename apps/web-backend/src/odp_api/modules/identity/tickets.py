@@ -1,11 +1,10 @@
 """Opaque, short-lived, single-use WebSocket ticket services."""
 
-from datetime import UTC, datetime, timedelta
 import secrets
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from odp_api.modules.identity.ports import WebSocketTicketStorePort
-
 
 WEBSOCKET_TICKET_TTL_SECONDS = 60
 _SYSTEM_ORGANIZATION_ID = UUID(int=0)

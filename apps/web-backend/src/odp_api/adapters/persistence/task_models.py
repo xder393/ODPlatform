@@ -11,7 +11,6 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from odp_api.adapters.persistence.models import Base
 from sqlalchemy import (
     JSON,
     BigInteger,
@@ -30,6 +29,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import Uuid
+
+from odp_api.adapters.persistence.models import Base
 
 
 class CameraInferenceStateRow(Base):

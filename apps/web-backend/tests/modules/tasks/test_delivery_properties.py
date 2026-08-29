@@ -5,10 +5,12 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from alembic import command
 from alembic.config import Config
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from sqlalchemy import func, select
+
+from alembic import command
 from odp_api.adapters.persistence.inspection_effects import SqlAlchemyInspectionEffects
 from odp_api.adapters.persistence.models import InspectionEventRow
 from odp_api.adapters.persistence.task_control import SqlAlchemyTaskControlRepository
@@ -18,10 +20,12 @@ from odp_api.adapters.persistence.task_models import (
 )
 from odp_api.db import create_engine_and_session
 from odp_api.modules.inspection.effects import InspectionEffectService
-from odp_api.modules.tasks.commands import InferenceExecutionContract, PublishInferenceCommand
+from odp_api.modules.tasks.commands import (
+    InferenceExecutionContract,
+    PublishInferenceCommand,
+)
 from odp_api.modules.tasks.recovery import RecoveryService, SystemRecoveryScope
 from odp_api.ports.tasks import AdmissionRequest, StaleLease
-from sqlalchemy import func, select
 
 
 class DeliveryHarness:

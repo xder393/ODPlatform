@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+
 from odp_api.main import create_app
 from odp_api.seed import DEMO_ACCOUNTS, DEMO_LINE_ID, build_demo_seed
 from odp_api.settings import Settings

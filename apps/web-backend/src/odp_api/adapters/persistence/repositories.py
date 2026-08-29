@@ -19,7 +19,12 @@ from odp_api.adapters.persistence.models import (
     InspectionEventRow,
     PasswordCredentialRow,
 )
-from odp_api.modules.audit.models import AuditChainHead, AuditChainSnapshot, AuditCommand, AuditLog
+from odp_api.modules.audit.models import (
+    AuditChainHead,
+    AuditChainSnapshot,
+    AuditCommand,
+    AuditLog,
+)
 from odp_api.modules.cases.ports import CaseTransition, StoredCase
 from odp_api.modules.identity.models import Actor, Role
 from odp_api.modules.inspection.models import DefectCase, InspectionEvent

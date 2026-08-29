@@ -1,6 +1,7 @@
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from hmac import compare_digest
-from typing import Callable, Protocol
+from typing import Protocol
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, status
@@ -8,8 +9,12 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 from odp_api.modules.identity.models import Actor
-from odp_api.modules.identity.ports import REAUTHENTICATION_TTL_SECONDS, ReauthenticationStorePort
+from odp_api.modules.identity.ports import (
+    REAUTHENTICATION_TTL_SECONDS,
+    ReauthenticationStorePort,
+)
 from odp_api.modules.identity.tickets import WebSocketTicketService
+
 
 class RecentReauthenticationRequired(PermissionError):
     """Raised when a simulated high-risk command lacks a five-minute marker."""

@@ -3,9 +3,9 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from odp_api.modules.cases.errors import InvalidCaseStatus
-
 from odp_schemas.events import InspectionAlert
+
+from odp_api.modules.cases.errors import InvalidCaseStatus
 
 CaseStatus = Literal["PENDING_CONFIRMATION", "IN_REVIEW", "RESOLVED", "FALSE_POSITIVE"]
 CASE_STATUSES: frozenset[CaseStatus] = frozenset(

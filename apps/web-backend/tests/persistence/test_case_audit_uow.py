@@ -1,7 +1,6 @@
+import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta, timezone
-import os
-from pathlib import Path
 from threading import Event
 from uuid import UUID
 
@@ -22,7 +21,11 @@ from odp_api.adapters.persistence.repositories import (
 from odp_api.adapters.persistence.unit_of_work import SqlAlchemyBusinessUnitOfWork
 from odp_api.db import create_engine_and_session
 from odp_api.modules.audit.models import AuditCommand
-from odp_api.modules.audit.service import AuditAppendBlocked, AuditService, AuditWriteError
+from odp_api.modules.audit.service import (
+    AuditAppendBlocked,
+    AuditService,
+    AuditWriteError,
+)
 from odp_api.modules.cases.application import AuditContext, CaseApplicationService
 from odp_api.modules.cases.errors import InvalidCaseTransition
 from odp_api.modules.identity.models import Actor

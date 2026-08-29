@@ -4,6 +4,8 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import select
+
 from odp_api.adapters.persistence.models import Base
 from odp_api.adapters.persistence.task_control import SqlAlchemyTaskControlRepository
 from odp_api.adapters.persistence.task_models import (
@@ -14,10 +16,12 @@ from odp_api.adapters.persistence.task_models import (
     PublishedInferenceResultRow,
 )
 from odp_api.db import create_engine_and_session
-from odp_api.modules.tasks.commands import InferenceExecutionContract, PublishInferenceCommand
+from odp_api.modules.tasks.commands import (
+    InferenceExecutionContract,
+    PublishInferenceCommand,
+)
 from odp_api.modules.tasks.models import TaskStatus
 from odp_api.ports.tasks import StaleLease, TaskExecutionPort
-from sqlalchemy import select
 
 
 def test_execution_port_exposes_fenced_mutations():

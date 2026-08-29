@@ -1,7 +1,7 @@
 import asyncio
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-import sys
 from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient

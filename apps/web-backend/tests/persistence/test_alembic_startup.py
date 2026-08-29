@@ -1,15 +1,14 @@
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
-from alembic import command
 from alembic.config import Config
 from sqlalchemy import inspect, text
 
+from alembic import command
 from odp_api.db import create_engine_and_session
-
 
 BACKEND_DIR = Path(__file__).parents[2]
 
@@ -22,6 +21,7 @@ def test_alembic_cli_uses_odp_database_url_for_a_real_sqlite_upgrade(tmp_path) -
         cwd=BACKEND_DIR,
         env={**os.environ, "ODP_DATABASE_URL": database_url},
         capture_output=True,
+        check=False,
         text=True,
     )
 
@@ -63,6 +63,7 @@ def test_alembic_cli_renders_postgresql_ddl_and_widens_revision_storage() -> Non
             "ODP_DATABASE_URL": "postgresql+psycopg://odp:odp@localhost:5432/odp",
         },
         capture_output=True,
+        check=False,
         text=True,
     )
 

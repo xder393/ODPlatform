@@ -1,12 +1,14 @@
 """Transport adapters for the process-local inspection alert feed."""
 
 import asyncio
-from contextlib import suppress
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket
+from odp_schemas.events import InspectionAlert
 from starlette.websockets import WebSocketDisconnect
+
 from odp_api.modules.identity.models import Actor, Role
 from odp_api.modules.identity.policies import AuthorizationDenied, authorize
 from odp_api.modules.identity.service import (
@@ -15,8 +17,6 @@ from odp_api.modules.identity.service import (
     get_current_websocket_actor,
 )
 from odp_api.ports.notifications import InspectionAlertFeedPort, StoredInspectionAlert
-
-from odp_schemas.events import InspectionAlert
 
 
 class InMemoryInspectionAlertRepository:

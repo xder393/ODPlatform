@@ -15,7 +15,11 @@ from threading import RLock
 from typing import Protocol
 from uuid import UUID
 
-from odp_api.modules.knowledge.models import KnowledgeChunk, KnowledgeDocument, KnowledgeParentChunk
+from odp_api.modules.knowledge.models import (
+    KnowledgeChunk,
+    KnowledgeDocument,
+    KnowledgeParentChunk,
+)
 from odp_api.ports.retrieval import RetrievalFilters, RetrievedChunk
 
 POSTGRES_HYBRID_SEARCH_SQL = """
@@ -211,7 +215,6 @@ class PgVectorPostgresAdapter:
     ) -> KnowledgeDocument:
         PgVectorRetrievalAdapter._validate_index_scope(document, parents, chunks)
         with self._executor.transaction() as executor:
-            parameters = _document_parameters(document)
             executor.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%(source_lock)s, 0))",
                 {"source_lock": f"{document.organization_id}:{document.source_name}"},
@@ -562,7 +565,7 @@ class PgVectorRetrievalAdapter:
         normal_bm25 = _normalize(bm25_scores)
         results = [
             self._retrieved_chunk(chunk, vector, bm25, (vector + bm25) / 2)
-            for chunk, vector, bm25 in zip(candidates, normal_vector, normal_bm25)
+            for chunk, vector, bm25 in zip(candidates, normal_vector, normal_bm25, strict=True)
         ]
         return sorted(results, key=lambda result: (-result.score, str(result.chunk_id)))[: filters.limit]
 
@@ -671,7 +674,7 @@ def _vector(tokens: Sequence[str]) -> list[float]:
 
 def _cosine_similarity(left: Sequence[str], right: Sequence[str]) -> float:
     left_vector, right_vector = _vector(left), _vector(right)
-    numerator = sum(a * b for a, b in zip(left_vector, right_vector))
+    numerator = sum(a * b for a, b in zip(left_vector, right_vector, strict=True))
     denominator = math.sqrt(sum(a * a for a in left_vector) * sum(b * b for b in right_vector))
     return numerator / denominator if denominator else 0.0
 

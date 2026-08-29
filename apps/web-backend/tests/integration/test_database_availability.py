@@ -1,11 +1,12 @@
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import OperationalError
+
 from odp_api.adapters.auth.jwt import InMemoryActorRepository, issue_token
 from odp_api.main import create_app
 from odp_api.seed import DEMO_ACCOUNTS, build_demo_seed
 from odp_api.settings import Settings
-from sqlalchemy.exc import OperationalError
 
 
 def _settings(tmp_path: Path) -> Settings:

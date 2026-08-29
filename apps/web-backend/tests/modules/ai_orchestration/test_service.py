@@ -11,6 +11,8 @@ WEB_BACKEND_SRC = Path(__file__).parents[3] / "src"
 SHARED_SCHEMAS_SRC = Path(__file__).parents[5] / "packages" / "shared-schemas" / "src"
 sys.path[:0] = [str(WEB_BACKEND_SRC), str(SHARED_SCHEMAS_SRC)]
 
+from odp_schemas.events import InspectionAlert
+
 from odp_api.adapters.generation.mock import MockLLMAdapter
 from odp_api.main import create_app
 from odp_api.modules.ai_orchestration.router import create_advice_router
@@ -24,8 +26,6 @@ from odp_api.modules.identity.service import get_current_actor
 from odp_api.modules.inspection.models import DefectCase, InspectionEvent
 from odp_api.ports.generation import GeneratedAdvice, GenerationRequest
 from odp_api.ports.retrieval import RetrievalFilters, RetrievedChunk
-
-from odp_schemas.events import InspectionAlert
 
 GOLDEN_DATASET = json.loads(
     (Path(__file__).parents[2] / "golden" / "rag_advice.json").read_text()
