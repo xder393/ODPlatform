@@ -10,12 +10,14 @@ from threading import Barrier
 from uuid import uuid4
 
 import pytest
+from alembic.config import Config
 from sqlalchemy import func, select, text, update
+
+from alembic import command
 
 WEB_BACKEND_SRC = Path(__file__).parents[2] / "src"
 sys.path[:0] = [str(WEB_BACKEND_SRC)]
 
-from odp_api.adapters.persistence.models import Base
 from odp_api.adapters.persistence.task_control import (
     SqlAlchemyTaskControlRepository,
 )
@@ -41,6 +43,12 @@ pytestmark = pytest.mark.skipif(
     not os.getenv("ODP_POSTGRES_TEST_URL"),
     reason="requires the dedicated ODP_POSTGRES_TEST_URL CI database",
 )
+
+
+def _migrate_head(database_url: str) -> None:
+    config = Config(str(Path(__file__).parents[2] / "alembic.ini"))
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(config, "head")
 
 
 def _create_ready_tasks(sessions, *, task_count=1):
@@ -132,7 +140,7 @@ def _command(claim):
 def test_postgresql_claim_serializes_workers_for_one_camera():
     engine, sessions = create_engine_and_session(os.environ["ODP_POSTGRES_TEST_URL"])
     try:
-        Base.metadata.create_all(engine)
+        _migrate_head(os.environ["ODP_POSTGRES_TEST_URL"])
         organization_id, camera_id, task_ids = _create_ready_tasks(sessions, task_count=2)
         barrier = Barrier(2)
 
@@ -173,7 +181,7 @@ def test_postgresql_claim_serializes_workers_for_one_camera():
 def test_postgresql_renewal_keeps_fence_token_and_rejects_wrong_ownership():
     engine, sessions = create_engine_and_session(os.environ["ODP_POSTGRES_TEST_URL"])
     try:
-        Base.metadata.create_all(engine)
+        _migrate_head(os.environ["ODP_POSTGRES_TEST_URL"])
         organization_id, _, (task_id,) = _create_ready_tasks(sessions)
         repository = SqlAlchemyTaskControlRepository(sessions)
         claim = repository.claim(task_id, organization_id, "worker", datetime.now(UTC))
@@ -196,7 +204,7 @@ def test_postgresql_renewal_keeps_fence_token_and_rejects_wrong_ownership():
 def test_postgresql_expired_fence_cannot_publish_or_change_business_state():
     engine, sessions = create_engine_and_session(os.environ["ODP_POSTGRES_TEST_URL"])
     try:
-        Base.metadata.create_all(engine)
+        _migrate_head(os.environ["ODP_POSTGRES_TEST_URL"])
         organization_id, camera_id, (task_id,) = _create_ready_tasks(sessions)
         repository = SqlAlchemyTaskControlRepository(sessions)
         claim = repository.claim(task_id, organization_id, "worker", datetime.now(UTC))
@@ -212,7 +220,12 @@ def test_postgresql_expired_fence_cannot_publish_or_change_business_state():
             )
 
         with pytest.raises(StaleLease):
-            repository.publish_success(_command(claim))
+            from odp_api.adapters.persistence.inspection_effects import SqlAlchemyInspectionEffects
+            from odp_api.modules.inspection.effects import InspectionEffectService
+
+            InspectionEffectService(SqlAlchemyInspectionEffects(sessions)).publish(
+                _command(claim)
+            )
 
         with sessions() as session:
             assert (
@@ -237,7 +250,7 @@ def test_postgresql_expired_fence_cannot_publish_or_change_business_state():
 def test_postgresql_expired_fence_is_reclaimed_with_new_attempt():
     engine, sessions = create_engine_and_session(os.environ["ODP_POSTGRES_TEST_URL"])
     try:
-        Base.metadata.create_all(engine)
+        _migrate_head(os.environ["ODP_POSTGRES_TEST_URL"])
         organization_id, _, (task_id,) = _create_ready_tasks(sessions)
         repository = SqlAlchemyTaskControlRepository(sessions)
         old = repository.claim(task_id, organization_id, "worker-a", datetime.now(UTC))
@@ -266,11 +279,11 @@ def test_postgresql_expired_fence_is_reclaimed_with_new_attempt():
         engine.dispose()
 
 
-def test_postgresql_due_retry_scheduler_skip_locked_creates_one_new_outbox_per_task():
+def test_postgresql_due_retry_scheduler_contends_without_exceeding_camera_capacity():
     engine, sessions = create_engine_and_session(os.environ["ODP_POSTGRES_TEST_URL"])
     try:
-        Base.metadata.create_all(engine)
-        _organization_id, _, task_ids = _create_ready_tasks(sessions, task_count=4)
+        _migrate_head(os.environ["ODP_POSTGRES_TEST_URL"])
+        organization_id, camera_id, task_ids = _create_ready_tasks(sessions, task_count=2)
         with sessions.begin() as session:
             session.execute(
                 update(InferenceTaskRow)
@@ -280,6 +293,42 @@ def test_postgresql_due_retry_scheduler_skip_locked_creates_one_new_outbox_per_t
                     next_attempt_at=func.now() - text("interval '1 second'"),
                 )
             )
+            state = session.get(CameraInferenceStateRow, (organization_id, camera_id))
+            state.ready_count = 0
+            session_id = session.scalar(
+                select(InspectionSessionRow.session_id).where(
+                    InspectionSessionRow.organization_id == organization_id,
+                    InspectionSessionRow.camera_id == camera_id,
+                )
+            )
+            artifact_id, ready_task_id = uuid4(), uuid4()
+            session.add_all(
+                [
+                    FrameArtifactRow(
+                        artifact_id=artifact_id,
+                        organization_id=organization_id,
+                        camera_id=camera_id,
+                        stream_session_id=session_id,
+                        frame_sequence=3,
+                        captured_at=datetime.now(UTC),
+                        sha256="c" * 64,
+                        state="AVAILABLE",
+                        lifecycle="PROCESSING",
+                    ),
+                    InferenceTaskRow(
+                        task_id=ready_task_id,
+                        organization_id=organization_id,
+                        camera_id=camera_id,
+                        artifact_id=artifact_id,
+                        idempotency_key=str(ready_task_id),
+                        status=TaskStatus.READY.value,
+                        dispatch_seq=1,
+                        attempt_count=0,
+                        fence_token=0,
+                    ),
+                ]
+            )
+            state.ready_count = 1
         barrier = Barrier(2)
         scope = SystemRecoveryScope("postgres-concurrency")
 
@@ -291,7 +340,7 @@ def test_postgresql_due_retry_scheduler_skip_locked_creates_one_new_outbox_per_t
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             results = [executor.submit(release_due_retries) for _ in range(2)]
-            assert sum(future.result() for future in results) == len(task_ids)
+            assert sum(future.result(timeout=30) for future in results) == 1
 
         with sessions() as session:
             tasks = session.scalars(
@@ -304,12 +353,10 @@ def test_postgresql_due_retry_scheduler_skip_locked_creates_one_new_outbox_per_t
                     OutboxEventRow.event_type == "vision.inference.requested.v1",
                 )
             ).all()
-            assert all(
-                task.dispatch_seq == 2 and task.status == TaskStatus.READY.value for task in tasks
-            )
-            assert {
-                task_id: sum(outbox.task_id == task_id for outbox in outboxes)
-                for task_id in task_ids
-            } == dict.fromkeys(task_ids, 1)
+            assert sum(task.status == TaskStatus.READY.value for task in tasks) == 1
+            assert sum(task.status == TaskStatus.RETRY_WAIT.value for task in tasks) == 1
+            assert len(outboxes) == 1
+            state = session.get(CameraInferenceStateRow, (organization_id, camera_id))
+            assert state.ready_count == 2
     finally:
         engine.dispose()

@@ -40,7 +40,7 @@ def _seed_task(repository, *, attempt_count=0, last_dispatched_at=None, status=T
                     organization_id=tenant,
                     camera_id=camera,
                     running_task_id=None,
-                    ready_count=1,
+                    ready_count=1 if status is TaskStatus.READY else 0,
                     reservation_id=None,
                     reservation_expires_at=None,
                     last_admitted_at=None,
@@ -98,7 +98,7 @@ def _outbox(tenant, task, dispatch_seq, now):
         task_id=task,
         dispatch_seq=dispatch_seq,
         event_type="vision.inference.requested.v1",
-        schema_version="v1",
+        schema_version=1,
         payload={"task_id": str(task), "dispatch_seq": dispatch_seq},
         available_at=now,
         claim_owner=None,
@@ -128,7 +128,7 @@ def system_scope():
 def test_attempt_one_retry_waits_one_second_then_releases_with_new_dispatch(
     repository, system_scope
 ):
-    tenant, _, task, now = _seed_task(repository)
+    tenant, camera, task, now = _seed_task(repository)
     claim = repository.claim(task, tenant, "worker", now)
     assert claim is not None
     repository.record_failure(claim, FailureKind.RETRYABLE_INFRA, now)
@@ -144,6 +144,59 @@ def test_attempt_one_retry_waits_one_second_then_releases_with_new_dispatch(
     assert (row.status, row.dispatch_seq, row.attempt_count) == (TaskStatus.READY.value, 2, 1)
     with repository._session_factory() as session:
         assert session.query(OutboxEventRow).filter_by(task_id=task, dispatch_seq=2).count() == 1
+        assert session.get(CameraInferenceStateRow, (tenant, camera)).ready_count == 1
+
+
+def test_due_retry_stays_waiting_when_camera_ready_capacity_is_full(repository, system_scope):
+    tenant, camera, task, now = _seed_task(repository)
+    claim = repository.claim(task, tenant, "worker", now)
+    assert claim is not None
+    repository.record_failure(claim, FailureKind.RETRYABLE_INFRA, now)
+    with repository._session_factory() as session:
+        waiting = session.get(InferenceTaskRow, task)
+        waiting.next_attempt_at = now - timedelta(seconds=1)
+        for sequence in (2, 3):
+            artifact_id, ready_task_id = uuid4(), uuid4()
+            session.add_all(
+                [
+                    FrameArtifactRow(
+                        artifact_id=artifact_id,
+                        organization_id=tenant,
+                        camera_id=camera,
+                        stream_session_id=uuid4(),
+                        frame_sequence=sequence,
+                        captured_at=now,
+                        object_key=f"frames/{sequence}.jpg",
+                        sha256=f"{sequence:064x}",
+                        content_length=1,
+                        state="AVAILABLE",
+                        lifecycle="PROCESSING",
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                    InferenceTaskRow(
+                        task_id=ready_task_id,
+                        organization_id=tenant,
+                        camera_id=camera,
+                        artifact_id=artifact_id,
+                        idempotency_key=str(ready_task_id),
+                        status=TaskStatus.READY.value,
+                        dispatch_seq=1,
+                        attempt_count=0,
+                        fence_token=0,
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                ]
+            )
+        session.get(CameraInferenceStateRow, (tenant, camera)).ready_count = 2
+        session.commit()
+
+    assert repository.release_due_retries(now, system_scope) == 0
+    with repository._session_factory() as session:
+        assert session.get(InferenceTaskRow, task).status == TaskStatus.RETRY_WAIT.value
+        assert session.get(CameraInferenceStateRow, (tenant, camera)).ready_count == 2
+        assert session.query(OutboxEventRow).filter_by(task_id=task, dispatch_seq=2).count() == 0
 
 
 def test_second_retry_waits_two_seconds_and_third_failure_dead_letters(repository, system_scope):
@@ -344,7 +397,7 @@ def test_recovery_repository_rejects_missing_or_invalid_system_scope(repository)
 
 
 def test_replay_only_blocked_creates_fresh_dispatch_and_durable_audit(repository):
-    tenant, _, task, now = _seed_task(repository)
+    tenant, camera, task, now = _seed_task(repository)
     repository.quarantine_message(
         "inference.tasks", "19-0", uuid4(), "v9", "9", b"bad", task, tenant, now
     )
@@ -356,6 +409,7 @@ def test_replay_only_blocked_creates_fresh_dispatch_and_durable_audit(repository
     )
     assert _row(repository, task).status == TaskStatus.READY.value
     with repository._session_factory() as session:
+        assert session.get(CameraInferenceStateRow, (tenant, camera)).ready_count == 1
         assert session.query(OutboxEventRow).filter_by(task_id=task, dispatch_seq=2).count() == 1
         assert (
             session.query(AuditLogRow)
@@ -367,3 +421,58 @@ def test_replay_only_blocked_creates_fresh_dispatch_and_durable_audit(repository
         repository.replay_compatibility(task, tenant, now)
     with pytest.raises(AdmissionRejected):
         repository.replay_compatibility(task, uuid4(), now)
+
+
+def test_compatibility_replay_keeps_task_blocked_when_camera_capacity_is_full(
+    repository,
+):
+    tenant, camera, task, now = _seed_task(repository)
+    repository.quarantine_message(
+        "inference.tasks", "capacity-0", uuid4(), "v9", "9", b"bad", task, tenant, now
+    )
+    with repository._session_factory() as session:
+        assert session.get(CameraInferenceStateRow, (tenant, camera)).ready_count == 0
+        for sequence in (2, 3):
+            artifact_id, ready_task_id = uuid4(), uuid4()
+            session.add_all(
+                [
+                    FrameArtifactRow(
+                        artifact_id=artifact_id,
+                        organization_id=tenant,
+                        camera_id=camera,
+                        stream_session_id=uuid4(),
+                        frame_sequence=sequence,
+                        captured_at=now,
+                        object_key=f"frames/{sequence}.jpg",
+                        sha256=f"{sequence:064x}",
+                        content_length=1,
+                        state="AVAILABLE",
+                        lifecycle="PROCESSING",
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                    InferenceTaskRow(
+                        task_id=ready_task_id,
+                        organization_id=tenant,
+                        camera_id=camera,
+                        artifact_id=artifact_id,
+                        idempotency_key=str(ready_task_id),
+                        status=TaskStatus.READY.value,
+                        dispatch_seq=1,
+                        attempt_count=0,
+                        fence_token=0,
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                ]
+            )
+        session.get(CameraInferenceStateRow, (tenant, camera)).ready_count = 2
+        session.commit()
+
+    with pytest.raises(AdmissionRejected, match="READY_WINDOW_FULL"):
+        repository.replay_compatibility(task, tenant, now)
+
+    with repository._session_factory() as session:
+        assert session.get(InferenceTaskRow, task).status == TaskStatus.BLOCKED_COMPATIBILITY.value
+        assert session.get(CameraInferenceStateRow, (tenant, camera)).ready_count == 2
+        assert session.query(OutboxEventRow).filter_by(task_id=task, dispatch_seq=2).count() == 0

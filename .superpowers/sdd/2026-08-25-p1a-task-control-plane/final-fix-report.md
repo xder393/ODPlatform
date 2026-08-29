@@ -1,0 +1,80 @@
+# P1A final-fix checkpoint report
+
+This is a bounded checkpoint after the interrupted final-fix wave. It records the
+coherent implementation currently in the worktree; it does not claim the final
+wave is complete.
+
+## Findings covered in this checkpoint
+
+- **Critical 1:** retry release and compatibility replay now serialize from the
+  tenant/camera anchor, enforce the two-READY cap, and recompute `ready_count`.
+  READY-to-BLOCKED quarantine also uses the camera-first protocol and count sync.
+- **Critical 2:** the PostgreSQL episode test now races the transaction-bound
+  `claim_defect_episode()` primitive, preserving the one-RUNNING invariant.
+- **Important 1:** publication validates and propagates the authoritative
+  inspection-session `line_id` through Case, Event, Alert, feed, and outbox data.
+- **Important 2:** publication now tenant-scopes the Task, Attempt, Artifact, and
+  InspectionSession chain, checks task/artifact ownership and availability, and
+  compares the command frame hash with the artifact hash.
+- **Important 3:** defect publication emits the numeric-versioned
+  `inspection.alert.created.v1` envelope with the complete canonical payload and
+  cursor assigned after feed insertion. The existing feed reader retains its
+  legacy `defect_class` compatibility field.
+- **Important 4:** low-level `publish_success` and `complete_no_defect` methods
+  were removed from `TaskExecutionPort` and the task-control repository; the
+  composed inspection effect service is the success boundary.
+- **Selected minors 1, 2, 4, and 5:** replay uses the canonical same-session
+  audit append, the property test asserts capacity/ownership/effect invariants
+  after generated actions including clock advance/recovery/completion, attempt
+  error codes are persisted, and PostgreSQL setup applies Alembic head.
+
+## RED evidence recovered from the interrupted wave
+
+The changed focused tests were rerun with the shared-schema package on the
+import path before the behavioral fixes. The genuine RED result was:
+
+```text
+15 failed, 51 passed, 8 skipped
+```
+
+The failures covered missing authoritative line propagation, artifact/task/hash
+and tenant-chain guards, READY-count/capacity invariants, public success methods,
+missing attempt error codes, retry release capacity, and compatibility replay
+capacity. The initial collection-only run without `PYTHONPATH` was discarded as
+an environment error and is not counted as behavioral RED evidence.
+
+## Focused GREEN evidence
+
+```text
+$ PYTHONPATH="$PWD/apps/web-backend/src:$PWD/packages/shared-schemas/src" \
+  uv run --directory apps/web-backend pytest \
+  tests/modules/inspection/test_effects.py \
+  tests/modules/tasks/test_delivery_properties.py \
+  tests/modules/tasks/test_fenced_execution.py \
+  tests/persistence/test_postgres_camera_serialization.py \
+  tests/persistence/test_postgres_case_deduplication.py \
+  tests/persistence/test_postgres_fencing.py \
+  tests/persistence/test_task_recovery_transactions.py -q
+
+66 passed, 8 skipped in 9.24s
+```
+
+The PostgreSQL tests skipped because `ODP_POSTGRES_TEST_URL` is absent in this
+environment. The Alembic schema/startup check previously run in this wave was
+`4 passed, 1 skipped`; the PostgreSQL-specific long-revision check was the skip.
+
+## Remaining findings / final verification
+
+- **Important 5 remains:** restore the FastAPI/Starlette resolution in
+  `apps/web-backend/uv.lock` to the pre-downgrade base while retaining only the
+  Hypothesis dependency delta.
+- **Selected minor 3 remains:** replace the backend-wide Ruff `B008` ignore with
+  narrow per-file ignores or targeted annotations.
+- The full backend, expanded Ruff, final Alembic/lock checks, and final
+  `git diff --check` still remain for the unbounded continuation.
+- The two explicitly deferred schema items remain deferred: dual frame-hash
+  consistency constraint and broader generic schema assertions.
+
+Current blockers are environmental rather than code-level: PostgreSQL
+contention tests cannot execute without `ODP_POSTGRES_TEST_URL`; final broad
+verification has intentionally not been run in this bounded checkpoint.

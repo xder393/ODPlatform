@@ -19,6 +19,8 @@ from odp_api.adapters.persistence.task_control import (
     SqlAlchemyTaskControlRepository,
 )
 from odp_api.adapters.persistence.task_models import (
+    CameraInferenceStateRow,
+    InferenceTaskRow,
     InspectionSessionRow,
     PublishedInferenceResultRow,
 )
@@ -39,6 +41,8 @@ class DeliveryHarness:
         self._tmp_path_factory = tmp_path_factory
 
     def reset(self) -> None:
+        if hasattr(self, "engine"):
+            self.engine.dispose()
         database_path = self._tmp_path_factory.mktemp("delivery-order") / "control-plane.db"
         _upgrade_sqlite(database_path)
         self.engine, self.sessions = create_engine_and_session(f"sqlite:///{database_path}")
@@ -90,6 +94,7 @@ class DeliveryHarness:
         )
         self.recovery = RecoveryService(self.repository, SystemRecoveryScope("property-test"))
         self.claim = None
+        self.claims = []
         self._stale_publish_rejected = False
 
     def prepare_expired_reclaim_baseline(self) -> None:
@@ -122,6 +127,7 @@ class DeliveryHarness:
         else:
             raise AssertionError("reclaimed lease must reject stale completion")
         self.claim = replacement_claim
+        self.claims.extend((renewed_claim, replacement_claim))
         self.effects.publish(_publish_command(replacement_claim, self.clock))
 
     def apply(self, action: str) -> None:
@@ -131,17 +137,53 @@ class DeliveryHarness:
             )
             if claim is not None:
                 self.claim = claim
+                self.claims.append(claim)
         elif action == "renew" and self.claim is not None:
             renewed = self.repository.renew(self.claim, self.clock)
             if renewed is not None:
                 self.claim = renewed
-        elif action == "expire":
+                self.claims.append(renewed)
+        elif action == "advance_clock":
+            self.clock += timedelta(seconds=LEASE_SECONDS + 1)
+        elif action == "recover":
             self.recovery.run_once(self.clock)
-        elif action == "complete" and self.claim is not None:
+        elif action == "complete" and self.claims:
+            claim = self.claims.pop(0)
             try:
-                self.effects.publish(_publish_command(self.claim, self.clock))
+                self.effects.publish(_publish_command(claim, self.clock))
             except StaleLease:
-                pass
+                self._stale_publish_rejected = True
+
+    def assert_invariants(self) -> None:
+        with self.sessions() as session:
+            task = session.get(InferenceTaskRow, self.task.task_id)
+            state = session.get(
+                CameraInferenceStateRow, (self.organization_id, self.camera_id)
+            )
+            actual_ready = session.scalar(
+                select(func.count())
+                .select_from(InferenceTaskRow)
+                .where(
+                    InferenceTaskRow.organization_id == self.organization_id,
+                    InferenceTaskRow.camera_id == self.camera_id,
+                    InferenceTaskRow.status == "READY",
+                )
+            )
+            running = session.scalar(
+                select(func.count())
+                .select_from(InferenceTaskRow)
+                .where(
+                    InferenceTaskRow.organization_id == self.organization_id,
+                    InferenceTaskRow.camera_id == self.camera_id,
+                    InferenceTaskRow.status == "RUNNING",
+                )
+            )
+            assert state.ready_count == actual_ready
+            assert 0 <= actual_ready <= 2
+            assert running <= 1
+            assert (state.running_task_id == task.task_id) is (running == 1)
+        assert self.published_result_count() <= 1
+        assert self.inspection_event_count() <= 1
 
     def published_result_count(self) -> int:
         with self.sessions() as session:
@@ -180,16 +222,23 @@ def harness(tmp_path_factory: pytest.TempPathFactory):
             value.close()
 
 
-@given(actions=st.lists(st.sampled_from(["deliver", "renew", "expire", "complete"]), min_size=1, max_size=20))
+@given(
+    actions=st.lists(
+        st.sampled_from(["deliver", "renew", "advance_clock", "recover", "complete"]),
+        min_size=1,
+        max_size=20,
+    )
+)
 @settings(deadline=None)
 def test_any_duplicate_delivery_order_has_at_most_one_published_result(harness, actions):
     harness.reset()
-    harness.prepare_expired_reclaim_baseline()
+    harness.assert_invariants()
     for action in actions:
         harness.apply(action)
+        harness.assert_invariants()
 
-    assert harness.published_result_count() == 1
-    assert harness.inspection_event_count() == 1
+    assert harness.published_result_count() <= 1
+    assert harness.inspection_event_count() <= 1
 
 
 def test_expired_claim_cannot_publish_after_reclaim_and_duplicate_delivery(harness):

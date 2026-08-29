@@ -6,6 +6,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import select
 
+from odp_api.adapters.persistence.inspection_effects import SqlAlchemyInspectionEffects
 from odp_api.adapters.persistence.models import Base
 from odp_api.adapters.persistence.task_control import SqlAlchemyTaskControlRepository
 from odp_api.adapters.persistence.task_models import (
@@ -13,6 +14,7 @@ from odp_api.adapters.persistence.task_models import (
     FrameArtifactRow,
     InferenceAttemptRow,
     InferenceTaskRow,
+    InspectionSessionRow,
     PublishedInferenceResultRow,
 )
 from odp_api.db import create_engine_and_session
@@ -20,24 +22,31 @@ from odp_api.modules.tasks.commands import (
     InferenceExecutionContract,
     PublishInferenceCommand,
 )
-from odp_api.modules.tasks.models import TaskStatus
+from odp_api.modules.inspection.effects import InspectionEffectService
+from odp_api.modules.tasks.models import FailureKind, TaskStatus
 from odp_api.ports.tasks import StaleLease, TaskExecutionPort
 
 
-def test_execution_port_exposes_fenced_mutations():
+def test_execution_port_exposes_only_fenced_ownership_and_failure_mutations():
     assert StaleLease
     assert TaskExecutionPort
-    assert TaskExecutionPort.publish_success
+    assert TaskExecutionPort.claim
+    assert TaskExecutionPort.renew
+    assert TaskExecutionPort.record_failure
+    assert not hasattr(TaskExecutionPort, "publish_success")
+    assert not hasattr(TaskExecutionPort, "complete_no_defect")
 
 
 def test_duplicate_delivery_creates_one_attempt_and_tenant_guard_fails_closed(tmp_path):
     engine, sessions = create_engine_and_session(f"sqlite:///{tmp_path / 'fencing.db'}")
     Base.metadata.create_all(engine)
     org, camera, artifact, task_id = uuid4(), uuid4(), uuid4(), uuid4()
+    stream_session = uuid4()
     now = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
     with sessions.begin() as s:
         s.add_all([
-            FrameArtifactRow(artifact_id=artifact, organization_id=org, camera_id=camera, stream_session_id=uuid4(), frame_sequence=1, captured_at=now, sha256='a'*64, state='AVAILABLE', lifecycle='PROCESSING', created_at=now, updated_at=now),
+            InspectionSessionRow(session_id=stream_session, organization_id=org, camera_id=camera, line_id=uuid4(), source_type='TEST', sanitized_uri='rtsp://test.invalid/camera', status='RUNNING', idempotency_key=str(stream_session), started_at=now, created_at=now, updated_at=now),
+            FrameArtifactRow(artifact_id=artifact, organization_id=org, camera_id=camera, stream_session_id=stream_session, frame_sequence=1, captured_at=now, sha256='a'*64, state='AVAILABLE', lifecycle='PROCESSING', created_at=now, updated_at=now),
             InferenceTaskRow(task_id=task_id, organization_id=org, camera_id=camera, artifact_id=artifact, idempotency_key='k', status=TaskStatus.READY.value, dispatch_seq=1, attempt_count=0, fence_token=0, created_at=now, updated_at=now),
             CameraInferenceStateRow(organization_id=org, camera_id=camera, running_task_id=None, ready_count=1, version=0),
         ])
@@ -48,6 +57,7 @@ def test_duplicate_delivery_creates_one_attempt_and_tenant_guard_fails_closed(tm
     with sessions() as s:
         assert s.scalar(select(InferenceAttemptRow).where(InferenceAttemptRow.task_id == task_id)) is not None
         assert len(s.scalars(select(InferenceAttemptRow).where(InferenceAttemptRow.task_id == task_id)).all()) == 1
+        assert s.get(CameraInferenceStateRow, (org, camera)).ready_count == 0
     engine.dispose()
 
 
@@ -73,10 +83,12 @@ def _running_repo(tmp_path):
     engine, sessions = create_engine_and_session(f"sqlite:///{tmp_path / 'finalize.db'}")
     Base.metadata.create_all(engine)
     org, camera, artifact, task_id = uuid4(), uuid4(), uuid4(), uuid4()
+    stream_session = uuid4()
     now = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
     with sessions.begin() as s:
         s.add_all([
-            FrameArtifactRow(artifact_id=artifact, organization_id=org, camera_id=camera, stream_session_id=uuid4(), frame_sequence=1, captured_at=now, sha256='a'*64, state='AVAILABLE', lifecycle='PROCESSING', created_at=now, updated_at=now),
+            InspectionSessionRow(session_id=stream_session, organization_id=org, camera_id=camera, line_id=uuid4(), source_type='TEST', sanitized_uri='rtsp://test.invalid/camera', status='RUNNING', idempotency_key=str(stream_session), started_at=now, created_at=now, updated_at=now),
+            FrameArtifactRow(artifact_id=artifact, organization_id=org, camera_id=camera, stream_session_id=stream_session, frame_sequence=1, captured_at=now, sha256='a'*64, state='AVAILABLE', lifecycle='PROCESSING', created_at=now, updated_at=now),
             InferenceTaskRow(task_id=task_id, organization_id=org, camera_id=camera, artifact_id=artifact, idempotency_key='k', status='READY', dispatch_seq=1, attempt_count=0, fence_token=0, created_at=now, updated_at=now),
             CameraInferenceStateRow(organization_id=org, camera_id=camera, running_task_id=None, ready_count=1, version=0),
         ])
@@ -91,27 +103,42 @@ def _command(claim, now):
     return PublishInferenceCommand(claim, contract, 'a'*64, (), (), uuid4(), now)
 
 
-def test_complete_no_defect_finishes_attempt_clears_camera_without_publishing(tmp_path):
+def test_composed_effect_service_is_the_only_public_success_boundary(tmp_path):
     engine, sessions, repo, org, task_id, claim, now = _running_repo(tmp_path)
-    repo.complete_no_defect(_command(claim, now))
+    effect = InspectionEffectService(SqlAlchemyInspectionEffects(sessions)).publish(
+        _command(claim, now)
+    )
     with sessions() as s:
         task = s.get(InferenceTaskRow, task_id)
         attempt = s.get(InferenceAttemptRow, claim.attempt_id)
         state = s.get(CameraInferenceStateRow, (org, task.camera_id))
         assert task.status == 'SUCCEEDED' and attempt.finished_at is not None
         assert state.running_task_id is None
-        assert s.scalars(select(PublishedInferenceResultRow)).all() == []
+        assert s.get(PublishedInferenceResultRow, effect.result_id).task_id == task_id
+        assert not hasattr(repo, "publish_success")
+        assert not hasattr(repo, "complete_no_defect")
     engine.dispose()
 
 
-def test_record_failure_finishes_attempt_clears_camera_and_waits_for_retry(tmp_path):
+@pytest.mark.parametrize(
+    ("failure", "expected_status"),
+    [
+        (FailureKind.RETRYABLE_INFRA, TaskStatus.RETRY_WAIT),
+        (FailureKind.INVALID_INPUT, TaskStatus.DEAD_LETTER),
+    ],
+)
+def test_record_failure_persists_failure_kind_on_task_and_attempt(
+    tmp_path, failure, expected_status
+):
     engine, sessions, repo, org, task_id, claim, now = _running_repo(tmp_path)
-    repo.record_failure(claim, 'boom', now)
+    repo.record_failure(claim, failure, now)
     with sessions() as s:
         task = s.get(InferenceTaskRow, task_id)
         attempt = s.get(InferenceAttemptRow, claim.attempt_id)
         state = s.get(CameraInferenceStateRow, (org, task.camera_id))
-        assert task.status == 'RETRY_WAIT' and task.error_detail == 'boom'
+        assert task.status == expected_status.value
+        assert task.error_code == failure.value
+        assert attempt.error_code == failure.value
         assert attempt.finished_at is not None and state.running_task_id is None
     engine.dispose()
 
@@ -121,7 +148,9 @@ def test_expired_publish_success_is_stale_and_has_no_result(tmp_path):
     with sessions.begin() as s:
         s.get(InferenceTaskRow, task_id).lease_expires_at = now - timedelta(seconds=1)
     try:
-        repo.publish_success(_command(claim, now))
+        InspectionEffectService(SqlAlchemyInspectionEffects(sessions)).publish(
+            _command(claim, now)
+        )
     except StaleLease:
         pass
     else:
@@ -142,7 +171,9 @@ def test_wrong_tenant_owner_or_token_finalize_fails_closed(tmp_path):
     engine, sessions, repo, org, task_id, claim, now = _running_repo(tmp_path)
     for bad in (replace(claim, organization_id=uuid4()), replace(claim, lease_owner='other'), replace(claim, fence_token=claim.fence_token + 1)):
         try:
-            repo.publish_success(_command(bad, now))
+            InspectionEffectService(SqlAlchemyInspectionEffects(sessions)).publish(
+                _command(bad, now)
+            )
         except StaleLease:
             pass
         else:
@@ -169,7 +200,9 @@ def test_expired_same_task_is_reclaimed_with_new_fence_and_attempt(tmp_path):
     assert replacement.fence_token == claim.fence_token + 1
     assert replacement.attempt_no == claim.attempt_no + 1
     with pytest.raises(StaleLease):
-        repo.complete_no_defect(_command(claim, now))
+        InspectionEffectService(SqlAlchemyInspectionEffects(sessions)).publish(
+            _command(claim, now)
+        )
     with sessions() as session:
         task = session.get(InferenceTaskRow, task_id)
         attempts = session.scalars(
@@ -254,7 +287,9 @@ def test_finalize_rejects_attempt_that_does_not_match_lease_identity(tmp_path, a
         setattr(session.get(InferenceAttemptRow, claim.attempt_id), attribute, value)
 
     with pytest.raises(StaleLease):
-        repo.complete_no_defect(_command(claim, now))
+        InspectionEffectService(SqlAlchemyInspectionEffects(sessions)).publish(
+            _command(claim, now)
+        )
 
     with sessions() as session:
         task = session.get(InferenceTaskRow, task_id)

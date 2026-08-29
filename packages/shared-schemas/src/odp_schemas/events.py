@@ -13,3 +13,19 @@ class InspectionAlert(BaseModel):
     occurred_at: datetime
     defect_class: str
     confidence: float = Field(ge=0, le=1)
+
+
+class InspectionAlertCreated(BaseModel):
+    """Frozen durable envelope for an inspection alert outbox event."""
+
+    alert_id: UUID
+    organization_id: UUID
+    case_id: UUID
+    event_id: UUID
+    camera_id: UUID
+    line_id: UUID
+    defect_type: str
+    severity: str
+    confidence: float = Field(ge=0, le=1)
+    occurred_at: datetime
+    business_cursor: str

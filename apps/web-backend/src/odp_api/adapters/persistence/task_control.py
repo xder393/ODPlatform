@@ -11,7 +11,7 @@ from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
-from odp_api.adapters.persistence.models import AuditChainHeadRow, AuditLogRow
+from odp_api.adapters.persistence.repositories import SqlAlchemyAuditSessionRepository
 from odp_api.adapters.persistence.task_models import (
     CameraInferenceStateRow,
     FrameArtifactRow,
@@ -20,10 +20,9 @@ from odp_api.adapters.persistence.task_models import (
     InspectionSessionRow,
     MessageQuarantineRow,
     OutboxEventRow,
-    PublishedInferenceResultRow,
 )
 from odp_api.modules.audit.models import AuditCommand, audit_log_from_command
-from odp_api.modules.tasks.commands import LeaseClaim, PublishInferenceCommand
+from odp_api.modules.tasks.commands import LeaseClaim
 from odp_api.modules.tasks.models import (
     ArtifactLifecycle,
     ArtifactState,
@@ -52,7 +51,7 @@ RENEW_INTERVAL_SECONDS = 5
 INFERENCE_TIMEOUT_SECONDS = 10
 TASK_TYPE = "vision_inference"
 INFERENCE_REQUEST_EVENT = "vision.inference.requested.v1"
-EVENT_SCHEMA_VERSION = "v1"
+EVENT_SCHEMA_VERSION = 1
 REDISPATCH_AFTER_SECONDS = 10
 MAX_QUARANTINE_PAYLOAD_BYTES = 65536
 
@@ -377,6 +376,7 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                 if task is None:
                     session.commit()
                     return None
+                self._sync_ready_count(session, state)
                 live = state.running_task_id is not None
                 if live:
                     running = session.scalar(
@@ -467,6 +467,7 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                 )
                 session.add(attempt)
                 state.running_task_id = task_id
+                self._sync_ready_count(session, state)
                 state.version += 1
                 state.updated_at = current
                 session.commit()
@@ -527,101 +528,6 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                 lease_expires_at=current + timedelta(seconds=LEASE_SECONDS),
             )
 
-    def complete_no_defect(self, command: PublishInferenceCommand) -> None:
-        self._finalize(command, "SUCCEEDED", publish_result=False)
-
-    def publish_success(self, command: PublishInferenceCommand) -> None:
-        self._finalize(command, "SUCCEEDED")
-
-    def _finalize(
-        self, command: PublishInferenceCommand, outcome: str, *, publish_result: bool = True
-    ) -> None:
-        claim = command.claim
-        with self._session_factory() as session:
-            current = self._db_now(session)
-            state = session.scalar(
-                select(CameraInferenceStateRow)
-                .where(
-                    CameraInferenceStateRow.organization_id == claim.organization_id,
-                    CameraInferenceStateRow.running_task_id == claim.task_id,
-                )
-                .with_for_update()
-            )
-            task = session.scalar(
-                select(InferenceTaskRow)
-                .where(
-                    InferenceTaskRow.task_id == claim.task_id,
-                    InferenceTaskRow.organization_id == claim.organization_id,
-                )
-                .with_for_update()
-            )
-            if (
-                state is None
-                or task is None
-                or task.status != TaskStatus.RUNNING.value
-                or task.lease_owner != claim.lease_owner
-                or task.fence_token != claim.fence_token
-                or not task.lease_expires_at
-                or _as_utc(task.lease_expires_at) <= current
-            ):
-                session.rollback()
-                raise StaleLease("lease is no longer current")
-            attempt = session.scalar(
-                select(InferenceAttemptRow)
-                .where(
-                    InferenceAttemptRow.attempt_id == claim.attempt_id,
-                    InferenceAttemptRow.organization_id == claim.organization_id,
-                    InferenceAttemptRow.task_id == claim.task_id,
-                    InferenceAttemptRow.attempt_no == claim.attempt_no,
-                    InferenceAttemptRow.fence_token == claim.fence_token,
-                    InferenceAttemptRow.worker_id == claim.lease_owner,
-                )
-                .with_for_update()
-            )
-            if attempt is None:
-                session.rollback()
-                raise StaleLease("attempt is missing")
-            attempt.finished_at = current
-            attempt.outcome = outcome
-            task.status = TaskStatus.SUCCEEDED.value
-            task.lease_owner = None
-            task.lease_expires_at = None
-            task.updated_at = current
-            state.running_task_id = None
-            state.version += 1
-            state.updated_at = current
-            if outcome == "SUCCEEDED" and publish_result:
-                c = command.execution_contract
-                session.add(
-                    PublishedInferenceResultRow(
-                        result_id=uuid4(),
-                        organization_id=claim.organization_id,
-                        task_id=claim.task_id,
-                        attempt_id=claim.attempt_id,
-                        artifact_id=claim.artifact_id,
-                        model_release=c.model_release,
-                        model_sha256=c.model_sha256,
-                        onnxruntime_version=c.onnxruntime_version,
-                        execution_provider=c.execution_provider,
-                        actual_input_shape=list(c.actual_input_shape),
-                        preprocessing_version=c.preprocessing_version,
-                        postprocessing_version=c.postprocessing_version,
-                        confidence_threshold=c.confidence_threshold,
-                        iou_threshold=c.iou_threshold,
-                        nms_mode=c.nms_mode,
-                        nms_in_model=c.nms_in_model,
-                        class_map_version=c.class_map_version,
-                        frame_sha256=command.frame_sha256,
-                        input_frame_sha256=command.frame_sha256,
-                        detections=list(command.detections),
-                        stage_durations=dict(command.stage_durations),
-                        correlation_id=command.correlation_id,
-                        published_at=current,
-                        created_at=current,
-                    )
-                )
-            session.commit()
-
     def record_failure(self, claim: LeaseClaim, failure: object, now: datetime) -> None:
         with self._session_factory() as session:
             current = self._db_now(session)
@@ -674,6 +580,7 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
             detail = str(failure)
             attempt.finished_at = current
             attempt.outcome = "FAILED"
+            attempt.error_code = failure_kind.value
             attempt.error_detail = detail
             retryable = (
                 failure_kind is FailureKind.RETRYABLE_INFRA and task.attempt_count < MAX_ATTEMPTS
@@ -698,20 +605,49 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
         with self._session_factory() as session:
             try:
                 current = self._db_now(session)
-                rows = session.scalars(
+                candidate_ids = session.scalars(
                     select(InferenceTaskRow)
                     .where(
                         InferenceTaskRow.status == TaskStatus.RETRY_WAIT.value,
                         InferenceTaskRow.next_attempt_at <= current,
                     )
-                    .with_for_update(skip_locked=True)
+                    .with_only_columns(InferenceTaskRow.task_id)
                 ).all()
-                for task in rows:
+                released = 0
+                for task_id in candidate_ids:
+                    candidate = session.scalar(
+                        select(InferenceTaskRow).where(InferenceTaskRow.task_id == task_id)
+                    )
+                    if candidate is None:
+                        continue
+                    # Recovery must take the same camera-first lock as claim and
+                    # finalize before acquiring a task row lock.
+                    state = self._lock_camera_state(
+                        session, candidate.organization_id, candidate.camera_id
+                    )
+                    task = session.scalar(
+                        select(InferenceTaskRow)
+                        .where(
+                            InferenceTaskRow.task_id == task_id,
+                            InferenceTaskRow.organization_id == candidate.organization_id,
+                            InferenceTaskRow.status == TaskStatus.RETRY_WAIT.value,
+                            InferenceTaskRow.next_attempt_at <= current,
+                        )
+                        .with_for_update(skip_locked=True)
+                    )
+                    if task is None:
+                        continue
+                    if self._sync_ready_count(session, state) >= 2:
+                        continue
                     task.status = TaskStatus.READY.value
                     task.next_attempt_at = None
                     self._add_dispatch_outbox(session, task, current)
+                    self._sync_ready_count(session, state)
+                    state.version += 1
+                    state.updated_at = current
+                    released += 1
                 session.commit()
-                return len(rows)
+                return released
             except BaseException:
                 session.rollback()
                 raise
@@ -838,26 +774,18 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                         MessageQuarantineRow.stream_name == stream,
                         MessageQuarantineRow.message_id == message_id,
                     )
-                    .with_for_update()
                 )
-                if existing is not None:
-                    task = session.scalar(
-                        select(InferenceTaskRow)
-                        .where(
-                            InferenceTaskRow.task_id == task_id,
-                            InferenceTaskRow.organization_id == organization_id,
-                        )
-                        .with_for_update()
+                candidate = session.scalar(
+                    select(InferenceTaskRow).where(
+                        InferenceTaskRow.task_id == task_id,
+                        InferenceTaskRow.organization_id == organization_id,
                     )
-                    if (
-                        existing.task_id == task_id
-                        and existing.organization_id == organization_id
-                        and task is not None
-                        and task.status == TaskStatus.BLOCKED_COMPATIBILITY.value
-                    ):
-                        session.commit()
-                        return QuarantineResult(existing.quarantine_id, ack_after_commit=True)
-                    raise AdmissionRejected("QUARANTINE_MESSAGE_NOT_CURRENTLY_BLOCKED")
+                )
+                if candidate is None:
+                    raise AdmissionRejected("TASK_NOT_READY_FOR_COMPATIBILITY_BLOCK")
+                # Quarantine performs READY -> BLOCKED_COMPATIBILITY, so it
+                # must join the same camera-first serialization protocol.
+                state = self._lock_camera_state(session, organization_id, candidate.camera_id)
                 task = session.scalar(
                     select(InferenceTaskRow)
                     .where(
@@ -866,6 +794,24 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                     )
                     .with_for_update()
                 )
+                if task is None:
+                    raise AdmissionRejected("TASK_NOT_READY_FOR_COMPATIBILITY_BLOCK")
+                if existing is not None:
+                    existing = session.scalar(
+                        select(MessageQuarantineRow)
+                        .where(MessageQuarantineRow.quarantine_id == existing.quarantine_id)
+                        .with_for_update()
+                    )
+                    if (
+                        existing is not None
+                        and existing.task_id == task_id
+                        and existing.organization_id == organization_id
+                        and task.status == TaskStatus.BLOCKED_COMPATIBILITY.value
+                    ):
+                        self._sync_ready_count(session, state)
+                        session.commit()
+                        return QuarantineResult(existing.quarantine_id, ack_after_commit=True)
+                    raise AdmissionRejected("QUARANTINE_MESSAGE_NOT_CURRENTLY_BLOCKED")
                 if task is None or task.status != TaskStatus.READY.value:
                     raise AdmissionRejected("TASK_NOT_READY_FOR_COMPATIBILITY_BLOCK")
                 quarantine_id = uuid4()
@@ -894,6 +840,9 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                     "message quarantined",
                     current,
                 )
+                self._sync_ready_count(session, state)
+                state.version += 1
+                state.updated_at = current
                 session.commit()
                 return QuarantineResult(quarantine_id, ack_after_commit=True)
             except BaseException:
@@ -906,18 +855,36 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
         with self._session_factory() as session:
             try:
                 current = self._db_now(session)
-                task = session.scalar(
+                candidate = session.scalar(
                     select(InferenceTaskRow)
                     .where(
                         InferenceTaskRow.task_id == task_id,
                         InferenceTaskRow.organization_id == organization_id,
                     )
+                )
+                if candidate is None:
+                    raise AdmissionRejected("TASK_NOT_BLOCKED_COMPATIBILITY")
+                # Replay is a READY transition, so serialize it on the same
+                # tenant/camera anchor before locking the task row.
+                state = self._lock_camera_state(session, organization_id, candidate.camera_id)
+                task = session.scalar(
+                    select(InferenceTaskRow)
+                    .where(
+                        InferenceTaskRow.task_id == task_id,
+                        InferenceTaskRow.organization_id == organization_id,
+                        InferenceTaskRow.status == TaskStatus.BLOCKED_COMPATIBILITY.value,
+                    )
                     .with_for_update()
                 )
-                if task is None or task.status != TaskStatus.BLOCKED_COMPATIBILITY.value:
+                if task is None:
                     raise AdmissionRejected("TASK_NOT_BLOCKED_COMPATIBILITY")
+                if self._sync_ready_count(session, state) >= 2:
+                    raise AdmissionRejected("READY_WINDOW_FULL")
                 task.status, task.error_code, task.error_detail = TaskStatus.READY.value, None, None
                 outbox_id = self._add_dispatch_outbox(session, task, current)
+                self._sync_ready_count(session, state)
+                state.version += 1
+                state.updated_at = current
                 quarantine = session.scalar(
                     select(MessageQuarantineRow)
                     .where(
@@ -986,38 +953,12 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
 
     @staticmethod
     def _append_replay_audit(session: Session, command: AuditCommand) -> None:
-        head = session.scalar(
-            select(AuditChainHeadRow)
-            .where(AuditChainHeadRow.organization_id == command.organization_id)
-            .with_for_update()
+        SqlAlchemyAuditSessionRepository(session).append_under_head_lock(
+            command,
+            lambda sequence, previous_hash: audit_log_from_command(
+                command, sequence=sequence, previous_hash=previous_hash
+            ),
         )
-        if head is None:
-            head = AuditChainHeadRow(
-                organization_id=command.organization_id, last_sequence=0, head_hash="0" * 64
-            )
-            session.add(head)
-            session.flush()
-        entry = audit_log_from_command(
-            command, sequence=head.last_sequence + 1, previous_hash=head.head_hash
-        )
-        session.add(
-            AuditLogRow(
-                audit_id=entry.audit_id,
-                organization_id=entry.organization_id,
-                sequence=entry.sequence,
-                resource_type=entry.resource_type,
-                resource_id=entry.resource_id,
-                action=entry.action,
-                change_summary=entry.change_summary,
-                actor_id=entry.actor_id,
-                occurred_at=entry.occurred_at,
-                correlation_id=entry.correlation_id,
-                request_ip=entry.request_ip,
-                previous_hash=entry.previous_hash,
-                entry_hash=entry.entry_hash,
-            )
-        )
-        head.last_sequence, head.head_hash = entry.sequence, entry.entry_hash
 
     @staticmethod
     def _lock_camera_state(

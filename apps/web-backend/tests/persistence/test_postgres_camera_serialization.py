@@ -7,12 +7,14 @@ from threading import Barrier
 from uuid import uuid4
 
 import pytest
+from alembic.config import Config
 from sqlalchemy import select
+
+from alembic import command
 
 WEB_BACKEND_SRC = Path(__file__).parents[2] / "src"
 sys.path[:0] = [str(WEB_BACKEND_SRC)]
 
-from odp_api.adapters.persistence.models import Base
 from odp_api.adapters.persistence.task_control import SqlAlchemyTaskControlRepository
 from odp_api.adapters.persistence.task_models import (
     FrameArtifactRow,
@@ -45,7 +47,9 @@ def test_postgresql_camera_admission_serializes_eviction_and_keeps_two_ready_tas
     organization_id, camera_id, session_id = uuid4(), uuid4(), uuid4()
     now = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
     try:
-        Base.metadata.create_all(engine)
+        config = Config(str(Path(__file__).parents[2] / "alembic.ini"))
+        config.set_main_option("sqlalchemy.url", database_url)
+        command.upgrade(config, "head")
         with sessions.begin() as session:
             session.add(
                 InspectionSessionRow(

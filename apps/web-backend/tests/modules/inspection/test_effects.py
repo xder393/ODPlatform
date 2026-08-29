@@ -24,6 +24,7 @@ from odp_api.adapters.persistence.task_models import (
     DefectEpisodeRow,
     FrameArtifactRow,
     InferenceTaskRow,
+    InspectionSessionRow,
     OutboxEventRow,
     PublishedInferenceResultRow,
 )
@@ -62,16 +63,30 @@ def _command(claim, now, detections=()):
     )
 
 
-def _running(sessions, now, *, camera=None, organization=None):
+def _running(sessions, now, *, camera=None, organization=None, line_id=None):
     org, camera, artifact, task = organization or uuid4(), camera or uuid4(), uuid4(), uuid4()
+    stream_session, line_id = uuid4(), line_id or uuid4()
     with sessions.begin() as session:
         session.add_all(
             (
+                InspectionSessionRow(
+                    session_id=stream_session,
+                    organization_id=org,
+                    camera_id=camera,
+                    line_id=line_id,
+                    source_type="TEST",
+                    sanitized_uri="rtsp://test.invalid/camera",
+                    status="RUNNING",
+                    idempotency_key=str(stream_session),
+                    started_at=now,
+                    created_at=now,
+                    updated_at=now,
+                ),
                 FrameArtifactRow(
                     artifact_id=artifact,
                     organization_id=org,
                     camera_id=camera,
-                    stream_session_id=uuid4(),
+                    stream_session_id=stream_session,
                     frame_sequence=1,
                     captured_at=now,
                     sha256="a" * 64,
@@ -164,6 +179,65 @@ def test_defect_creates_event_case_evidence_alert_outbox_and_audit_in_one_effect
         )
 
 
+def test_defect_propagates_authoritative_line_and_canonical_alert_envelope(runtime):
+    now = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    org, camera, artifact, _task, claim = _running(runtime, now)
+    effect = _service(runtime).publish(
+        _command(
+            claim,
+            now,
+            (
+                {
+                    "defect_type": "scratch",
+                    "severity": "HIGH",
+                    "confidence": 0.91,
+                    "spatial_zone": "A",
+                },
+            ),
+        )
+    )
+
+    with runtime() as session:
+        artifact_row = session.get(FrameArtifactRow, artifact)
+        stream_session = session.get(InspectionSessionRow, artifact_row.stream_session_id)
+        event = session.get(InspectionEventRow, effect.event_id)
+        case = session.get(DefectCaseRow, effect.case_id)
+        alert = session.get(AlertRow, effect.event_id)
+        feed = session.scalar(
+            select(InspectionAlertFeedRow).where(
+                InspectionAlertFeedRow.organization_id == org,
+                InspectionAlertFeedRow.event_id == effect.event_id,
+            )
+        )
+        outbox = session.get(OutboxEventRow, effect.alert_outbox_id)
+
+        assert stream_session.line_id is not None
+        assert event.line_id == stream_session.line_id
+        assert case.line_id == stream_session.line_id
+        assert alert.line_id == stream_session.line_id
+        assert feed.line_id == stream_session.line_id
+        assert alert.payload["line_id"] == str(stream_session.line_id)
+        assert feed.payload["line_id"] == str(stream_session.line_id)
+        assert outbox.event_type == "inspection.alert.created.v1"
+        assert outbox.schema_version == 1
+        occurred_at = event.occurred_at
+        if occurred_at.tzinfo is None:
+            occurred_at = occurred_at.replace(tzinfo=UTC)
+        assert outbox.payload == {
+            "alert_id": str(effect.event_id),
+            "organization_id": str(org),
+            "case_id": str(effect.case_id),
+            "event_id": str(effect.event_id),
+            "camera_id": str(camera),
+            "line_id": str(stream_session.line_id),
+            "defect_type": "scratch",
+            "severity": "HIGH",
+            "confidence": 0.91,
+            "occurred_at": occurred_at.isoformat().replace("+00:00", "Z"),
+            "business_cursor": str(feed.cursor),
+        }
+
+
 def test_exact_duplicate_returns_original_ids_but_conflicting_payload_is_rejected(runtime):
     now = datetime(2026, 8, 25, 12, tzinfo=UTC)
     _org, _camera, _artifact, _task, claim = _running(runtime, now)
@@ -235,14 +309,86 @@ def test_stale_or_wrong_tenant_claim_has_zero_effects(runtime):
         assert session.scalar(select(func.count()).select_from(DefectCaseRow)) == 0
 
 
+def test_publication_rejects_claim_artifact_not_owned_by_task(runtime):
+    now = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    org, camera, artifact, _task, claim = _running(runtime, now)
+    other_artifact = uuid4()
+    with runtime.begin() as session:
+        original = session.get(FrameArtifactRow, artifact)
+        session.add(
+            FrameArtifactRow(
+                artifact_id=other_artifact,
+                organization_id=org,
+                camera_id=camera,
+                stream_session_id=original.stream_session_id,
+                frame_sequence=2,
+                captured_at=now,
+                sha256="a" * 64,
+                state="AVAILABLE",
+                lifecycle="PROCESSING",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    with pytest.raises(StaleLease, match="artifact"):
+        _service(runtime).publish(_command(replace(claim, artifact_id=other_artifact), now))
+
+    with runtime() as session:
+        assert session.scalar(select(func.count()).select_from(PublishedInferenceResultRow)) == 0
+
+
+def test_publication_rejects_frame_hash_different_from_artifact(runtime):
+    now = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    _org, _camera, _artifact, _task, claim = _running(runtime, now)
+
+    with pytest.raises(PublishConflict, match="frame hash"):
+        _service(runtime).publish(replace(_command(claim, now), frame_sha256="c" * 64))
+
+    with runtime() as session:
+        assert session.scalar(select(func.count()).select_from(PublishedInferenceResultRow)) == 0
+
+
+@pytest.mark.parametrize("broken_scope", ["artifact_tenant", "artifact_camera", "artifact_state", "session_camera"])
+def test_publication_rejects_broken_tenant_camera_session_artifact_chain(runtime, broken_scope):
+    now = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    _org, _camera, artifact, _task, claim = _running(runtime, now)
+    with runtime.begin() as session:
+        artifact_row = session.get(FrameArtifactRow, artifact)
+        stream_session = session.get(InspectionSessionRow, artifact_row.stream_session_id)
+        if broken_scope == "artifact_tenant":
+            artifact_row.organization_id = uuid4()
+        elif broken_scope == "artifact_camera":
+            artifact_row.camera_id = uuid4()
+        elif broken_scope == "artifact_state":
+            artifact_row.state = "PENDING"
+        else:
+            stream_session.camera_id = uuid4()
+
+    with pytest.raises(StaleLease, match="artifact|session"):
+        _service(runtime).publish(_command(claim, now))
+
+    with runtime() as session:
+        assert session.scalar(select(func.count()).select_from(PublishedInferenceResultRow)) == 0
+
+
 def test_episode_reuses_open_case_and_expiry_creates_a_new_case(runtime):
     now = datetime(2026, 8, 25, 12, tzinfo=UTC)
-    org, camera, _artifact, _task, claim = _running(runtime, now)
+    org, camera, first_artifact, _task, claim = _running(runtime, now)
     first = _service(runtime).publish(
         _command(claim, now, ({"defect_type": "scratch", "confidence": 0.91},))
     )
+    with runtime() as session:
+        first_artifact_row = session.get(FrameArtifactRow, first_artifact)
+        first_line = session.get(
+            InspectionSessionRow, first_artifact_row.stream_session_id
+        ).line_id
     _org2, _camera2, _artifact2, _task2, claim2 = _running(
-        runtime, now, camera=camera, organization=org
+        runtime,
+        now,
+        camera=camera,
+        organization=org,
+        line_id=first_line,
     )
     second = _service(runtime).publish(
         _command(claim2, now, ({"defect_type": "scratch", "confidence": 0.92},))

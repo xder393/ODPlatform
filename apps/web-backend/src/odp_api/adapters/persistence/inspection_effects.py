@@ -2,9 +2,8 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-from odp_schemas.events import InspectionAlert
+from odp_schemas.events import InspectionAlertCreated
 from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from odp_api.adapters.persistence.models import (
@@ -20,6 +19,7 @@ from odp_api.adapters.persistence.task_models import (
     FrameArtifactRow,
     InferenceAttemptRow,
     InferenceTaskRow,
+    InspectionSessionRow,
     OutboxEventRow,
     PublishedInferenceResultRow,
 )
@@ -27,6 +27,77 @@ from odp_api.modules.audit.models import AuditCommand, audit_log_from_command
 from odp_api.modules.inspection.effects import PublishConflict, PublishedEffect
 from odp_api.modules.tasks.models import TaskStatus
 from odp_api.ports.tasks import StaleLease
+
+
+def claim_defect_episode(
+    session: Session,
+    organization_id,
+    camera_id,
+    defect_type: str,
+    spatial_zone: str,
+    now: datetime,
+) -> DefectEpisodeRow:
+    """Create-or-lock one tenant/camera/defect episode in a caller transaction."""
+
+    statement = select(DefectEpisodeRow).where(
+        DefectEpisodeRow.organization_id == organization_id,
+        DefectEpisodeRow.camera_id == camera_id,
+        DefectEpisodeRow.defect_type == defect_type,
+        DefectEpisodeRow.spatial_zone == spatial_zone,
+    )
+    row = session.scalar(statement.with_for_update())
+    if row is not None:
+        return row
+
+    values = {
+        "episode_id": uuid4(),
+        "organization_id": organization_id,
+        "camera_id": camera_id,
+        "defect_type": defect_type,
+        "spatial_zone": spatial_zone,
+        "current_case_id": None,
+        "episode_expires_at": now,
+        "created_at": now,
+        "updated_at": now,
+    }
+    dialect = session.get_bind().dialect.name
+    if dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert
+
+        session.execute(
+            insert(DefectEpisodeRow)
+            .values(**values)
+            .on_conflict_do_nothing(
+                index_elements=[
+                    DefectEpisodeRow.organization_id,
+                    DefectEpisodeRow.camera_id,
+                    DefectEpisodeRow.defect_type,
+                    DefectEpisodeRow.spatial_zone,
+                ]
+            )
+        )
+    elif dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert
+
+        session.execute(
+            insert(DefectEpisodeRow)
+            .values(**values)
+            .on_conflict_do_nothing(
+                index_elements=[
+                    DefectEpisodeRow.organization_id,
+                    DefectEpisodeRow.camera_id,
+                    DefectEpisodeRow.defect_type,
+                    DefectEpisodeRow.spatial_zone,
+                ]
+            )
+        )
+    else:
+        session.add(DefectEpisodeRow(**values))
+    session.flush()
+    row = session.scalar(statement.with_for_update())
+    if row is None:
+        raise RuntimeError("defect episode could not be claimed")
+    return row
 
 
 class SqlAlchemyInspectionEffects:
@@ -66,27 +137,57 @@ class SqlAlchemyInspectionEffects:
                 )
                 attempt = s.scalar(
                     select(InferenceAttemptRow)
-                    .where(InferenceAttemptRow.attempt_id == c.attempt_id)
+                    .where(
+                        InferenceAttemptRow.attempt_id == c.attempt_id,
+                        InferenceAttemptRow.organization_id == c.organization_id,
+                        InferenceAttemptRow.task_id == c.task_id,
+                    )
                     .with_for_update()
                 )
-                artifact = s.get(FrameArtifactRow, c.artifact_id, with_for_update=True)
+                if task is None or task.artifact_id != c.artifact_id:
+                    raise StaleLease("artifact does not belong to task")
+                artifact = s.scalar(
+                    select(FrameArtifactRow)
+                    .where(
+                        FrameArtifactRow.artifact_id == c.artifact_id,
+                        FrameArtifactRow.organization_id == c.organization_id,
+                        FrameArtifactRow.camera_id == task.camera_id,
+                        FrameArtifactRow.state == "AVAILABLE",
+                    )
+                    .with_for_update()
+                )
+                stream_session = None
+                if artifact is not None:
+                    stream_session = s.scalar(
+                        select(InspectionSessionRow)
+                        .where(
+                            InspectionSessionRow.session_id == artifact.stream_session_id,
+                            InspectionSessionRow.organization_id == c.organization_id,
+                            InspectionSessionRow.camera_id == task.camera_id,
+                        )
+                        .with_for_update()
+                    )
                 if (
                     attempt is None
                     or artifact is None
-                    or attempt.task_id != task.task_id
-                    or attempt.organization_id != c.organization_id
+                    or stream_session is None
                 ):
-                    raise StaleLease("invalid attempt")
+                    raise StaleLease("invalid artifact chain")
                 if (
                     attempt.attempt_no != c.attempt_no
                     or attempt.fence_token != c.fence_token
                     or attempt.worker_id != c.lease_owner
                 ):
                     raise StaleLease("attempt identity mismatch")
+                if command.frame_sha256 != artifact.sha256:
+                    raise PublishConflict("frame hash differs from artifact")
                 now = self._db_now(s)
                 old = s.scalar(
                     select(PublishedInferenceResultRow)
-                    .where(PublishedInferenceResultRow.task_id == task.task_id)
+                    .where(
+                        PublishedInferenceResultRow.task_id == task.task_id,
+                        PublishedInferenceResultRow.organization_id == c.organization_id,
+                    )
                     .with_for_update()
                 )
                 contract = command.execution_contract
@@ -129,14 +230,15 @@ class SqlAlchemyInspectionEffects:
                         raise PublishConflict("payload differs")
                     ev = s.scalar(
                         select(InspectionEventRow).where(
-                            InspectionEventRow.source_result_id == old.result_id
+                            InspectionEventRow.source_result_id == old.result_id,
+                            InspectionEventRow.organization_id == c.organization_id,
                         )
                     )
                     return PublishedEffect(
                         old.result_id,
                         ev.event_id if ev else None,
                         ev.case_id if ev else None,
-                        self._alert_id(s, ev.event_id) if ev else None,
+                        self._alert_id(s, c.organization_id, ev.event_id) if ev else None,
                     )
                 if (
                     task.status != TaskStatus.RUNNING.value
@@ -181,7 +283,10 @@ class SqlAlchemyInspectionEffects:
                     None,
                     None,
                 )
+                task.updated_at = now
                 state.running_task_id = None
+                state.version += 1
+                state.updated_at = now
                 event = case = outbox = None
                 if command.detections:
                     d = command.detections[0]
@@ -189,50 +294,46 @@ class SqlAlchemyInspectionEffects:
                         str(d.get("defect_type", "UNKNOWN")),
                         str(d.get("spatial_zone") or "GLOBAL"),
                     )
-                    ep = self._claim_episode(s, c.organization_id, task.camera_id, typ, zone, now)
-                    ep = s.scalar(
-                        select(DefectEpisodeRow)
-                        .where(
-                            DefectEpisodeRow.organization_id == c.organization_id,
-                            DefectEpisodeRow.camera_id == task.camera_id,
-                            DefectEpisodeRow.defect_type == typ,
-                            DefectEpisodeRow.spatial_zone == zone,
-                        )
-                        .with_for_update()
+                    ep = claim_defect_episode(
+                        s, c.organization_id, task.camera_id, typ, zone, now
                     )
-                    if ep is None or self._utc(ep.episode_expires_at) <= now:
+                    if ep.current_case_id is None or self._utc(ep.episode_expires_at) <= now:
                         case = DefectCaseRow(
                             case_id=uuid4(),
                             organization_id=c.organization_id,
                             status="PENDING_CONFIRMATION",
+                            line_id=stream_session.line_id,
                             updated_at=now,
                         )
                         s.add(case)
                         s.flush()
-                        if ep is None:
-                            ep = DefectEpisodeRow(
-                                episode_id=uuid4(),
-                                organization_id=c.organization_id,
-                                camera_id=task.camera_id,
-                                defect_type=typ,
-                                spatial_zone=zone,
-                                created_at=now,
-                                updated_at=now,
-                            )
-                            s.add(ep)
                         ep.current_case_id, ep.episode_expires_at, ep.updated_at = (
                             case.case_id,
                             now + timedelta(minutes=5),
                             now,
                         )
                     else:
-                        case = s.get(DefectCaseRow, ep.current_case_id)
+                        case = s.scalar(
+                            select(DefectCaseRow)
+                            .where(
+                                DefectCaseRow.case_id == ep.current_case_id,
+                                DefectCaseRow.organization_id == c.organization_id,
+                            )
+                            .with_for_update()
+                        )
+                        if case is None:
+                            raise StaleLease("episode case is missing")
+                        if case.line_id is None:
+                            case.line_id = stream_session.line_id
+                        elif case.line_id != stream_session.line_id:
+                            raise StaleLease("case line mismatch")
                     eid = uuid4()
                     event = InspectionEventRow(
                         event_id=eid,
                         case_id=case.case_id,
                         organization_id=c.organization_id,
                         camera_id=task.camera_id,
+                        line_id=stream_session.line_id,
                         occurred_at=now,
                         defect_class=typ,
                         confidence=float(d.get("confidence", 0)),
@@ -245,32 +346,41 @@ class SqlAlchemyInspectionEffects:
                     )
                     s.add(event)
                     artifact.lifecycle = "EVIDENCE"
-                    alert_payload = InspectionAlert(
+                    feed = InspectionAlertFeedRow(
                         event_id=eid,
                         organization_id=c.organization_id,
+                        line_id=stream_session.line_id,
+                        payload={},
+                        created_at=now,
+                    )
+                    s.add(feed)
+                    s.flush()
+                    canonical_payload = InspectionAlertCreated(
+                        alert_id=eid,
+                        organization_id=c.organization_id,
+                        case_id=case.case_id,
+                        event_id=eid,
                         camera_id=task.camera_id,
-                        occurred_at=now,
-                        defect_class=typ,
+                        line_id=stream_session.line_id,
+                        defect_type=typ,
+                        severity=str(d.get("severity", "UNKNOWN")),
                         confidence=float(d.get("confidence", 0)),
+                        occurred_at=now,
+                        business_cursor=str(feed.cursor),
                     ).model_dump(mode="json")
+                    feed_payload = {**canonical_payload, "defect_class": typ}
                     s.add(
                         AlertRow(
                             alert_id=eid,
                             organization_id=c.organization_id,
                             event_id=eid,
+                            line_id=stream_session.line_id,
                             alert_type="INSPECTION",
-                            payload=alert_payload,
+                            payload=feed_payload,
                             created_at=now,
                         )
                     )
-                    s.add(
-                        InspectionAlertFeedRow(
-                            event_id=eid,
-                            organization_id=c.organization_id,
-                            payload=alert_payload,
-                            created_at=now,
-                        )
-                    )
+                    feed.payload = feed_payload
                     outbox = OutboxEventRow(
                         outbox_id=uuid4(),
                         organization_id=c.organization_id,
@@ -278,9 +388,9 @@ class SqlAlchemyInspectionEffects:
                         aggregate_id=eid,
                         task_id=task.task_id,
                         dispatch_seq=task.dispatch_seq,
-                        event_type="inspection.alert.v1",
-                        schema_version="v1",
-                        payload={"event_id": str(eid)},
+                        event_type="inspection.alert.created.v1",
+                        schema_version=1,
+                        payload=canonical_payload,
                         available_at=now,
                         publish_attempts=0,
                         created_at=now,
@@ -317,48 +427,6 @@ class SqlAlchemyInspectionEffects:
                 raise
 
     @staticmethod
-    def _claim_episode(session, organization_id, camera_id, defect_type, spatial_zone, now):
-        row = session.scalar(
-            select(DefectEpisodeRow)
-            .where(
-                DefectEpisodeRow.organization_id == organization_id,
-                DefectEpisodeRow.camera_id == camera_id,
-                DefectEpisodeRow.defect_type == defect_type,
-                DefectEpisodeRow.spatial_zone == spatial_zone,
-            )
-            .with_for_update()
-        )
-        if row is not None:
-            return row
-        try:
-            with session.begin_nested():
-                session.add(
-                    DefectEpisodeRow(
-                        episode_id=uuid4(),
-                        organization_id=organization_id,
-                        camera_id=camera_id,
-                        defect_type=defect_type,
-                        spatial_zone=spatial_zone,
-                        episode_expires_at=now,
-                        created_at=now,
-                        updated_at=now,
-                    )
-                )
-                session.flush()
-        except IntegrityError:
-            pass
-        return session.scalar(
-            select(DefectEpisodeRow)
-            .where(
-                DefectEpisodeRow.organization_id == organization_id,
-                DefectEpisodeRow.camera_id == camera_id,
-                DefectEpisodeRow.defect_type == defect_type,
-                DefectEpisodeRow.spatial_zone == spatial_zone,
-            )
-            .with_for_update()
-        )
-
-    @staticmethod
     def _utc(value):
         return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
@@ -368,7 +436,10 @@ class SqlAlchemyInspectionEffects:
         return self._utc(session.scalar(select(func.now())))
 
     @staticmethod
-    def _alert_id(s, event_id):
+    def _alert_id(s, organization_id, event_id):
         return s.scalar(
-            select(OutboxEventRow.outbox_id).where(OutboxEventRow.aggregate_id == event_id)
+            select(OutboxEventRow.outbox_id).where(
+                OutboxEventRow.organization_id == organization_id,
+                OutboxEventRow.aggregate_id == event_id,
+            )
         )

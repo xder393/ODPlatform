@@ -306,7 +306,7 @@ class OutboxEventRow(Base):
     )
     dispatch_seq: Mapped[int | None] = mapped_column(Integer)
     event_type: Mapped[str] = mapped_column(String(255), nullable=False)
-    schema_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     available_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
