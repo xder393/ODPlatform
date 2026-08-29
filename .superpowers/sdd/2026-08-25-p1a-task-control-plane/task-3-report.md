@@ -23,3 +23,11 @@ RED (exact): `PYTHONPATH=apps/web-backend/src:packages/shared-schemas/src ../ent
 GREEN (exact): after adding `publish_success` to `TaskExecutionPort` and declaring `SqlAlchemyTaskControlRepository` as its implementation, the same command reported `7 passed in 0.33s`.
 
 Additional verification: `test_camera_admission.py -q` reported `5 passed in 0.01s`; `ruff check apps/web-backend/src/odp_api/adapters/persistence/task_control.py apps/web-backend/src/odp_api/ports/tasks.py apps/web-backend/tests/modules/tasks/test_fenced_execution.py` reported `All checks passed!`; `git diff --check` produced no output. No PostgreSQL test was changed.
+
+## Phase 2 PostgreSQL fenced-execution coverage
+
+Replaced the environment-only placeholder with three `ODP_POSTGRES_TEST_URL`-gated tests. The suite uses UUID-isolated tenant, camera, inspection-session, artifact, task, and camera-state rows, and `Base.metadata.create_all(engine)`, matching the existing Task 2 PostgreSQL test setup. It does not perform broad cleanup.
+
+The concurrent claim scenario starts two worker calls for two READY tasks on the same tenant/camera behind a `threading.Barrier`; every submitted future is resolved with `future.result()` so worker exceptions propagate. It asserts exactly one LeaseClaim, exactly one RUNNING task, and exactly one attempt for the two-task camera set. The renewal scenario asserts a DB-time lease extension with an unchanged fence token and rejects wrong owner/token. The expiry scenario writes `lease_expires_at = CURRENT_TIMESTAMP - interval '1 second'` through PostgreSQL, then verifies `publish_success` raises `StaleLease` with no PublishedInferenceResult and no task/attempt/camera-state business mutation.
+
+Local exact output: `PYTHONPATH=apps/web-backend/src:packages/shared-schemas/src ../enterprise-ai-quality-inspection/.venv-runtime/bin/pytest apps/web-backend/tests/persistence/test_postgres_fencing.py -q` collected 3 items and reported `3 skipped in 0.13s` because `ODP_POSTGRES_TEST_URL` is absent. `ruff check apps/web-backend/tests/persistence/test_postgres_fencing.py` reported `All checks passed!`; `git diff --check` produced no output. No local RED claim is made because these PostgreSQL tests are correctly skipped without the dedicated database URL.
