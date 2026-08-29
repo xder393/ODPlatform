@@ -1,6 +1,6 @@
 """Property coverage for the assembled inference control plane."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -13,7 +13,11 @@ from sqlalchemy import func, select
 from alembic import command
 from odp_api.adapters.persistence.inspection_effects import SqlAlchemyInspectionEffects
 from odp_api.adapters.persistence.models import InspectionEventRow
-from odp_api.adapters.persistence.task_control import SqlAlchemyTaskControlRepository
+from odp_api.adapters.persistence.task_control import (
+    LEASE_SECONDS,
+    RENEW_INTERVAL_SECONDS,
+    SqlAlchemyTaskControlRepository,
+)
 from odp_api.adapters.persistence.task_models import (
     InspectionSessionRow,
     PublishedInferenceResultRow,
@@ -39,6 +43,7 @@ class DeliveryHarness:
         _upgrade_sqlite(database_path)
         self.engine, self.sessions = create_engine_and_session(f"sqlite:///{database_path}")
         self.now = datetime.now(UTC)
+        self.clock = self.now
         self.organization_id = uuid4()
         self.camera_id = uuid4()
         self.stream_session_id = uuid4()
@@ -58,7 +63,9 @@ class DeliveryHarness:
                     updated_at=self.now,
                 )
             )
-        self.repository = SqlAlchemyTaskControlRepository(self.sessions)
+        self.repository = SqlAlchemyTaskControlRepository(
+            self.sessions, clock=lambda _session: self.clock
+        )
         reservation = self.repository.reserve(
             AdmissionRequest(
                 organization_id=self.organization_id,
@@ -81,23 +88,46 @@ class DeliveryHarness:
         self.effects = InspectionEffectService(SqlAlchemyInspectionEffects(self.sessions))
         self.recovery = RecoveryService(self.repository, SystemRecoveryScope("property-test"))
         self.claim = None
+        self._stale_publish_rejected = False
+
+    def prepare_expired_reclaim_baseline(self) -> None:
+        initial_claim = self.repository.claim(
+            self.task.task_id, self.organization_id, "property-worker-a", self.clock
+        )
+        assert initial_claim is not None
+        self.clock += timedelta(seconds=RENEW_INTERVAL_SECONDS)
+        renewed_claim = self.repository.renew(initial_claim, self.clock)
+        assert renewed_claim is not None
+        self.clock += timedelta(seconds=LEASE_SECONDS + 1)
+        replacement_claim = self.repository.claim(
+            self.task.task_id, self.organization_id, "property-worker-b", self.clock
+        )
+        assert replacement_claim is not None
+        try:
+            self.effects.publish(_publish_command(renewed_claim, self.clock))
+        except StaleLease:
+            self._stale_publish_rejected = True
+        else:
+            raise AssertionError("reclaimed lease must reject stale completion")
+        self.claim = replacement_claim
+        self.effects.publish(_publish_command(replacement_claim, self.clock))
 
     def apply(self, action: str) -> None:
         if action == "deliver":
             claim = self.repository.claim(
-                self.task.task_id, self.organization_id, "property-worker", self.now
+                self.task.task_id, self.organization_id, "property-worker", self.clock
             )
             if claim is not None:
                 self.claim = claim
         elif action == "renew" and self.claim is not None:
-            renewed = self.repository.renew(self.claim, self.now)
+            renewed = self.repository.renew(self.claim, self.clock)
             if renewed is not None:
                 self.claim = renewed
         elif action == "expire":
-            self.recovery.run_once(self.now)
+            self.recovery.run_once(self.clock)
         elif action == "complete" and self.claim is not None:
             try:
-                self.effects.publish(_publish_command(self.claim, self.now))
+                self.effects.publish(_publish_command(self.claim, self.clock))
             except StaleLease:
                 pass
 
@@ -121,6 +151,9 @@ class DeliveryHarness:
                 .where(PublishedInferenceResultRow.task_id == self.task.task_id)
             )
 
+    def stale_publish_was_rejected(self) -> bool:
+        return self._stale_publish_rejected
+
     def close(self) -> None:
         self.engine.dispose()
 
@@ -139,11 +172,22 @@ def harness(tmp_path_factory: pytest.TempPathFactory):
 @settings(deadline=None)
 def test_any_duplicate_delivery_order_has_at_most_one_published_result(harness, actions):
     harness.reset()
+    harness.prepare_expired_reclaim_baseline()
     for action in actions:
         harness.apply(action)
 
-    assert harness.published_result_count() <= 1
-    assert harness.inspection_event_count() <= 1
+    assert harness.published_result_count() == 1
+    assert harness.inspection_event_count() == 1
+
+
+def test_expired_claim_cannot_publish_after_reclaim_and_duplicate_delivery(harness):
+    harness.reset()
+    harness.prepare_expired_reclaim_baseline()
+    harness.apply("complete")
+
+    assert harness.published_result_count() == 1
+    assert harness.inspection_event_count() == 1
+    assert harness.stale_publish_was_rejected()
 
 
 def _upgrade_sqlite(database_path: Path) -> None:

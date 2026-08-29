@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -65,8 +66,14 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
     same order before acquiring task or attempt locks.
     """
 
-    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+    def __init__(
+        self,
+        session_factory: sessionmaker[Session],
+        *,
+        clock: Callable[[Session], datetime] | None = None,
+    ) -> None:
         self._session_factory = session_factory
+        self._clock = clock
 
     def reserve(self, request: AdmissionRequest, now: datetime) -> AdmissionReservation:
         """Reserve one upload slot and persist a PENDING Artifact atomically."""
@@ -1077,8 +1084,9 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
             raise AdmissionRejected("CAMERA_STATE_UNAVAILABLE")
         return state
 
-    @staticmethod
-    def _db_now(session: Session) -> datetime:
+    def _db_now(self, session: Session) -> datetime:
+        if self._clock is not None:
+            return _as_utc(self._clock(session))
         value = session.scalar(select(func.now()))
         return _as_utc(value)
 
