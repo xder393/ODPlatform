@@ -46,3 +46,28 @@ and one alert outbox row per event. The failure hook is adapter constructor
 injection used only by tests and is not part of the production service API.
 
 Concern: PostgreSQL locking and unique-key concurrency remain CI-gated.
+
+## Fix Round 1 evidence
+
+The hardening sequence preserved history: `e2f3c25` report, canonical audit
+fix `ec4f2b7`, boundary fix `729c0b7`, rollback test `9d55905`, Phase 3A revert
+`182fe32` and recovery `b9b1480`, Phase 3B revert `b4290a2` and recovery
+`2a57e21`. The final net implementation also includes `1eb3d0c`'s audit/feed
+regression history and its explicit revert/recovery sequence.
+
+Exact verification commands and results:
+
+- Focused effects, PG case dedup, case-audit UoW, alert feed, Task 3 fencing,
+  and PG fencing: `52 passed, 7 skipped in 2.06s`.
+- Full backend shared-schemas/httpx2 command (`uv run ... pytest
+  apps/web-backend/tests -q`): `230 passed, 10 skipped in 13.07s`.
+- Ruff on all Task 5 production/tests: `All checks passed!`.
+- `git diff --check`: clean.
+
+Self-review confirms canonical same-session audit head/hash append, schema-valid
+alert payload, DB-time lease fence, complete attempt identity, shell-before-case
+episode claim, full duplicate comparison, camera-first lock and missing-anchor
+StaleLease, one commit boundary without nested commits, and rollback/no-effect
+paths. Publish-level PG concurrency remains gated and the requested lower-level
+episode primitive concurrency test is deferred; `ODP_POSTGRES_TEST_URL` is not
+configured locally.
