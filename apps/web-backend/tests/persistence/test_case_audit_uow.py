@@ -1,6 +1,7 @@
-import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta, timezone
+import os
+from pathlib import Path
 from threading import Event
 from uuid import UUID
 
@@ -21,11 +22,7 @@ from odp_api.adapters.persistence.repositories import (
 from odp_api.adapters.persistence.unit_of_work import SqlAlchemyBusinessUnitOfWork
 from odp_api.db import create_engine_and_session
 from odp_api.modules.audit.models import AuditCommand
-from odp_api.modules.audit.service import (
-    AuditAppendBlocked,
-    AuditService,
-    AuditWriteError,
-)
+from odp_api.modules.audit.service import AuditAppendBlocked, AuditService, AuditWriteError
 from odp_api.modules.cases.application import AuditContext, CaseApplicationService
 from odp_api.modules.cases.errors import InvalidCaseTransition
 from odp_api.modules.identity.models import Actor
@@ -107,9 +104,7 @@ def _seeded_sessions(tmp_path):
     return engine, sessions
 
 
-def test_audit_write_failure_rolls_back_case_status_and_transition_history(
-    tmp_path,
-) -> None:
+def test_audit_write_failure_rolls_back_case_status_and_transition_history(tmp_path) -> None:
     """Removing transaction rollback would leave status/history changed after an audit failure."""
     engine, sessions = _seeded_sessions(tmp_path)
     try:
@@ -127,20 +122,14 @@ def test_audit_write_failure_rolls_back_case_status_and_transition_history(
         assert stored.case.status == "PENDING_CONFIRMATION"
         assert cases.history(case.case_id, DEMO_ORG_ID) == []
         with sessions() as session:
-            assert (
-                session.scalar(select(func.count()).select_from(CaseTransitionRow)) == 0
-            )
+            assert session.scalar(select(func.count()).select_from(CaseTransitionRow)) == 0
             assert session.scalar(select(func.count()).select_from(AuditLogRow)) == 0
-            assert (
-                session.scalar(select(func.count()).select_from(AuditChainHeadRow)) == 0
-            )
+            assert session.scalar(select(func.count()).select_from(AuditChainHeadRow)) == 0
     finally:
         engine.dispose()
 
 
-def test_non_utc_context_round_trips_as_canonical_utc_and_keeps_chain_valid(
-    tmp_path,
-) -> None:
+def test_non_utc_context_round_trips_as_canonical_utc_and_keeps_chain_valid(tmp_path) -> None:
     """Storing a +08 timestamp without normalization changes its audit hash after SQLite restart."""
     database_url = f"sqlite:///{tmp_path / 'utc-round-trip.db'}"
     engine, sessions = create_engine_and_session(database_url)
@@ -156,9 +145,7 @@ def test_non_utc_context_round_trips_as_canonical_utc_and_keeps_chain_valid(
         AuditService(SqlAlchemyAuditRepository(sessions)),
     )
     try:
-        stored = service.transition(
-            seed.cases[0].case_id, "IN_REVIEW", seed.actors[0], context
-        )
+        stored = service.transition(seed.cases[0].case_id, "IN_REVIEW", seed.actors[0], context)
         assert stored is not None
         assert stored.updated_at == expected
         assert stored.history[-1].occurred_at == expected
@@ -172,18 +159,14 @@ def test_non_utc_context_round_trips_as_canonical_utc_and_keeps_chain_valid(
         restored = restarted_cases.get(seed.cases[0].case_id, DEMO_ORG_ID)
         assert restored is not None
         assert restored.history[-1].occurred_at == expected
-        audit_entry = restarted_audit.repository.read_consistent_chain(
-            DEMO_ORG_ID
-        ).entries[-1]
+        audit_entry = restarted_audit.repository.read_consistent_chain(DEMO_ORG_ID).entries[-1]
         assert audit_entry.occurred_at == expected
         assert restarted_audit.verify_organization_chain(DEMO_ORG_ID).is_valid
     finally:
         restarted_engine.dispose()
 
 
-def test_standalone_durable_audit_append_round_trips_non_utc_time_as_canonical_utc(
-    tmp_path,
-) -> None:
+def test_standalone_durable_audit_append_round_trips_non_utc_time_as_canonical_utc(tmp_path) -> None:
     """A standalone AuditService append must not reinterpret +08 wall time as UTC after restart."""
     database_url = f"sqlite:///{tmp_path / 'standalone-audit.db'}"
     expected = datetime(2026, 8, 24, 1, 30, tzinfo=UTC)
@@ -216,9 +199,7 @@ def test_standalone_durable_audit_append_round_trips_non_utc_time_as_canonical_u
         restarted_engine.dispose()
 
 
-def test_append_guard_prevents_a_blocked_organization_from_bypassing_a_running_transition(
-    tmp_path,
-) -> None:
+def test_append_guard_prevents_a_blocked_organization_from_bypassing_a_running_transition(tmp_path) -> None:
     """Releasing the health lock after the check lets a later block race past the commit."""
     engine, sessions = _seeded_sessions(tmp_path)
     try:
@@ -261,15 +242,10 @@ def test_append_guard_prevents_a_blocked_organization_from_bypassing_a_running_t
                 seed.actors[0],
                 _audit_context(),
             )
-        restored = SqlAlchemyCaseRepository(sessions).get(
-            seed.cases[0].case_id, DEMO_ORG_ID
-        )
+        restored = SqlAlchemyCaseRepository(sessions).get(seed.cases[0].case_id, DEMO_ORG_ID)
         assert restored is not None
         assert restored.case.status == "IN_REVIEW"
-        assert (
-            len(audit_service.repository.read_consistent_chain(DEMO_ORG_ID).entries)
-            == 1
-        )
+        assert len(audit_service.repository.read_consistent_chain(DEMO_ORG_ID).entries) == 1
     finally:
         engine.dispose()
 
@@ -281,9 +257,7 @@ def test_sqlite_begin_immediate_serializes_two_case_writers(tmp_path) -> None:
         seed = build_demo_seed()
         entered = Event()
         release = Event()
-        first = CaseApplicationService(
-            lambda: PausingUnitOfWork(sessions, entered, release)
-        )
+        first = CaseApplicationService(lambda: PausingUnitOfWork(sessions, entered, release))
         second = CaseApplicationService(lambda: SqlAlchemyBusinessUnitOfWork(sessions))
         with ThreadPoolExecutor(max_workers=2) as executor:
             first_writer = executor.submit(
@@ -314,17 +288,13 @@ def test_sqlite_begin_immediate_serializes_two_case_writers(tmp_path) -> None:
     not os.getenv("ODP_POSTGRES_TEST_URL"),
     reason="requires the dedicated ODP_POSTGRES_TEST_URL CI database",
 )
-def test_postgresql_case_transition_locks_case_and_audit_head_then_commits_once() -> (
-    None
-):
+def test_postgresql_case_transition_locks_case_and_audit_head_then_commits_once() -> None:
     """CI-only contract: a live PostgreSQL transition locks both rows and commits all facts."""
     database_url = os.environ["ODP_POSTGRES_TEST_URL"]
     engine, sessions = create_engine_and_session(database_url)
     statements: list[str] = []
 
-    def record_statement(
-        _connection, _cursor, statement, _parameters, _context, _executemany
-    ):
+    def record_statement(_connection, _cursor, statement, _parameters, _context, _executemany):
         statements.append(statement)
 
     event.listen(engine, "before_cursor_execute", record_statement)
@@ -335,9 +305,7 @@ def test_postgresql_case_transition_locks_case_and_audit_head_then_commits_once(
         audit = AuditService(SqlAlchemyAuditRepository(sessions))
         stored = CaseApplicationService(
             lambda: SqlAlchemyBusinessUnitOfWork(sessions), audit
-        ).transition(
-            seed.cases[0].case_id, "IN_REVIEW", seed.actors[0], _audit_context()
-        )
+        ).transition(seed.cases[0].case_id, "IN_REVIEW", seed.actors[0], _audit_context())
 
         assert stored is not None
         assert any(
@@ -348,9 +316,7 @@ def test_postgresql_case_transition_locks_case_and_audit_head_then_commits_once(
             "FROM audit_chain_heads" in statement and "FOR UPDATE" in statement.upper()
             for statement in statements
         )
-        restored = SqlAlchemyCaseRepository(sessions).get(
-            seed.cases[0].case_id, DEMO_ORG_ID
-        )
+        restored = SqlAlchemyCaseRepository(sessions).get(seed.cases[0].case_id, DEMO_ORG_ID)
         assert restored is not None
         assert restored.history[-1].to_status == "IN_REVIEW"
         snapshot = audit.repository.read_consistent_chain(DEMO_ORG_ID)

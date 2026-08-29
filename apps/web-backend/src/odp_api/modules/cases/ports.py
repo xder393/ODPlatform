@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Protocol, Self
+from typing import Protocol
 from uuid import UUID
 
 from odp_api.modules.audit.service import AuditRepository
@@ -28,9 +28,7 @@ class StoredCase:
 
 
 class CaseRepositoryPort(Protocol):
-    def list(
-        self, organization_id: UUID, updated_after: datetime | None
-    ) -> list[StoredCase]: ...
+    def list(self, organization_id: UUID, updated_after: datetime | None) -> list[StoredCase]: ...
 
     def get(self, case_id: UUID, organization_id: UUID) -> StoredCase | None: ...
 
@@ -52,7 +50,7 @@ class BusinessUnitOfWorkPort(Protocol):
     cases: MutableCaseRepositoryPort
     audits: AuditRepository
 
-    def __enter__(self) -> Self: ...
+    def __enter__(self) -> "BusinessUnitOfWorkPort": ...
 
     def __exit__(self, exc_type, exc_value, traceback) -> bool | None: ...
 

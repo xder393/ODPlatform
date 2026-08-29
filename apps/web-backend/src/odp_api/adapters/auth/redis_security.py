@@ -5,17 +5,12 @@ from hashlib import sha256
 from typing import Protocol
 from uuid import UUID
 
-from odp_api.modules.identity.ports import (
-    REAUTHENTICATION_TTL_SECONDS,
-    WebSocketTicketStorePort,
-)
+from odp_api.modules.identity.ports import REAUTHENTICATION_TTL_SECONDS, WebSocketTicketStorePort
 from odp_api.modules.identity.tickets import WEBSOCKET_TICKET_TTL_SECONDS
 
 
 class RedisSecurityClient(Protocol):
-    def set_ex(
-        self, key: str, value: str, seconds: int, *, nx: bool = False
-    ) -> bool: ...
+    def set_ex(self, key: str, value: str, seconds: int, *, nx: bool = False) -> bool: ...
 
     def get(self, key: str) -> str | None: ...
 
@@ -29,9 +24,7 @@ class RedisReauthenticationStore:
         self._client = client
 
     def set_last_reauth_at(self, actor_id: UUID, occurred_at: datetime) -> None:
-        self._client.set_ex(
-            _reauth_key(actor_id), occurred_at.isoformat(), REAUTHENTICATION_TTL_SECONDS
-        )
+        self._client.set_ex(_reauth_key(actor_id), occurred_at.isoformat(), REAUTHENTICATION_TTL_SECONDS)
 
     def get_last_reauth_at(self, actor_id: UUID, now: datetime) -> datetime | None:
         value = self._client.get(_reauth_key(actor_id))
@@ -41,11 +34,7 @@ class RedisReauthenticationStore:
             occurred_at = datetime.fromisoformat(value)
         except ValueError:
             return None
-        return (
-            occurred_at
-            if occurred_at + timedelta(seconds=REAUTHENTICATION_TTL_SECONDS) >= now
-            else None
-        )
+        return occurred_at if occurred_at + timedelta(seconds=REAUTHENTICATION_TTL_SECONDS) >= now else None
 
 
 class RedisWebSocketTicketStore(WebSocketTicketStorePort):

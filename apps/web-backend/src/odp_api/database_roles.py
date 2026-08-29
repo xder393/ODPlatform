@@ -16,10 +16,8 @@ _GRANT_SQL = _REPOSITORY_ROOT / "deploy" / "postgres" / "apply-runtime-grants.sq
 
 def _postgres_url(database_url: str) -> str:
     """Convert SQLAlchemy's psycopg URL spelling to libpq's spelling."""
-    return (
-        make_url(database_url)
-        .set(drivername="postgresql")
-        .render_as_string(hide_password=False)
+    return make_url(database_url).set(drivername="postgresql").render_as_string(
+        hide_password=False
     )
 
 

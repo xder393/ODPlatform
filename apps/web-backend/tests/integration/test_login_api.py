@@ -35,9 +35,7 @@ def _seeded_settings():
 def test_login_returns_a_token_for_a_seeded_account() -> None:
     client, _ = _seeded_client()
     email, password, _role = DEMO_ACCOUNTS[0]
-    response = client.post(
-        "/api/v1/auth/login", json={"email": email, "password": password}
-    )
+    response = client.post("/api/v1/auth/login", json={"email": email, "password": password})
     assert response.status_code == 200
     token = response.json()["access_token"]
     # The issued token must be verifiable and carry the actor UUID subject.
@@ -93,9 +91,7 @@ def test_websocket_accepts_a_bearer_issued_ticket() -> None:
     ticket = client.post(
         "/api/v1/auth/websocket-ticket", headers={"Authorization": f"Bearer {token}"}
     ).json()["ticket"]
-    with client.websocket_connect(
-        f"/ws/inspection-events?ticket={ticket}"
-    ) as websocket:
+    with client.websocket_connect(f"/ws/inspection-events?ticket={ticket}") as websocket:
         payload = websocket.receive_json()
         assert payload["alert"]["defect_class"] == "scratch"
 
@@ -104,11 +100,9 @@ def test_websocket_rejects_missing_ticket() -> None:
     from starlette.websockets import WebSocketDisconnect
 
     client, _ = _seeded_client()
-    with (
-        pytest.raises(WebSocketDisconnect) as exc_info,
-        client.websocket_connect("/ws/inspection-events"),
-    ):
-        pass
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect("/ws/inspection-events"):
+            pass
     # The server closes with policy-violation 1008 before accepting the socket.
     assert exc_info.value.code == 1008
 
@@ -117,33 +111,17 @@ def test_disabled_actor_loses_existing_jwt_login_and_issued_websocket_ticket() -
     """Disabling an actor must invalidate each authentication path on its next lookup."""
     client, app = _seeded_client()
     email, password, _role = DEMO_ACCOUNTS[0]
-    token = client.post(
-        "/api/v1/auth/login", json={"email": email, "password": password}
-    ).json()["access_token"]
+    token = client.post("/api/v1/auth/login", json={"email": email, "password": password}).json()["access_token"]
     ticket = client.post(
         "/api/v1/auth/websocket-ticket", headers={"Authorization": f"Bearer {token}"}
     ).json()["ticket"]
     actor_id = extract_subject(token, "test-login-secret")
     with app.state.session_factory.begin() as session:
-        session.scalar(
-            select(ActorRow).where(ActorRow.actor_id == actor_id)
-        ).enabled = False
+        session.scalar(select(ActorRow).where(ActorRow.actor_id == actor_id)).enabled = False
 
-    assert (
-        client.get(
-            "/api/v1/cases", headers={"Authorization": f"Bearer {token}"}
-        ).status_code
-        == 401
-    )
-    assert (
-        client.post(
-            "/api/v1/auth/login", json={"email": email, "password": password}
-        ).status_code
-        == 401
-    )
-    with (
-        pytest.raises(WebSocketDisconnect) as disconnected,
-        client.websocket_connect(f"/ws/inspection-events?ticket={ticket}"),
-    ):
-        pass
+    assert client.get("/api/v1/cases", headers={"Authorization": f"Bearer {token}"}).status_code == 401
+    assert client.post("/api/v1/auth/login", json={"email": email, "password": password}).status_code == 401
+    with pytest.raises(WebSocketDisconnect) as disconnected:
+        with client.websocket_connect(f"/ws/inspection-events?ticket={ticket}"):
+            pass
     assert disconnected.value.code == 1008

@@ -13,8 +13,6 @@ from uuid import UUID, uuid4
 from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
 
-from pypdf import PdfReader
-
 from odp_api.modules.knowledge.models import (
     EvidenceKind,
     KnowledgeChunk,
@@ -22,24 +20,15 @@ from odp_api.modules.knowledge.models import (
     KnowledgeParentChunk,
 )
 from odp_api.ports.retrieval import KnowledgeIndexPort
+from pypdf import PdfReader
 
 PDF_MEDIA_TYPE = "application/pdf"
-DOCX_MEDIA_TYPE = (
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-)
+DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 _WORD_NAMESPACE = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-_CONTENT_TYPES_NAMESPACE = (
-    "{http://schemas.openxmlformats.org/package/2006/content-types}"
-)
-_PACKAGE_RELATIONSHIPS_NAMESPACE = (
-    "{http://schemas.openxmlformats.org/package/2006/relationships}"
-)
-_OFFICE_DOCUMENT_RELATIONSHIP = (
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"
-)
-_WORD_DOCUMENT_CONTENT_TYPE = (
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
-)
+_CONTENT_TYPES_NAMESPACE = "{http://schemas.openxmlformats.org/package/2006/content-types}"
+_PACKAGE_RELATIONSHIPS_NAMESPACE = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+_OFFICE_DOCUMENT_RELATIONSHIP = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"
+_WORD_DOCUMENT_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
 
 
 class KnowledgeIngestionService:
@@ -55,9 +44,7 @@ class KnowledgeIngestionService:
         if chunk_size_words < 1:
             raise ValueError("Chunk size must be positive.")
         if overlap_words < 0 or overlap_words >= chunk_size_words:
-            raise ValueError(
-                "Chunk overlap must be non-negative and smaller than chunk size."
-            )
+            raise ValueError("Chunk overlap must be non-negative and smaller than chunk size.")
         self._index = index
         self._chunk_size_words = chunk_size_words
         self._overlap_words = overlap_words
@@ -199,9 +186,7 @@ def _extract_pdf_paragraphs(content: bytes) -> list[tuple[int, int, str]]:
         reader = PdfReader(BytesIO(content))
         paragraphs = []
         for page_number, page in enumerate(reader.pages, start=1):
-            for paragraph_number, text in enumerate(
-                _split_paragraphs(page.extract_text()), start=1
-            ):
+            for paragraph_number, text in enumerate(_split_paragraphs(page.extract_text()), start=1):
                 paragraphs.append((page_number, paragraph_number, text))
         return paragraphs
     except Exception as error:
@@ -222,10 +207,7 @@ def _extract_docx_paragraphs(content: bytes) -> list[tuple[int, int, str]]:
             root = ElementTree.fromstring(archive.read("word/document.xml"))
     except (BadZipFile, ElementTree.ParseError, KeyError, ValueError) as error:
         raise ValueError("Invalid DOCX document.") from error
-    if (
-        content_types.tag != f"{_CONTENT_TYPES_NAMESPACE}Types"
-        or relationships.tag != f"{_PACKAGE_RELATIONSHIPS_NAMESPACE}Relationships"
-    ):
+    if content_types.tag != f"{_CONTENT_TYPES_NAMESPACE}Types" or relationships.tag != f"{_PACKAGE_RELATIONSHIPS_NAMESPACE}Relationships":
         raise ValueError("Invalid DOCX document.")
     has_word_document_content_type = any(
         override.get("PartName") == "/word/document.xml"
@@ -236,21 +218,14 @@ def _extract_docx_paragraphs(content: bytes) -> list[tuple[int, int, str]]:
         relationship.get("Type") == _OFFICE_DOCUMENT_RELATIONSHIP
         and relationship.get("Target", "").lstrip("/") == "word/document.xml"
         and relationship.get("TargetMode") in {None, "Internal"}
-        for relationship in relationships.iter(
-            f"{_PACKAGE_RELATIONSHIPS_NAMESPACE}Relationship"
-        )
+        for relationship in relationships.iter(f"{_PACKAGE_RELATIONSHIPS_NAMESPACE}Relationship")
     )
     if not has_word_document_content_type or not has_office_document_relationship:
         raise ValueError("Invalid DOCX document.")
-    if (
-        root.tag != f"{_WORD_NAMESPACE}document"
-        or root.find(f"{_WORD_NAMESPACE}body") is None
-    ):
+    if root.tag != f"{_WORD_NAMESPACE}document" or root.find(f"{_WORD_NAMESPACE}body") is None:
         raise ValueError("Invalid DOCX document.")
     paragraphs = []
-    for paragraph_number, paragraph in enumerate(
-        root.iter(f"{_WORD_NAMESPACE}p"), start=1
-    ):
+    for paragraph_number, paragraph in enumerate(root.iter(f"{_WORD_NAMESPACE}p"), start=1):
         text = "".join(paragraph.itertext()).strip()
         if text:
             paragraphs.append((1, paragraph_number, text))

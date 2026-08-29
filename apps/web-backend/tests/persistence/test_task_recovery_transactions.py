@@ -4,9 +4,6 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import sessionmaker
-
 from odp_api.adapters.persistence.models import AuditLogRow, Base
 from odp_api.adapters.persistence.task_control import SqlAlchemyTaskControlRepository
 from odp_api.adapters.persistence.task_models import (
@@ -20,6 +17,8 @@ from odp_api.adapters.persistence.task_models import (
 from odp_api.modules.tasks.models import FailureKind, TaskStatus
 from odp_api.modules.tasks.recovery import SystemRecoveryScope
 from odp_api.ports.tasks import AdmissionRejected
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import sessionmaker
 
 
 @pytest.fixture
@@ -30,9 +29,7 @@ def repository(tmp_path):
     engine.dispose()
 
 
-def _seed_task(
-    repository, *, attempt_count=0, last_dispatched_at=None, status=TaskStatus.READY
-):
+def _seed_task(repository, *, attempt_count=0, last_dispatched_at=None, status=TaskStatus.READY):
     now = datetime.now(UTC).replace(microsecond=0)
     tenant, camera, artifact, task = uuid4(), uuid4(), uuid4(), uuid4()
     with repository._session_factory() as session:
@@ -143,23 +140,12 @@ def test_attempt_one_retry_waits_one_second_then_releases_with_new_dispatch(
         session.commit()
     assert repository.release_due_retries(now + timedelta(seconds=1), system_scope) == 1
     row = _row(repository, task)
-    assert (row.status, row.dispatch_seq, row.attempt_count) == (
-        TaskStatus.READY.value,
-        2,
-        1,
-    )
+    assert (row.status, row.dispatch_seq, row.attempt_count) == (TaskStatus.READY.value, 2, 1)
     with repository._session_factory() as session:
-        assert (
-            session.query(OutboxEventRow)
-            .filter_by(task_id=task, dispatch_seq=2)
-            .count()
-            == 1
-        )
+        assert session.query(OutboxEventRow).filter_by(task_id=task, dispatch_seq=2).count() == 1
 
 
-def test_second_retry_waits_two_seconds_and_third_failure_dead_letters(
-    repository, system_scope
-):
+def test_second_retry_waits_two_seconds_and_third_failure_dead_letters(repository, system_scope):
     tenant, _, task, now = _seed_task(repository)
     first = repository.claim(task, tenant, "worker", now)
     assert first is not None
@@ -183,9 +169,7 @@ def test_second_retry_waits_two_seconds_and_third_failure_dead_letters(
     assert _row(repository, task).status == TaskStatus.DEAD_LETTER.value
 
 
-@pytest.mark.parametrize(
-    "failure", [FailureKind.INVALID_INPUT, FailureKind.MODEL_CONFIGURATION]
-)
+@pytest.mark.parametrize("failure", [FailureKind.INVALID_INPUT, FailureKind.MODEL_CONFIGURATION])
 def test_permanent_failures_dead_letter_immediately(repository, failure):
     tenant, _, task, now = _seed_task(repository)
     claim = repository.claim(task, tenant, "worker", now)
@@ -202,31 +186,19 @@ def test_stale_ready_redispatches_once_but_fresh_ready_and_next_scan_do_not(
     )
     _, _, fresh, now = _seed_task(repository, last_dispatched_at=datetime.now(UTC))
     assert repository.redispatch_stale_ready(now, system_scope) == 1
-    assert (
-        _row(repository, stale).dispatch_seq,
-        _row(repository, fresh).dispatch_seq,
-    ) == (2, 1)
+    assert (_row(repository, stale).dispatch_seq, _row(repository, fresh).dispatch_seq) == (2, 1)
     assert repository.redispatch_stale_ready(now, system_scope) == 0
     with repository._session_factory() as session:
-        assert (
-            session.query(OutboxEventRow)
-            .filter_by(task_id=stale, dispatch_seq=2)
-            .count()
-            == 1
-        )
+        assert session.query(OutboxEventRow).filter_by(task_id=stale, dispatch_seq=2).count() == 1
     assert tenant != _row(repository, fresh).organization_id
 
 
-def test_expired_running_task_finishes_attempt_and_clears_camera_anchor(
-    repository, system_scope
-):
+def test_expired_running_task_finishes_attempt_and_clears_camera_anchor(repository, system_scope):
     tenant, camera, task, now = _seed_task(repository)
     claim = repository.claim(task, tenant, "worker", now)
     assert claim is not None
     with repository._session_factory() as session:
-        session.get(InferenceTaskRow, task).lease_expires_at = now - timedelta(
-            seconds=1
-        )
+        session.get(InferenceTaskRow, task).lease_expires_at = now - timedelta(seconds=1)
         session.commit()
     assert repository.expire_leases(now, system_scope) == 1
     assert _row(repository, task).status == TaskStatus.RETRY_WAIT.value
@@ -240,11 +212,7 @@ def test_expired_running_task_finishes_attempt_and_clears_camera_anchor(
                 CameraInferenceStateRow.camera_id == camera,
             )
         )
-        assert (
-            attempt.outcome,
-            attempt.finished_at is not None,
-            anchor.running_task_id,
-        ) == (
+        assert (attempt.outcome, attempt.finished_at is not None, anchor.running_task_id) == (
             "LEASE_EXPIRED",
             True,
             None,
@@ -256,17 +224,13 @@ def test_expired_final_attempt_dead_letters_at_retry_cap(repository, system_scop
     claim = repository.claim(task, tenant, "worker", now)
     assert claim is not None and claim.attempt_no == 3
     with repository._session_factory() as session:
-        session.get(InferenceTaskRow, task).lease_expires_at = now - timedelta(
-            seconds=1
-        )
+        session.get(InferenceTaskRow, task).lease_expires_at = now - timedelta(seconds=1)
         session.commit()
     assert repository.expire_leases(now, system_scope) == 1
     assert _row(repository, task).status == TaskStatus.DEAD_LETTER.value
 
 
-def test_quarantine_caps_payload_blocks_tenant_task_and_only_acks_after_commit(
-    repository,
-):
+def test_quarantine_caps_payload_blocks_tenant_task_and_only_acks_after_commit(repository):
     tenant, _, task, now = _seed_task(repository)
     result = repository.quarantine_message(
         "inference.tasks",
@@ -285,9 +249,7 @@ def test_quarantine_caps_payload_blocks_tenant_task_and_only_acks_after_commit(
         assert (
             len(
                 session.scalar(
-                    select(MessageQuarantineRow).where(
-                        MessageQuarantineRow.task_id == task
-                    )
+                    select(MessageQuarantineRow).where(MessageQuarantineRow.task_id == task)
                 ).raw_payload
             )
             == 65536
@@ -310,35 +272,20 @@ def test_quarantine_wrong_tenant_rolls_back_without_record(repository):
 
 @pytest.mark.parametrize(
     "status",
-    [
-        TaskStatus.RUNNING,
-        TaskStatus.RETRY_WAIT,
-        TaskStatus.SUCCEEDED,
-        TaskStatus.DEAD_LETTER,
-    ],
+    [TaskStatus.RUNNING, TaskStatus.RETRY_WAIT, TaskStatus.SUCCEEDED, TaskStatus.DEAD_LETTER],
 )
 def test_quarantine_rejects_non_ready_task_without_persisting_a_row(repository, status):
     tenant, _, task, now = _seed_task(repository, status=status)
     with pytest.raises(AdmissionRejected):
         repository.quarantine_message(
-            "inference.tasks",
-            "blocked-0",
-            uuid4(),
-            "v9",
-            "9",
-            b"bad",
-            task,
-            tenant,
-            now,
+            "inference.tasks", "blocked-0", uuid4(), "v9", "9", b"bad", task, tenant, now
         )
     with repository._session_factory() as session:
         assert session.query(MessageQuarantineRow).count() == 0
     assert _row(repository, task).status == status.value
 
 
-def test_quarantine_duplicate_message_for_blocked_task_is_idempotently_ackable(
-    repository,
-):
+def test_quarantine_duplicate_message_for_blocked_task_is_idempotently_ackable(repository):
     tenant, _, task, now = _seed_task(repository)
     original = repository.quarantine_message(
         "inference.tasks", "same-0", uuid4(), "v9", "9", b"bad", task, tenant, now
@@ -346,37 +293,20 @@ def test_quarantine_duplicate_message_for_blocked_task_is_idempotently_ackable(
     duplicate = repository.quarantine_message(
         "inference.tasks", "same-0", uuid4(), "v9", "9", b"changed", task, tenant, now
     )
-    assert (duplicate.quarantine_id, duplicate.ack_after_commit) == (
-        original.quarantine_id,
-        True,
-    )
+    assert (duplicate.quarantine_id, duplicate.ack_after_commit) == (original.quarantine_id, True)
     with repository._session_factory() as session:
         assert session.query(MessageQuarantineRow).count() == 1
 
 
 @pytest.mark.parametrize(
-    "status",
-    [
-        TaskStatus.READY,
-        TaskStatus.RUNNING,
-        TaskStatus.SUCCEEDED,
-        TaskStatus.DEAD_LETTER,
-    ],
+    "status", [TaskStatus.READY, TaskStatus.RUNNING, TaskStatus.SUCCEEDED, TaskStatus.DEAD_LETTER]
 )
 def test_quarantine_duplicate_rejects_task_that_is_no_longer_compatibility_blocked(
     repository, status
 ):
     tenant, _, task, now = _seed_task(repository)
     repository.quarantine_message(
-        "inference.tasks",
-        "stale-duplicate-0",
-        uuid4(),
-        "v9",
-        "9",
-        b"original",
-        task,
-        tenant,
-        now,
+        "inference.tasks", "stale-duplicate-0", uuid4(), "v9", "9", b"original", task, tenant, now
     )
     with repository._session_factory() as session:
         row = session.get(InferenceTaskRow, task)
@@ -425,19 +355,10 @@ def test_replay_only_blocked_creates_fresh_dispatch_and_durable_audit(repository
     )
     assert _row(repository, task).status == TaskStatus.READY.value
     with repository._session_factory() as session:
-        assert (
-            session.query(OutboxEventRow)
-            .filter_by(task_id=task, dispatch_seq=2)
-            .count()
-            == 1
-        )
+        assert session.query(OutboxEventRow).filter_by(task_id=task, dispatch_seq=2).count() == 1
         assert (
             session.query(AuditLogRow)
-            .filter_by(
-                organization_id=tenant,
-                resource_id=task,
-                action="COMPATIBILITY_REPLAYED",
-            )
+            .filter_by(organization_id=tenant, resource_id=task, action="COMPATIBILITY_REPLAYED")
             .count()
             == 1
         )

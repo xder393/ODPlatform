@@ -47,7 +47,7 @@ def make_service(
         InMemoryTaskQueue,
         InMemoryTaskMetrics,
         InMemoryTaskAlertPublisher,
-    ],
+    ]
 ) -> TaskService:
     repository, queue, metrics, alerts = dependencies
     return TaskService(repository, queue, metrics, alerts)
@@ -91,16 +91,12 @@ def test_vision_timeout_retries_with_exponential_delays(
 ) -> None:
     """Removing the timeout retry branch would leave a timed-out frame running."""
     service = make_service(dependencies)
-    task = service.enqueue(
-        "vision_inference", "frame-002:model-v3", {"frame_id": "frame-002"}
-    )
+    task = service.enqueue("vision_inference", "frame-002:model-v3", {"frame_id": "frame-002"})
 
     async def exceeds_vision_timeout(_: dict[str, object]) -> None:
         raise asyncio.TimeoutError
 
-    first_retry = asyncio.run(
-        service.process_vision(task.task_id, exceeds_vision_timeout, now)
-    )
+    first_retry = asyncio.run(service.process_vision(task.task_id, exceeds_vision_timeout, now))
     second_retry = asyncio.run(
         service.process_vision(
             task.task_id,
@@ -128,24 +124,14 @@ def test_third_failed_vision_attempt_enters_dead_letter_and_emits_alert(
 ) -> None:
     """An exhausted task must not be retried forever or fail without an alert."""
     service = make_service(dependencies)
-    task = service.enqueue(
-        "vision_inference", "frame-003:model-v3", {"frame_id": "frame-003"}
-    )
+    task = service.enqueue("vision_inference", "frame-003:model-v3", {"frame_id": "frame-003"})
 
     async def inference_fails(_: dict[str, object]) -> None:
         raise RuntimeError("vision provider unavailable")
 
     asyncio.run(service.process_vision(task.task_id, inference_fails, now))
-    asyncio.run(
-        service.process_vision(
-            task.task_id, inference_fails, now + timedelta(seconds=1)
-        )
-    )
-    exhausted = asyncio.run(
-        service.process_vision(
-            task.task_id, inference_fails, now + timedelta(seconds=3)
-        )
-    )
+    asyncio.run(service.process_vision(task.task_id, inference_fails, now + timedelta(seconds=1)))
+    exhausted = asyncio.run(service.process_vision(task.task_id, inference_fails, now + timedelta(seconds=3)))
 
     assert exhausted.status == "DEAD_LETTER"
     assert exhausted.attempt_count == 3
@@ -193,7 +179,6 @@ def test_redis_stream_adapter_publishes_a_serialized_task_reference(
     ],
 ) -> None:
     """Replacing the adapter with a local-only queue must break worker publication."""
-
     class FakeRedisStream:
         def __init__(self) -> None:
             self.entries: list[tuple[str, dict[str, str]]] = []
@@ -229,9 +214,7 @@ def test_redis_stream_adapter_publishes_a_serialized_task_reference(
     assert queue.depth() == 1
 
 
-def test_sqlite_task_repository_retains_idempotency_records_after_restart(
-    tmp_path: Path,
-) -> None:
+def test_sqlite_task_repository_retains_idempotency_records_after_restart(tmp_path: Path) -> None:
     """Replacing the runtime repository must not let a restart duplicate a frame/model task."""
     database_path = tmp_path / "tasks.sqlite3"
     first_repository = SQLiteTaskRepository(database_path)
@@ -266,9 +249,7 @@ def test_sqlite_task_repository_retains_idempotency_records_after_restart(
     restarted_repository.close()
 
 
-def test_sqlite_task_repository_uniquely_persists_concurrent_idempotency_keys(
-    tmp_path: Path,
-) -> None:
+def test_sqlite_task_repository_uniquely_persists_concurrent_idempotency_keys(tmp_path: Path) -> None:
     """Two API processes must not race past the durable idempotency constraint."""
     database_path = tmp_path / "tasks.sqlite3"
     barrier = Barrier(2)
@@ -279,10 +260,7 @@ def test_sqlite_task_repository_uniquely_persists_concurrent_idempotency_keys(
             barrier.wait()
             return record
 
-    repositories = [
-        ConcurrentRepository(database_path),
-        ConcurrentRepository(database_path),
-    ]
+    repositories = [ConcurrentRepository(database_path), ConcurrentRepository(database_path)]
 
     def enqueue(repository: SQLiteTaskRepository):
         return TaskService(
@@ -315,9 +293,7 @@ def test_vision_processing_invokes_the_30_second_timeout_mechanism(
 ) -> None:
     """Removing the deadline from wait_for would allow an inference to run unbounded."""
     service = make_service(dependencies)
-    task = service.enqueue(
-        "vision_inference", "frame-008:model-v3", {"frame_id": "frame-008"}
-    )
+    task = service.enqueue("vision_inference", "frame-008:model-v3", {"frame_id": "frame-008"})
     timeouts: list[int] = []
 
     async def controlled_wait_for(awaitable, *, timeout: int):
@@ -327,9 +303,7 @@ def test_vision_processing_invokes_the_30_second_timeout_mechanism(
     async def inference(_: dict[str, object]) -> None:
         return None
 
-    monkeypatch.setattr(
-        "odp_api.modules.tasks.service.asyncio.wait_for", controlled_wait_for
-    )
+    monkeypatch.setattr("odp_api.modules.tasks.service.asyncio.wait_for", controlled_wait_for)
 
     asyncio.run(service.process_vision(task.task_id, inference))
 
@@ -347,9 +321,7 @@ def test_retry_queue_depth_metric_uses_the_queue_transport(
 ) -> None:
     """Counting active records hides the additional queued retry message from operations."""
     service = make_service(dependencies)
-    task = service.enqueue(
-        "vision_inference", "frame-009:model-v3", {"frame_id": "frame-009"}
-    )
+    task = service.enqueue("vision_inference", "frame-009:model-v3", {"frame_id": "frame-009"})
 
     async def inference_fails(_: dict[str, object]) -> None:
         raise RuntimeError("transient vision failure")
@@ -371,12 +343,8 @@ def test_completed_and_retried_work_do_not_inflate_outstanding_queue_depth(
 ) -> None:
     """Using stream history as depth would keep completed and retried work counted forever."""
     service = make_service(dependencies)
-    retrying = service.enqueue(
-        "vision_inference", "frame-010:model-v3", {"frame_id": "frame-010"}
-    )
-    succeeding = service.enqueue(
-        "vision_inference", "frame-011:model-v3", {"frame_id": "frame-011"}
-    )
+    retrying = service.enqueue("vision_inference", "frame-010:model-v3", {"frame_id": "frame-010"})
+    succeeding = service.enqueue("vision_inference", "frame-011:model-v3", {"frame_id": "frame-011"})
 
     async def fails(_: dict[str, object]) -> None:
         raise RuntimeError("retry me")
@@ -391,11 +359,8 @@ def test_completed_and_retried_work_do_not_inflate_outstanding_queue_depth(
     assert dependencies[2].task_queue_depth == 1
 
 
-def test_duplicate_enqueue_recovers_a_task_stranded_by_a_transient_publish_failure() -> (
-    None
-):
+def test_duplicate_enqueue_recovers_a_task_stranded_by_a_transient_publish_failure() -> None:
     """A queue outage after persistence must not strand a pending task forever."""
-
     class FailingOnceQueue:
         def __init__(self) -> None:
             self.calls = 0
@@ -419,12 +384,8 @@ def test_duplicate_enqueue_recovers_a_task_stranded_by_a_transient_publish_failu
         InMemoryTaskAlertPublisher(),
     )
 
-    first = service.enqueue(
-        "vision_inference", "frame-012:model-v3", {"frame_id": "frame-012"}
-    )
-    recovered = service.enqueue(
-        "vision_inference", "frame-012:model-v3", {"frame_id": "frame-012"}
-    )
+    first = service.enqueue("vision_inference", "frame-012:model-v3", {"frame_id": "frame-012"})
+    recovered = service.enqueue("vision_inference", "frame-012:model-v3", {"frame_id": "frame-012"})
 
     assert first.task_id == recovered.task_id
     assert first.published_at is None

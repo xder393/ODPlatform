@@ -34,13 +34,8 @@ class RetrievalFilters:
             raise ValueError("Exact line scope requires a line_id.")
         if self.require_exact_product_scope and self.product_category is None:
             raise ValueError("Exact product scope requires a product_category.")
-        if (
-            self.product_category is not None
-            and self.exclude_product_category is not None
-        ):
-            raise ValueError(
-                "Product scope cannot include and exclude a category together."
-            )
+        if self.product_category is not None and self.exclude_product_category is not None:
+            raise ValueError("Product scope cannot include and exclude a category together.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,9 +89,7 @@ class KnowledgeIndexPort(RAGRetrievalPort, Protocol):
         chunks: Sequence[KnowledgeChunk],
     ) -> KnowledgeDocument: ...
 
-    def record_failure_atomically(
-        self, document: KnowledgeDocument
-    ) -> KnowledgeDocument: ...
+    def record_failure_atomically(self, document: KnowledgeDocument) -> KnowledgeDocument: ...
 
     def index(
         self,

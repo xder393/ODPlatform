@@ -5,9 +5,6 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-from pydantic import ValidationError
-from sqlalchemy import func, select
-
 from odp_api.adapters.persistence.inspection_effects import SqlAlchemyInspectionEffects
 from odp_api.adapters.persistence.models import (
     AlertRow,
@@ -29,12 +26,11 @@ from odp_api.adapters.persistence.task_models import (
 )
 from odp_api.db import create_engine_and_session
 from odp_api.modules.inspection.effects import InspectionEffectService, PublishConflict
-from odp_api.modules.tasks.commands import (
-    InferenceExecutionContract,
-    PublishInferenceCommand,
-)
+from odp_api.modules.tasks.commands import InferenceExecutionContract, PublishInferenceCommand
 from odp_api.modules.tasks.models import TaskStatus
 from odp_api.ports.tasks import StaleLease
+from pydantic import ValidationError
+from sqlalchemy import func, select
 
 
 def _command(claim, now, detections=()):
@@ -63,12 +59,7 @@ def _command(claim, now, detections=()):
 
 
 def _running(sessions, now, *, camera=None, organization=None):
-    org, camera, artifact, task = (
-        organization or uuid4(),
-        camera or uuid4(),
-        uuid4(),
-        uuid4(),
-    )
+    org, camera, artifact, task = organization or uuid4(), camera or uuid4(), uuid4(), uuid4()
     with sessions.begin() as session:
         session.add_all(
             (
@@ -131,54 +122,34 @@ def _service(sessions, *, hook=None):
     return InspectionEffectService(SqlAlchemyInspectionEffects(sessions))
 
 
-def test_no_defect_publishes_result_and_closes_fenced_execution_without_business_effects(
-    runtime,
-):
+def test_no_defect_publishes_result_and_closes_fenced_execution_without_business_effects(runtime):
     now = datetime(2026, 8, 25, 12, tzinfo=UTC)
     org, camera, artifact, task, claim = _running(runtime, now)
     effect = _service(runtime).publish(_command(claim, now))
     assert effect.event_id is effect.case_id is effect.alert_outbox_id is None
     with runtime() as session:
-        assert (
-            session.get(PublishedInferenceResultRow, effect.result_id).task_id == task
-        )
+        assert session.get(PublishedInferenceResultRow, effect.result_id).task_id == task
         assert session.get(InferenceTaskRow, task).status == TaskStatus.SUCCEEDED.value
-        assert (
-            session.get(CameraInferenceStateRow, (org, camera)).running_task_id is None
-        )
+        assert session.get(CameraInferenceStateRow, (org, camera)).running_task_id is None
         assert session.get(FrameArtifactRow, artifact).lifecycle == "PROCESSING"
         assert session.scalar(select(func.count()).select_from(InspectionEventRow)) == 0
         assert session.scalar(select(func.count()).select_from(DefectCaseRow)) == 0
         assert session.scalar(select(func.count()).select_from(OutboxEventRow)) == 0
 
 
-def test_defect_creates_event_case_evidence_alert_outbox_and_audit_in_one_effect(
-    runtime,
-):
+def test_defect_creates_event_case_evidence_alert_outbox_and_audit_in_one_effect(runtime):
     now = datetime(2026, 8, 25, 12, tzinfo=UTC)
     org, _camera, artifact, _task, claim = _running(runtime, now)
     effect = _service(runtime).publish(
-        _command(
-            claim,
-            now,
-            ({"defect_type": "scratch", "confidence": 0.91, "spatial_zone": "A"},),
-        )
+        _command(claim, now, ({"defect_type": "scratch", "confidence": 0.91, "spatial_zone": "A"},))
     )
     assert effect.event_id and effect.case_id and effect.alert_outbox_id
     with runtime() as session:
         assert session.get(FrameArtifactRow, artifact).lifecycle == "EVIDENCE"
-        assert (
-            session.get(InspectionEventRow, effect.event_id).case_id == effect.case_id
-        )
+        assert session.get(InspectionEventRow, effect.event_id).case_id == effect.case_id
         assert session.get(AlertRow, effect.event_id) is not None
-        assert (
-            session.scalar(select(func.count()).select_from(InspectionAlertFeedRow))
-            == 1
-        )
-        assert (
-            session.get(OutboxEventRow, effect.alert_outbox_id).aggregate_id
-            == effect.event_id
-        )
+        assert session.scalar(select(func.count()).select_from(InspectionAlertFeedRow)) == 1
+        assert session.get(OutboxEventRow, effect.alert_outbox_id).aggregate_id == effect.event_id
         assert (
             session.scalar(
                 select(func.count())
@@ -189,9 +160,7 @@ def test_defect_creates_event_case_evidence_alert_outbox_and_audit_in_one_effect
         )
 
 
-def test_exact_duplicate_returns_original_ids_but_conflicting_payload_is_rejected(
-    runtime,
-):
+def test_exact_duplicate_returns_original_ids_but_conflicting_payload_is_rejected(runtime):
     now = datetime(2026, 8, 25, 12, tzinfo=UTC)
     _org, _camera, _artifact, _task, claim = _running(runtime, now)
     command = _command(claim, now, ({"defect_type": "scratch", "confidence": 0.91},))
@@ -243,10 +212,7 @@ def test_every_execution_field_conflict_is_rejected(runtime, field):
         "class_map_version": "other",
     }
     mutated = replace(
-        command,
-        execution_contract=replace(
-            command.execution_contract, **{field: values[field]}
-        ),
+        command, execution_contract=replace(command.execution_contract, **{field: values[field]})
     )
     with pytest.raises(PublishConflict):
         service.publish(mutated)
@@ -257,18 +223,11 @@ def test_stale_or_wrong_tenant_claim_has_zero_effects(runtime):
     _org, _camera, _artifact, _task, claim = _running(runtime, now)
     command = _command(claim, now, ({"defect_type": "scratch", "confidence": 0.91},))
     with runtime.begin() as session:
-        session.get(InferenceTaskRow, claim.task_id).lease_expires_at = now - timedelta(
-            seconds=1
-        )
+        session.get(InferenceTaskRow, claim.task_id).lease_expires_at = now - timedelta(seconds=1)
     with pytest.raises(StaleLease):
         _service(runtime).publish(command)
     with runtime() as session:
-        assert (
-            session.scalar(
-                select(func.count()).select_from(PublishedInferenceResultRow)
-            )
-            == 0
-        )
+        assert session.scalar(select(func.count()).select_from(PublishedInferenceResultRow)) == 0
         assert session.scalar(select(func.count()).select_from(DefectCaseRow)) == 0
 
 
@@ -340,20 +299,13 @@ def test_downstream_failure_rolls_back_every_effect(runtime, monkeypatch):
     def fail(*_args, **_kwargs):
         raise RuntimeError("injected")
 
-    monkeypatch.setattr(
-        SqlAlchemyAuditSessionRepository, "append_under_head_lock", fail
-    )
+    monkeypatch.setattr(SqlAlchemyAuditSessionRepository, "append_under_head_lock", fail)
     with pytest.raises(RuntimeError, match="injected"):
         _service(runtime).publish(
             _command(claim, now, ({"defect_type": "scratch", "confidence": 0.91},))
         )
     with runtime() as session:
-        assert (
-            session.scalar(
-                select(func.count()).select_from(PublishedInferenceResultRow)
-            )
-            == 0
-        )
+        assert session.scalar(select(func.count()).select_from(PublishedInferenceResultRow)) == 0
         assert session.scalar(select(func.count()).select_from(InspectionEventRow)) == 0
         assert session.get(InferenceTaskRow, task).status == TaskStatus.RUNNING.value
 
@@ -364,15 +316,8 @@ def test_invalid_alert_confidence_rolls_back(runtime, confidence):
     _org, _camera, _artifact, task, claim = _running(runtime, now)
     with pytest.raises(ValidationError):
         _service(runtime).publish(
-            _command(
-                claim, now, ({"defect_type": "scratch", "confidence": confidence},)
-            )
+            _command(claim, now, ({"defect_type": "scratch", "confidence": confidence},))
         )
     with runtime() as session:
-        assert (
-            session.scalar(
-                select(func.count()).select_from(PublishedInferenceResultRow)
-            )
-            == 0
-        )
+        assert session.scalar(select(func.count()).select_from(PublishedInferenceResultRow)) == 0
         assert session.get(InferenceTaskRow, task).status == TaskStatus.RUNNING.value

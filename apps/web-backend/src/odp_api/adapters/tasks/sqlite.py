@@ -40,13 +40,10 @@ class SQLiteTaskRepository:
                 """
             )
             columns = {
-                row[1]
-                for row in self._connection.execute("PRAGMA table_info(task_records)")
+                row[1] for row in self._connection.execute("PRAGMA table_info(task_records)")
             }
             if "published_at" not in columns:
-                self._connection.execute(
-                    "ALTER TABLE task_records ADD COLUMN published_at TEXT"
-                )
+                self._connection.execute("ALTER TABLE task_records ADD COLUMN published_at TEXT")
 
     def get(self, task_id: UUID) -> TaskRecord | None:
         with self._lock:
@@ -58,8 +55,7 @@ class SQLiteTaskRepository:
     def get_by_idempotency_key(self, idempotency_key: str) -> TaskRecord | None:
         with self._lock:
             row = self._connection.execute(
-                "SELECT * FROM task_records WHERE idempotency_key = ?",
-                (idempotency_key,),
+                "SELECT * FROM task_records WHERE idempotency_key = ?", (idempotency_key,)
             ).fetchone()
         return _task_from_row(row) if row is not None else None
 
@@ -70,8 +66,7 @@ class SQLiteTaskRepository:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
                 existing = self._connection.execute(
-                    "SELECT * FROM task_records WHERE idempotency_key = ?",
-                    (task.idempotency_key,),
+                    "SELECT * FROM task_records WHERE idempotency_key = ?", (task.idempotency_key,)
                 ).fetchone()
                 if existing is not None and existing["task_id"] != str(task.task_id):
                     self._connection.execute("COMMIT")

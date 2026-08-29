@@ -5,13 +5,13 @@ from typing import Annotated
 from uuid import UUID, uuid5
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from odp_schemas.events import InspectionAlert
-from pydantic import BaseModel
-
 from odp_api.modules.identity.models import Actor
 from odp_api.modules.identity.policies import AuthorizationDenied, authorize
 from odp_api.modules.identity.service import get_current_actor
 from odp_api.ports.notifications import InspectionAlertFeedPort
+from pydantic import BaseModel
+
+from odp_schemas.events import InspectionAlert
 
 
 class DevInspectionEventRequest(BaseModel):
@@ -19,9 +19,7 @@ class DevInspectionEventRequest(BaseModel):
     line_id: UUID
 
 
-def create_development_notifications_router(
-    repository: InspectionAlertFeedPort,
-) -> APIRouter:
+def create_development_notifications_router(repository: InspectionAlertFeedPort) -> APIRouter:
     """Expose a deterministic, actor-scoped event publisher outside production only."""
     router = APIRouter(prefix="/api/v1/dev", tags=["development"])
 
@@ -31,16 +29,9 @@ def create_development_notifications_router(
         actor: Annotated[Actor, Depends(get_current_actor)],
     ) -> dict[str, object]:
         try:
-            authorize(
-                actor,
-                "inspection_event:read:own_line",
-                actor.organization_id,
-                request.line_id,
-            )
+            authorize(actor, "inspection_event:read:own_line", actor.organization_id, request.line_id)
         except AuthorizationDenied as error:
-            raise HTTPException(
-                status_code=403, detail="Not authorized for this production line"
-            ) from error
+            raise HTTPException(status_code=403, detail="Not authorized for this production line") from error
         alert = InspectionAlert(
             event_id=request.event_id,
             organization_id=actor.organization_id,

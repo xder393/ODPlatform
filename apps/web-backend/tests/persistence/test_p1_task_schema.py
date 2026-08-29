@@ -2,11 +2,10 @@
 
 from pathlib import Path
 
-from alembic.config import Config
-from sqlalchemy import inspect
-
 from alembic import command
+from alembic.config import Config
 from odp_api.db import create_engine_and_session
+from sqlalchemy import inspect
 
 BACKEND_DIR = Path(__file__).parents[2]
 
@@ -32,8 +31,7 @@ def test_p1_control_plane_schema_has_required_constraints(tmp_path):
         }
         assert expected <= set(inspector.get_table_names())
         assert {
-            item["name"]
-            for item in inspector.get_unique_constraints("inference_attempts")
+            item["name"] for item in inspector.get_unique_constraints("inference_attempts")
         } >= {
             "uq_inference_attempt_task_number",
             "uq_inference_attempt_task_fence",
@@ -43,33 +41,23 @@ def test_p1_control_plane_schema_has_required_constraints(tmp_path):
         } >= {"uq_outbox_task_dispatch_event"}
 
         camera_checks = {
-            item["sqltext"]
-            for item in inspector.get_check_constraints("camera_inference_state")
+            item["sqltext"] for item in inspector.get_check_constraints("camera_inference_state")
         }
         assert any("ready_count <= 2" in check for check in camera_checks)
-        assert (
-            next(
-                column["nullable"]
-                for column in inspector.get_columns("inference_tasks")
-                if column["name"] == "artifact_id"
-            )
-            is False
-        )
-        assert (
-            next(
-                column["nullable"]
-                for column in inspector.get_columns("message_quarantine")
-                if column["name"] == "event_id"
-            )
-            is False
-        )
-        assert (
-            next(
-                column["nullable"]
-                for column in inspector.get_columns("inspection_sessions")
-                if column["name"] == "line_id"
-            )
-            is False
-        )
+        assert next(
+            column["nullable"]
+            for column in inspector.get_columns("inference_tasks")
+            if column["name"] == "artifact_id"
+        ) is False
+        assert next(
+            column["nullable"]
+            for column in inspector.get_columns("message_quarantine")
+            if column["name"] == "event_id"
+        ) is False
+        assert next(
+            column["nullable"]
+            for column in inspector.get_columns("inspection_sessions")
+            if column["name"] == "line_id"
+        ) is False
     finally:
         engine.dispose()

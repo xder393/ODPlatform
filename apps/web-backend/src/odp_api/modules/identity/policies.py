@@ -43,9 +43,5 @@ def authorize(
     if permission not in grants and "*" not in grants:
         raise AuthorizationDenied(f"Role {role.value} lacks {permission}.")
 
-    if role is not Role.ADMINISTRATOR and (
-        line_id is None or line_id not in actor.line_ids
-    ):
-        raise AuthorizationDenied(
-            "The resource is outside the actor's production-line scope."
-        )
+    if role is not Role.ADMINISTRATOR and (line_id is None or line_id not in actor.line_ids):
+        raise AuthorizationDenied("The resource is outside the actor's production-line scope.")

@@ -5,9 +5,9 @@ from datetime import UTC, datetime
 from typing import Protocol
 from uuid import UUID
 
-from odp_schemas.events import InspectionAlert
-
 from odp_api.ports.notifications import StoredInspectionAlert
+
+from odp_schemas.events import InspectionAlert
 
 
 class RedisInspectionAlertClient(Protocol):
@@ -26,9 +26,7 @@ class RedisStreamInspectionAlertFeed:
     """Uses an append-only stream while keeping router reads provider-neutral."""
 
     def __init__(
-        self,
-        client: RedisInspectionAlertClient,
-        stream_name: str = "odp:inspection-alerts",
+        self, client: RedisInspectionAlertClient, stream_name: str = "odp:inspection-alerts"
     ) -> None:
         self._client = client
         self._stream_name = stream_name
@@ -50,19 +48,14 @@ class RedisStreamInspectionAlertFeed:
         self._client.xadd(self._stream_name, fields)
 
     def list(
-        self,
-        organization_id: UUID,
-        after_cursor: str | datetime | None = None,
-        limit: int = 100,
+        self, organization_id: UUID, after_cursor: str | datetime | None = None, limit: int = 100
     ) -> list[StoredInspectionAlert]:
         alerts: list[StoredInspectionAlert] = []
         for stream_cursor, fields in self._client.xrange(self._stream_name):
             stored = _stored_alert(stream_cursor, fields)
             if stored.alert.organization_id != organization_id:
                 continue
-            if isinstance(after_cursor, datetime) and stored.updated_at <= _as_utc(
-                after_cursor
-            ):
+            if isinstance(after_cursor, datetime) and stored.updated_at <= _as_utc(after_cursor):
                 continue
             if isinstance(after_cursor, str) and stored.cursor <= after_cursor:
                 continue
@@ -70,10 +63,11 @@ class RedisStreamInspectionAlertFeed:
         return alerts[:limit]
 
 
-def _stored_alert(
-    cursor: str, fields: Mapping[str | bytes, str | bytes]
-) -> StoredInspectionAlert:
-    normalized = {_decode(key): _decode(value) for key, value in fields.items()}
+def _stored_alert(cursor: str, fields: Mapping[str | bytes, str | bytes]) -> StoredInspectionAlert:
+    normalized = {
+        _decode(key): _decode(value)
+        for key, value in fields.items()
+    }
     alert = InspectionAlert.model_validate_json(normalized["alert"])
     line_id = normalized.get("line_id")
     return StoredInspectionAlert(

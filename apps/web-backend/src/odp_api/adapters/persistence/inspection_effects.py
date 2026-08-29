@@ -1,10 +1,6 @@
 from datetime import UTC, timedelta
 from uuid import uuid4
 
-from odp_schemas.events import InspectionAlert
-from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
-
 from odp_api.adapters.persistence.models import (
     AlertRow,
     DefectCaseRow,
@@ -25,6 +21,10 @@ from odp_api.modules.audit.models import AuditCommand, audit_log_from_command
 from odp_api.modules.inspection.effects import PublishConflict, PublishedEffect
 from odp_api.modules.tasks.models import TaskStatus
 from odp_api.ports.tasks import StaleLease
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+
+from odp_schemas.events import InspectionAlert
 
 
 class SqlAlchemyInspectionEffects:
@@ -37,9 +37,7 @@ class SqlAlchemyInspectionEffects:
             try:
                 # Camera is the serialization anchor, then artifact, task, attempt.
                 task = s.scalar(
-                    select(InferenceTaskRow).where(
-                        InferenceTaskRow.task_id == c.task_id
-                    )
+                    select(InferenceTaskRow).where(InferenceTaskRow.task_id == c.task_id)
                 )
                 if task is None or task.organization_id != c.organization_id:
                     raise StaleLease("tenant mismatch")
@@ -183,9 +181,7 @@ class SqlAlchemyInspectionEffects:
                         str(d.get("defect_type", "UNKNOWN")),
                         str(d.get("spatial_zone") or "GLOBAL"),
                     )
-                    ep = self._claim_episode(
-                        s, c.organization_id, task.camera_id, typ, zone, now
-                    )
+                    ep = self._claim_episode(s, c.organization_id, task.camera_id, typ, zone, now)
                     ep = s.scalar(
                         select(DefectEpisodeRow)
                         .where(
@@ -313,9 +309,7 @@ class SqlAlchemyInspectionEffects:
                 raise
 
     @staticmethod
-    def _claim_episode(
-        session, organization_id, camera_id, defect_type, spatial_zone, now
-    ):
+    def _claim_episode(session, organization_id, camera_id, defect_type, spatial_zone, now):
         row = session.scalar(
             select(DefectEpisodeRow)
             .where(
@@ -358,14 +352,10 @@ class SqlAlchemyInspectionEffects:
 
     @staticmethod
     def _utc(value):
-        return (
-            value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
-        )
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
     @staticmethod
     def _alert_id(s, event_id):
         return s.scalar(
-            select(OutboxEventRow.outbox_id).where(
-                OutboxEventRow.aggregate_id == event_id
-            )
+            select(OutboxEventRow.outbox_id).where(OutboxEventRow.aggregate_id == event_id)
         )

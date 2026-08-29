@@ -1,6 +1,5 @@
 from dataclasses import replace
 from typing import Final
-
 from odp_api.modules.cases.errors import InvalidCaseTransition
 from odp_api.modules.identity.models import Actor
 from odp_api.modules.identity.policies import authorize
@@ -20,9 +19,7 @@ class CaseService:
     @staticmethod
     def transition(case: DefectCase, to_status: CaseStatus, actor: Actor) -> DefectCase:
         """Return a new case after an allowed state transition."""
-        authorize(
-            actor, "defect_case:update:own_line", case.organization_id, case.line_id
-        )
+        authorize(actor, "defect_case:update:own_line", case.organization_id, case.line_id)
         if to_status not in ALLOWED_TRANSITIONS[case.status]:
             raise InvalidCaseTransition(case.status, to_status)
 

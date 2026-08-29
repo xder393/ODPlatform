@@ -42,9 +42,7 @@ def _login(client: TestClient) -> dict[str, str]:
     return {"Authorization": f"Bearer {response.json()['access_token']}"}
 
 
-def test_seeded_inspector_resolves_a_case_with_cited_advice_and_audit_trail(
-    tmp_path,
-) -> None:
+def test_seeded_inspector_resolves_a_case_with_cited_advice_and_audit_trail(tmp_path) -> None:
     app = _demo_app(tmp_path)
     client = TestClient(app)
     headers = _login(client)
@@ -124,10 +122,7 @@ def test_advice_is_tenant_scoped_across_organizations(tmp_path) -> None:
         ),
         seed=seed,
         actor_repository=InMemoryActorRepository(
-            {
-                **{actor.actor_id: actor for actor in seed.actors},
-                outsider.actor_id: outsider,
-            }
+            {**{actor.actor_id: actor for actor in seed.actors}, outsider.actor_id: outsider}
         ),
     )
     client = TestClient(app)

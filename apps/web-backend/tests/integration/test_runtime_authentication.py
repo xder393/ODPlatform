@@ -2,13 +2,14 @@ import base64
 import hashlib
 import hmac
 import json
-import sys
 from pathlib import Path
+import sys
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
+
 
 WEB_BACKEND_SRC = Path(__file__).parents[2] / "src"
 SHARED_SCHEMAS_SRC = Path(__file__).parents[4] / "packages" / "shared-schemas" / "src"
@@ -29,21 +30,13 @@ def signed_token(subject: UUID, secret: str) -> str:
 
 def signed_jwt(header_value: object, payload_value: object, secret: str) -> str:
     def encode(value: object) -> str:
-        return (
-            base64.urlsafe_b64encode(json.dumps(value).encode()).rstrip(b"=").decode()
-        )
+        return base64.urlsafe_b64encode(json.dumps(value).encode()).rstrip(b"=").decode()
 
     header = encode(header_value)
     payload = encode(payload_value)
-    signature = (
-        base64.urlsafe_b64encode(
-            hmac.new(
-                secret.encode(), f"{header}.{payload}".encode(), hashlib.sha256
-            ).digest()
-        )
-        .rstrip(b"=")
-        .decode()
-    )
+    signature = base64.urlsafe_b64encode(
+        hmac.new(secret.encode(), f"{header}.{payload}".encode(), hashlib.sha256).digest()
+    ).rstrip(b"=").decode()
     return f"{header}.{payload}.{signature}"
 
 
@@ -60,32 +53,23 @@ def test_runtime_rejects_missing_and_invalid_bearer_tokens() -> None:
 def test_runtime_resolves_distinct_bearer_subjects_to_tenant_scoped_actors() -> None:
     secret = "test-signing-secret"
     fixture_organization_id = UUID("00000000-0000-0000-0000-000000000001")
-    permitted_actor = Actor(
-        uuid4(), fixture_organization_id, Role.ADMINISTRATOR, frozenset()
-    )
+    permitted_actor = Actor(uuid4(), fixture_organization_id, Role.ADMINISTRATOR, frozenset())
     foreign_actor = Actor(uuid4(), uuid4(), Role.ADMINISTRATOR, frozenset())
     app = create_app(
         Settings(auth_jwt_secret=secret),
         actor_repository=InMemoryActorRepository(
-            {
-                permitted_actor.actor_id: permitted_actor,
-                foreign_actor.actor_id: foreign_actor,
-            }
+            {permitted_actor.actor_id: permitted_actor, foreign_actor.actor_id: foreign_actor}
         ),
     )
     client = TestClient(app)
 
     permitted = client.get(
         "/api/v1/cases",
-        headers={
-            "Authorization": f"Bearer {signed_token(permitted_actor.actor_id, secret)}"
-        },
+        headers={"Authorization": f"Bearer {signed_token(permitted_actor.actor_id, secret)}"},
     )
     foreign = client.get(
         "/api/v1/cases",
-        headers={
-            "Authorization": f"Bearer {signed_token(foreign_actor.actor_id, secret)}"
-        },
+        headers={"Authorization": f"Bearer {signed_token(foreign_actor.actor_id, secret)}"},
     )
 
     assert permitted.status_code == 200
@@ -133,19 +117,13 @@ def test_runtime_websocket_requires_a_verified_one_time_ticket() -> None:
     ticket = client.post(
         "/api/v1/auth/websocket-ticket", headers={"Authorization": f"Bearer {token}"}
     ).json()["ticket"]
-    with client.websocket_connect(
-        f"/ws/inspection-events?ticket={ticket}"
-    ) as websocket:
-        assert websocket.receive_json()["alert"]["organization_id"] == str(
-            actor.organization_id
-        )
+    with client.websocket_connect(f"/ws/inspection-events?ticket={ticket}") as websocket:
+        assert websocket.receive_json()["alert"]["organization_id"] == str(actor.organization_id)
 
     for query in ("", "?token=legacy-jwt"):
-        with (
-            pytest.raises(WebSocketDisconnect) as error,
-            client.websocket_connect(f"/ws/inspection-events{query}"),
-        ):
-            pass
+        with pytest.raises(WebSocketDisconnect) as error:
+            with client.websocket_connect(f"/ws/inspection-events{query}"):
+                pass
         assert error.value.code == 1008
 
 

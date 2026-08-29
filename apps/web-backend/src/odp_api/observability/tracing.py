@@ -40,11 +40,7 @@ class CorrelationIdMiddleware:
             return
         supplied_correlation_id = Headers(scope=scope).get(CORRELATION_ID_HEADER)
         try:
-            correlation_id = (
-                str(uuid.UUID(supplied_correlation_id))
-                if supplied_correlation_id
-                else str(uuid.uuid4())
-            )
+            correlation_id = str(uuid.UUID(supplied_correlation_id)) if supplied_correlation_id else str(uuid.uuid4())
         except ValueError:
             correlation_id = str(uuid.uuid4())
         response_status: list[int | None] = [None]

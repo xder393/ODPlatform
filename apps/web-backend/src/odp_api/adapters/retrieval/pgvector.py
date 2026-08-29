@@ -15,11 +15,7 @@ from threading import RLock
 from typing import Protocol
 from uuid import UUID
 
-from odp_api.modules.knowledge.models import (
-    KnowledgeChunk,
-    KnowledgeDocument,
-    KnowledgeParentChunk,
-)
+from odp_api.modules.knowledge.models import KnowledgeChunk, KnowledgeDocument, KnowledgeParentChunk
 from odp_api.ports.retrieval import RetrievalFilters, RetrievedChunk
 
 POSTGRES_HYBRID_SEARCH_SQL = """
@@ -124,9 +120,7 @@ class PostgresExecutorPort(Protocol):
 
     def execute(self, sql: str, parameters: Mapping[str, object]) -> None: ...
 
-    def fetch_all(
-        self, sql: str, parameters: Mapping[str, object]
-    ) -> Sequence[Mapping[str, object]]: ...
+    def fetch_all(self, sql: str, parameters: Mapping[str, object]) -> Sequence[Mapping[str, object]]: ...
 
     def transaction(self) -> Iterator[PostgresExecutorPort]: ...
 
@@ -149,9 +143,7 @@ class PgVectorPostgresAdapter:
         source_name: str,
         content_sha256: str,
     ) -> KnowledgeDocument | None:
-        return _find_indexed_document(
-            self._executor, organization_id, source_name, content_sha256
-        )
+        return _find_indexed_document(self._executor, organization_id, source_name, content_sha256)
 
     def next_version(self, organization_id: UUID, source_name: str) -> int:
         return _next_version(self._executor, organization_id, source_name)
@@ -219,53 +211,36 @@ class PgVectorPostgresAdapter:
     ) -> KnowledgeDocument:
         PgVectorRetrievalAdapter._validate_index_scope(document, parents, chunks)
         with self._executor.transaction() as executor:
+            parameters = _document_parameters(document)
             executor.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%(source_lock)s, 0))",
                 {"source_lock": f"{document.organization_id}:{document.source_name}"},
             )
             existing = _find_indexed_document(
-                executor,
-                document.organization_id,
-                document.source_name,
-                document.content_sha256,
+                executor, document.organization_id, document.source_name, document.content_sha256
             )
             if existing is not None:
                 return existing
-            version = _next_version(
-                executor, document.organization_id, document.source_name
-            )
+            version = _next_version(executor, document.organization_id, document.source_name)
             indexed = replace(document, version=version)
             self._index_with_executor(executor, indexed, parents, chunks)
             return indexed
 
     def record_failure(self, document: KnowledgeDocument) -> None:
         if document.status != "FAILED":
-            raise ValueError(
-                "Only failed documents may be recorded as ingestion failures."
-            )
+            raise ValueError("Only failed documents may be recorded as ingestion failures.")
         self._persist_document(document, _document_parameters(document))
 
-    def record_failure_atomically(
-        self, document: KnowledgeDocument
-    ) -> KnowledgeDocument:
+    def record_failure_atomically(self, document: KnowledgeDocument) -> KnowledgeDocument:
         if document.status != "FAILED":
-            raise ValueError(
-                "Only failed documents may be recorded as ingestion failures."
-            )
+            raise ValueError("Only failed documents may be recorded as ingestion failures.")
         with self._executor.transaction() as executor:
             executor.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%(source_lock)s, 0))",
                 {"source_lock": f"{document.organization_id}:{document.source_name}"},
             )
-            failed = replace(
-                document,
-                version=_next_version(
-                    executor, document.organization_id, document.source_name
-                ),
-            )
-            self._persist_document_with_executor(
-                executor, failed, _document_parameters(failed)
-            )
+            failed = replace(document, version=_next_version(executor, document.organization_id, document.source_name))
+            self._persist_document_with_executor(executor, failed, _document_parameters(failed))
             return failed
 
     def search(
@@ -333,14 +308,9 @@ class PgVectorPostgresAdapter:
                        parent_chunk_id, document_id, organization_id, text, page_number, paragraph_number
                    ) VALUES (%(parent_chunk_id)s, %(document_id)s, %(organization_id)s, %(text)s,
                              %(page_number)s, %(paragraph_number)s)""",
-                {
-                    "parent_chunk_id": parent.parent_chunk_id,
-                    "document_id": parent.document_id,
-                    "organization_id": parent.organization_id,
-                    "text": parent.text,
-                    "page_number": parent.page_number,
-                    "paragraph_number": parent.paragraph_number,
-                },
+                {"parent_chunk_id": parent.parent_chunk_id, "document_id": parent.document_id,
+                 "organization_id": parent.organization_id, "text": parent.text,
+                 "page_number": parent.page_number, "paragraph_number": parent.paragraph_number},
             )
         for chunk in chunks:
             executor.execute(
@@ -350,24 +320,16 @@ class PgVectorPostgresAdapter:
                    ) VALUES (%(chunk_id)s, %(parent_chunk_id)s, %(document_id)s, %(organization_id)s,
                              %(text)s, %(page_number)s, %(paragraph_number)s, %(child_index)s,
                              CAST(%(embedding)s AS vector))""",
-                {
-                    "chunk_id": chunk.chunk_id,
-                    "parent_chunk_id": chunk.parent_chunk_id,
-                    "document_id": chunk.document_id,
-                    "organization_id": chunk.organization_id,
-                    "text": chunk.text,
-                    "page_number": chunk.page_number,
-                    "paragraph_number": chunk.paragraph_number,
-                    "child_index": chunk.child_index,
-                    "embedding": _vector_parameter(self._embed(chunk.text)),
-                },
+                {"chunk_id": chunk.chunk_id, "parent_chunk_id": chunk.parent_chunk_id,
+                 "document_id": chunk.document_id, "organization_id": chunk.organization_id,
+                 "text": chunk.text, "page_number": chunk.page_number,
+                 "paragraph_number": chunk.paragraph_number, "child_index": chunk.child_index,
+                 "embedding": _vector_parameter(self._embed(chunk.text))},
             )
 
     @staticmethod
     def _persist_document_with_executor(
-        executor: PostgresExecutorPort,
-        document: KnowledgeDocument,
-        parameters: Mapping[str, object],
+        executor: PostgresExecutorPort, document: KnowledgeDocument, parameters: Mapping[str, object]
     ) -> None:
         executor.execute(
             """INSERT INTO knowledge_documents (
@@ -401,10 +363,7 @@ def _document_parameters(document: KnowledgeDocument) -> dict[str, object]:
 
 
 def _find_indexed_document(
-    executor: PostgresExecutorPort,
-    organization_id: UUID,
-    source_name: str,
-    content_sha256: str,
+    executor: PostgresExecutorPort, organization_id: UUID, source_name: str, content_sha256: str
 ) -> KnowledgeDocument | None:
     rows = executor.fetch_all(
         """SELECT document_id, organization_id, source_name, filename, version, media_type,
@@ -414,18 +373,12 @@ def _find_indexed_document(
            WHERE organization_id = %(organization_id)s AND source_name = %(source_name)s
              AND content_sha256 = %(content_sha256)s AND status = 'INDEXED'
            ORDER BY version DESC LIMIT 1""",
-        {
-            "organization_id": organization_id,
-            "source_name": source_name,
-            "content_sha256": content_sha256,
-        },
+        {"organization_id": organization_id, "source_name": source_name, "content_sha256": content_sha256},
     )
     return _knowledge_document_from_row(rows[0]) if rows else None
 
 
-def _next_version(
-    executor: PostgresExecutorPort, organization_id: UUID, source_name: str
-) -> int:
+def _next_version(executor: PostgresExecutorPort, organization_id: UUID, source_name: str) -> int:
     rows = executor.fetch_all(
         """SELECT COALESCE(MAX(version), 0) + 1 AS version FROM knowledge_documents
            WHERE organization_id = %(organization_id)s AND source_name = %(source_name)s""",
@@ -448,30 +401,20 @@ def _knowledge_document_from_row(row: Mapping[str, object]) -> KnowledgeDocument
         content_sha256=str(row["content_sha256"]),
         status=str(row["status"]),
         indexed_at=indexed_at,
-        evidence_kind=(
-            str(row["evidence_kind"]) if row["evidence_kind"] is not None else None
-        ),
+        evidence_kind=(str(row["evidence_kind"]) if row["evidence_kind"] is not None else None),
         applicable_line_id=(
-            UUID(str(row["applicable_line_id"]))
-            if row["applicable_line_id"] is not None
-            else None
+            UUID(str(row["applicable_line_id"])) if row["applicable_line_id"] is not None else None
         ),
         product_category=(
-            str(row["product_category"])
-            if row["product_category"] is not None
-            else None
+            str(row["product_category"]) if row["product_category"] is not None else None
         ),
-        failure_reason=(
-            str(row["failure_reason"]) if row["failure_reason"] is not None else None
-        ),
+        failure_reason=(str(row["failure_reason"]) if row["failure_reason"] is not None else None),
     )
 
 
 def _vector_parameter(vector: Sequence[float]) -> str:
     if len(vector) != PGVECTOR_EMBEDDING_DIMENSIONS:
-        raise ValueError(
-            f"Embeddings must contain exactly {PGVECTOR_EMBEDDING_DIMENSIONS} dimensions."
-        )
+        raise ValueError(f"Embeddings must contain exactly {PGVECTOR_EMBEDDING_DIMENSIONS} dimensions.")
     if any(not math.isfinite(value) for value in vector):
         raise ValueError("Embeddings must contain finite values.")
     return json.dumps(list(vector), separators=(",", ":"))
@@ -534,8 +477,7 @@ class PgVectorRetrievalAdapter:
         versions = [
             document.version
             for document in self._documents.values()
-            if document.organization_id == organization_id
-            and document.source_name == source_name
+            if document.organization_id == organization_id and document.source_name == source_name
         ]
         return max(versions, default=0) + 1
 
@@ -552,9 +494,7 @@ class PgVectorRetrievalAdapter:
                 and existing.source_name == document.source_name
                 and existing.status == "INDEXED"
             ):
-                self._documents[existing.document_id] = replace(
-                    existing, status="SUPERSEDED"
-                )
+                self._documents[existing.document_id] = replace(existing, status="SUPERSEDED")
         self._documents[document.document_id] = document
         self._parents.update({parent.parent_chunk_id: parent for parent in parents})
         self._chunks.update({chunk.chunk_id: chunk for chunk in chunks})
@@ -573,30 +513,19 @@ class PgVectorRetrievalAdapter:
                 return existing
             indexed = replace(
                 document,
-                version=self.next_version(
-                    document.organization_id, document.source_name
-                ),
+                version=self.next_version(document.organization_id, document.source_name),
             )
             self.index(indexed, parents, chunks)
             return indexed
 
     def record_failure(self, document: KnowledgeDocument) -> None:
         if document.status != "FAILED":
-            raise ValueError(
-                "Only failed documents may be recorded as ingestion failures."
-            )
+            raise ValueError("Only failed documents may be recorded as ingestion failures.")
         self._documents[document.document_id] = document
 
-    def record_failure_atomically(
-        self, document: KnowledgeDocument
-    ) -> KnowledgeDocument:
+    def record_failure_atomically(self, document: KnowledgeDocument) -> KnowledgeDocument:
         with self._ingest_lock:
-            failed = replace(
-                document,
-                version=self.next_version(
-                    document.organization_id, document.source_name
-                ),
-            )
+            failed = replace(document, version=self.next_version(document.organization_id, document.source_name))
             self.record_failure(failed)
             return failed
 
@@ -605,16 +534,8 @@ class PgVectorRetrievalAdapter:
 
     def chunks_for_document(self, document_id: UUID) -> list[KnowledgeChunk]:
         return sorted(
-            (
-                chunk
-                for chunk in self._chunks.values()
-                if chunk.document_id == document_id
-            ),
-            key=lambda chunk: (
-                chunk.page_number,
-                chunk.paragraph_number,
-                chunk.child_index,
-            ),
+            (chunk for chunk in self._chunks.values() if chunk.document_id == document_id),
+            key=lambda chunk: (chunk.page_number, chunk.paragraph_number, chunk.child_index),
         )
 
     def search(
@@ -635,24 +556,15 @@ class PgVectorRetrievalAdapter:
         if not candidates:
             return []
         query_tokens = _tokens(query)
-        vector_scores = [
-            _cosine_similarity(query_tokens, _tokens(chunk.text))
-            for chunk in candidates
-        ]
-        bm25_scores = _bm25_scores(
-            query_tokens, [_tokens(chunk.text) for chunk in candidates]
-        )
+        vector_scores = [_cosine_similarity(query_tokens, _tokens(chunk.text)) for chunk in candidates]
+        bm25_scores = _bm25_scores(query_tokens, [_tokens(chunk.text) for chunk in candidates])
         normal_vector = _normalize(vector_scores)
         normal_bm25 = _normalize(bm25_scores)
         results = [
             self._retrieved_chunk(chunk, vector, bm25, (vector + bm25) / 2)
-            for chunk, vector, bm25 in zip(
-                candidates, normal_vector, normal_bm25, strict=True
-            )
+            for chunk, vector, bm25 in zip(candidates, normal_vector, normal_bm25)
         ]
-        return sorted(
-            results, key=lambda result: (-result.score, str(result.chunk_id))
-        )[: filters.limit]
+        return sorted(results, key=lambda result: (-result.score, str(result.chunk_id)))[: filters.limit]
 
     def _matches_required_scope(
         self,
@@ -670,9 +582,7 @@ class PgVectorRetrievalAdapter:
                 filters.evidence_kind is None
                 or document.evidence_kind == filters.evidence_kind
             )
-            and (
-                not filters.require_evidence_kind or document.evidence_kind is not None
-            )
+            and (not filters.require_evidence_kind or document.evidence_kind is not None)
             and (
                 filters.line_id is None
                 or document.applicable_line_id == filters.line_id
@@ -731,9 +641,7 @@ class PgVectorRetrievalAdapter:
         chunks: Sequence[KnowledgeChunk],
     ) -> None:
         if document.status != "INDEXED":
-            raise ValueError(
-                "Only indexed documents may be added to a retrieval index."
-            )
+            raise ValueError("Only indexed documents may be added to a retrieval index.")
         parent_ids = {parent.parent_chunk_id for parent in parents}
         if any(
             parent.document_id != document.document_id
@@ -745,9 +653,7 @@ class PgVectorRetrievalAdapter:
             or chunk.parent_chunk_id not in parent_ids
             for chunk in chunks
         ):
-            raise ValueError(
-                "Every index row must belong to the document organization."
-            )
+            raise ValueError("Every index row must belong to the document organization.")
 
 
 def _tokens(text: str) -> list[str]:
@@ -765,16 +671,12 @@ def _vector(tokens: Sequence[str]) -> list[float]:
 
 def _cosine_similarity(left: Sequence[str], right: Sequence[str]) -> float:
     left_vector, right_vector = _vector(left), _vector(right)
-    numerator = sum(a * b for a, b in zip(left_vector, right_vector, strict=True))
-    denominator = math.sqrt(
-        sum(a * a for a in left_vector) * sum(b * b for b in right_vector)
-    )
+    numerator = sum(a * b for a, b in zip(left_vector, right_vector))
+    denominator = math.sqrt(sum(a * a for a in left_vector) * sum(b * b for b in right_vector))
     return numerator / denominator if denominator else 0.0
 
 
-def _bm25_scores(
-    query_tokens: Sequence[str], documents: Sequence[Sequence[str]]
-) -> list[float]:
+def _bm25_scores(query_tokens: Sequence[str], documents: Sequence[Sequence[str]]) -> list[float]:
     if not documents or not query_tokens:
         return [0.0] * len(documents)
     average_length = sum(len(document) for document in documents) / len(documents)
@@ -785,20 +687,10 @@ def _bm25_scores(
         score = 0.0
         for term, query_frequency in query_counts.items():
             document_frequency = sum(term in candidate for candidate in documents)
-            inverse_frequency = math.log(
-                1
-                + (len(documents) - document_frequency + 0.5)
-                / (document_frequency + 0.5)
-            )
+            inverse_frequency = math.log(1 + (len(documents) - document_frequency + 0.5) / (document_frequency + 0.5))
             frequency = term_counts[term]
-            denominator = frequency + 1.5 * (
-                1 - 0.75 + 0.75 * len(document) / average_length
-            )
-            score += (
-                query_frequency * inverse_frequency * frequency * 2.5 / denominator
-                if denominator
-                else 0.0
-            )
+            denominator = frequency + 1.5 * (1 - 0.75 + 0.75 * len(document) / average_length)
+            score += query_frequency * inverse_frequency * frequency * 2.5 / denominator if denominator else 0.0
         scores.append(score)
     return scores
 
@@ -848,9 +740,7 @@ class _PsycopgConnectionExecutor:
     def execute(self, sql: str, parameters: Mapping[str, object]) -> None:
         self._connection.execute(sql, parameters)  # type: ignore[union-attr]
 
-    def fetch_all(
-        self, sql: str, parameters: Mapping[str, object]
-    ) -> Sequence[Mapping[str, object]]:
+    def fetch_all(self, sql: str, parameters: Mapping[str, object]) -> Sequence[Mapping[str, object]]:
         return list(self._connection.execute(sql, parameters))  # type: ignore[union-attr]
 
     def transaction(self) -> Iterator[PostgresExecutorPort]:

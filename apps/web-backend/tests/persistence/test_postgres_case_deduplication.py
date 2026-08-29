@@ -7,8 +7,6 @@ from threading import Barrier
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select
-
 from odp_api.adapters.persistence.inspection_effects import SqlAlchemyInspectionEffects
 from odp_api.adapters.persistence.models import Base, DefectCaseRow, InspectionEventRow
 from odp_api.adapters.persistence.task_control import SqlAlchemyTaskControlRepository
@@ -22,14 +20,11 @@ from odp_api.adapters.persistence.task_models import (
 )
 from odp_api.db import create_engine_and_session
 from odp_api.modules.inspection.effects import InspectionEffectService
-from odp_api.modules.tasks.commands import (
-    InferenceExecutionContract,
-    PublishInferenceCommand,
-)
+from odp_api.modules.tasks.commands import InferenceExecutionContract, PublishInferenceCommand
+from sqlalchemy import func, select
 
 pytestmark = pytest.mark.skipif(
-    not environ.get("ODP_POSTGRES_TEST_URL"),
-    reason="ODP_POSTGRES_TEST_URL not configured",
+    not environ.get("ODP_POSTGRES_TEST_URL"), reason="ODP_POSTGRES_TEST_URL not configured"
 )
 
 
@@ -85,9 +80,7 @@ def test_two_independent_claims_share_one_active_case():
     with sessions() as s:
         ids = list(
             s.scalars(
-                select(InferenceTaskRow.task_id).where(
-                    InferenceTaskRow.organization_id == org
-                )
+                select(InferenceTaskRow.task_id).where(InferenceTaskRow.organization_id == org)
             )
         )
     for task in ids:
@@ -102,18 +95,7 @@ def test_two_independent_claims_share_one_active_case():
         cmd = PublishInferenceCommand(
             claim,
             InferenceExecutionContract(
-                "m",
-                "b" * 64,
-                "1",
-                "cpu",
-                (1,),
-                "pre",
-                "post",
-                0.5,
-                0.5,
-                "hard",
-                False,
-                "c",
+                "m", "b" * 64, "1", "cpu", (1,), "pre", "post", 0.5, 0.5, "hard", False, "c"
             ),
             "a" * 64,
             ({"defect_type": "scratch", "spatial_zone": "GLOBAL", "confidence": 0.9},),

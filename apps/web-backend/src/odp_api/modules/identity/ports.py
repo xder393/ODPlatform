@@ -6,6 +6,7 @@ from uuid import UUID
 
 from odp_api.modules.identity.models import Actor
 
+
 REAUTHENTICATION_TTL_SECONDS = 300
 
 

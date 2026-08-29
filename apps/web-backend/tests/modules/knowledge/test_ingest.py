@@ -60,9 +60,7 @@ def make_two_page_pdf() -> bytes:
 
 def make_service(
     index: PgVectorRetrievalAdapter | InMemoryKnowledgeIndex | None = None,
-) -> tuple[
-    KnowledgeIngestionService, PgVectorRetrievalAdapter | InMemoryKnowledgeIndex
-]:
+) -> tuple[KnowledgeIngestionService, PgVectorRetrievalAdapter | InMemoryKnowledgeIndex]:
     index = index or PgVectorRetrievalAdapter()
     return KnowledgeIngestionService(index, chunk_size_words=4, overlap_words=2), index
 
@@ -103,9 +101,7 @@ class RecordingPostgresExecutor:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
 
-    def fetch_all(
-        self, sql: str, parameters: dict[str, object]
-    ) -> list[dict[str, object]]:
+    def fetch_all(self, sql: str, parameters: dict[str, object]) -> list[dict[str, object]]:
         self.calls.append((sql, parameters))
         return [
             {
@@ -136,9 +132,7 @@ class IndexedDocumentPostgresExecutor:
         self.document = document
         self.calls: list[tuple[str, dict[str, object]]] = []
 
-    def fetch_all(
-        self, sql: str, parameters: dict[str, object]
-    ) -> list[dict[str, object]]:
+    def fetch_all(self, sql: str, parameters: dict[str, object]) -> list[dict[str, object]]:
         self.calls.append((sql, parameters))
         return [
             {
@@ -225,9 +219,7 @@ def test_new_source_version_supersedes_the_previous_document() -> None:
     assert index.document(first.document_id).status == "SUPERSEDED"
 
 
-@pytest.mark.parametrize(
-    "index", [PgVectorRetrievalAdapter(), InMemoryKnowledgeIndex()]
-)
+@pytest.mark.parametrize("index", [PgVectorRetrievalAdapter(), InMemoryKnowledgeIndex()])
 def test_same_content_reuses_one_active_document_with_stable_provenance(index) -> None:
     service, index = make_service(index)
     organization_id = uuid4()
@@ -240,12 +232,7 @@ def test_same_content_reuses_one_active_document_with_stable_provenance(index) -
         content=content,
     )
     first_provenance = [
-        (
-            chunk.document_id,
-            chunk.document_version,
-            chunk.page_number,
-            chunk.paragraph_number,
-        )
+        (chunk.document_id, chunk.document_version, chunk.page_number, chunk.paragraph_number)
         for chunk in index.search("pressure limit", organization_id, RetrievalFilters())
     ]
     second = service.ingest(
@@ -260,19 +247,12 @@ def test_same_content_reuses_one_active_document_with_stable_provenance(index) -
     assert [document.version for document in index._documents.values()] == [1]
     assert [document.status for document in index._documents.values()] == ["INDEXED"]
     assert [
-        (
-            chunk.document_id,
-            chunk.document_version,
-            chunk.page_number,
-            chunk.paragraph_number,
-        )
+        (chunk.document_id, chunk.document_version, chunk.page_number, chunk.paragraph_number)
         for chunk in index.search("pressure limit", organization_id, RetrievalFilters())
     ] == first_provenance
 
 
-@pytest.mark.parametrize(
-    "index", [PgVectorRetrievalAdapter(), InMemoryKnowledgeIndex()]
-)
+@pytest.mark.parametrize("index", [PgVectorRetrievalAdapter(), InMemoryKnowledgeIndex()])
 def test_concurrent_identical_ingests_create_one_document_and_chunk_set(index) -> None:
     service, index = make_service(index)
     organization_id = uuid4()
@@ -316,32 +296,21 @@ def test_line_ending_normalized_upload_bytes_reuse_the_same_document() -> None:
     assert len(index._documents) == 1
 
 
-@pytest.mark.parametrize(
-    "index", [PgVectorRetrievalAdapter(), InMemoryKnowledgeIndex()]
-)
+@pytest.mark.parametrize("index", [PgVectorRetrievalAdapter(), InMemoryKnowledgeIndex()])
 def test_identical_content_is_not_reused_across_tenants(index) -> None:
     service, index = make_service(index)
     content = make_two_page_pdf()
 
     first = service.ingest(
-        organization_id=uuid4(),
-        source_name="press rules",
-        filename="press-rules.pdf",
-        content=content,
+        organization_id=uuid4(), source_name="press rules", filename="press-rules.pdf", content=content
     )
     second = service.ingest(
-        organization_id=uuid4(),
-        source_name="press rules",
-        filename="press-rules.pdf",
-        content=content,
+        organization_id=uuid4(), source_name="press rules", filename="press-rules.pdf", content=content
     )
 
     assert first.document_id != second.document_id
     assert (first.version, second.version) == (1, 1)
-    assert sorted(document.status for document in index._documents.values()) == [
-        "INDEXED",
-        "INDEXED",
-    ]
+    assert sorted(document.status for document in index._documents.values()) == ["INDEXED", "INDEXED"]
 
 
 def test_ingests_a_valid_docx_and_retains_paragraph_provenance() -> None:
@@ -355,10 +324,7 @@ def test_ingests_a_valid_docx_and_retains_paragraph_provenance() -> None:
     )
 
     assert document.status == "INDEXED"
-    assert [
-        (chunk.page_number, chunk.paragraph_number)
-        for chunk in index.chunks_for_document(document.document_id)
-    ] == [
+    assert [(chunk.page_number, chunk.paragraph_number) for chunk in index.chunks_for_document(document.document_id)] == [
         (1, 1),
         (1, 2),
     ]
@@ -419,10 +385,7 @@ def test_search_never_returns_another_tenants_chunk() -> None:
     assert all(result.organization_id == organization_id for result in results)
     assert all(0.0 <= result.vector_score <= 1.0 for result in results)
     assert all(0.0 <= result.bm25_score <= 1.0 for result in results)
-    assert all(
-        result.score == pytest.approx((result.vector_score + result.bm25_score) / 2)
-        for result in results
-    )
+    assert all(result.score == pytest.approx((result.vector_score + result.bm25_score) / 2) for result in results)
 
 
 def test_rejects_unsupported_content_as_a_failed_document() -> None:
@@ -473,9 +436,7 @@ def test_postgres_retrieval_executes_tenant_scoped_normalized_hybrid_query() -> 
     assert "vector_score" in sql and "bm25_score" in sql and "combined_score" in sql
     assert parameters == {
         "query": "pressure limit",
-        "query_embedding": "["
-        + ",".join(["0.25"] * PGVECTOR_EMBEDDING_DIMENSIONS)
-        + "]",
+        "query_embedding": "[" + ",".join(["0.25"] * PGVECTOR_EMBEDDING_DIMENSIONS) + "]",
         "organization_id": organization_id,
         "document_status": "INDEXED",
         "evidence_kind": "CURRENT_SPECIFICATION",
@@ -489,9 +450,7 @@ def test_postgres_retrieval_executes_tenant_scoped_normalized_hybrid_query() -> 
     }
 
 
-def test_postgres_adapter_rejects_wrong_embedding_dimension_before_database_execution() -> (
-    None
-):
+def test_postgres_adapter_rejects_wrong_embedding_dimension_before_database_execution() -> None:
     executor = RecordingPostgresExecutor()
     adapter = PgVectorPostgresAdapter(executor, embed=lambda _: [0.25, -0.25])
 
@@ -544,14 +503,8 @@ def test_postgres_index_persists_tenant_scoped_document_parent_and_child_rows() 
     assert "INSERT INTO knowledge_documents" in executor.calls[1][0]
     assert "INSERT INTO knowledge_parent_chunks" in executor.calls[2][0]
     assert "INSERT INTO knowledge_chunk_index" in executor.calls[3][0]
-    assert all(
-        parameters["organization_id"] == organization_id
-        for _, parameters in executor.calls
-    )
-    assert (
-        executor.calls[-1][1]["embedding"]
-        == "[" + ",".join(["0.25"] * PGVECTOR_EMBEDDING_DIMENSIONS) + "]"
-    )
+    assert all(parameters["organization_id"] == organization_id for _, parameters in executor.calls)
+    assert executor.calls[-1][1]["embedding"] == "[" + ",".join(["0.25"] * PGVECTOR_EMBEDDING_DIMENSIONS) + "]"
 
     rejected_executor = RecordingPostgresExecutor()
     rejected_adapter = PgVectorPostgresAdapter(

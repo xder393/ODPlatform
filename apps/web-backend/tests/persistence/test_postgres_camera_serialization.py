@@ -1,13 +1,14 @@
-import os
-import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+import os
 from pathlib import Path
+import sys
 from threading import Barrier
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
+
 
 WEB_BACKEND_SRC = Path(__file__).parents[2] / "src"
 sys.path[:0] = [str(WEB_BACKEND_SRC)]
@@ -64,22 +65,12 @@ def test_postgresql_camera_admission_serializes_eviction_and_keeps_two_ready_tas
             )
 
         repository = SqlAlchemyTaskControlRepository(sessions)
-        first = repository.reserve(
-            _request(organization_id, camera_id, session_id, 1), now
-        )
+        first = repository.reserve(_request(organization_id, camera_id, session_id, 1), now)
         with pytest.raises(AdmissionRejected, match="RESERVATION_NOT_FOUND"):
-            repository.complete_upload(
-                first.reservation_id, uuid4(), "frames/1.jpg", 10, now
-            )
-        first_task = repository.complete_upload(
-            first.reservation_id, organization_id, "frames/1.jpg", 10, now
-        )
-        second = repository.reserve(
-            _request(organization_id, camera_id, session_id, 2), now
-        )
-        second_task = repository.complete_upload(
-            second.reservation_id, organization_id, "frames/2.jpg", 10, now
-        )
+            repository.complete_upload(first.reservation_id, uuid4(), "frames/1.jpg", 10, now)
+        first_task = repository.complete_upload(first.reservation_id, organization_id, "frames/1.jpg", 10, now)
+        second = repository.reserve(_request(organization_id, camera_id, session_id, 2), now)
+        second_task = repository.complete_upload(second.reservation_id, organization_id, "frames/2.jpg", 10, now)
 
         barrier = Barrier(2)
 
@@ -111,14 +102,8 @@ def test_postgresql_camera_admission_serializes_eviction_and_keeps_two_ready_tas
             ).all()
             ready = [row for row in rows if row.status == "READY"]
             assert len(ready) == 2
-            assert (
-                session.get(InferenceTaskRow, first_task.task_id).status
-                == "SKIPPED_BACKPRESSURE"
-            )
-            assert (
-                session.get(InferenceTaskRow, second_task.task_id).status
-                == "SKIPPED_BACKPRESSURE"
-            )
+            assert session.get(InferenceTaskRow, first_task.task_id).status == "SKIPPED_BACKPRESSURE"
+            assert session.get(InferenceTaskRow, second_task.task_id).status == "SKIPPED_BACKPRESSURE"
             assert all(row.status in {"READY", "SKIPPED_BACKPRESSURE"} for row in rows)
             artifacts = session.scalars(
                 select(FrameArtifactRow).where(

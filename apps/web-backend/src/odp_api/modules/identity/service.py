@@ -1,7 +1,6 @@
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from hmac import compare_digest
-from typing import Protocol
+from typing import Callable, Protocol
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, status
@@ -9,12 +8,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 from odp_api.modules.identity.models import Actor
-from odp_api.modules.identity.ports import (
-    REAUTHENTICATION_TTL_SECONDS,
-    ReauthenticationStorePort,
-)
+from odp_api.modules.identity.ports import REAUTHENTICATION_TTL_SECONDS, ReauthenticationStorePort
 from odp_api.modules.identity.tickets import WebSocketTicketService
-
 
 class RecentReauthenticationRequired(PermissionError):
     """Raised when a simulated high-risk command lacks a five-minute marker."""
@@ -84,9 +79,7 @@ def get_current_actor(
 ) -> Actor:
     """Authenticate a Bearer JWT using the runtime-configured actor resolver."""
     if credentials is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required"
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
     try:
         return request.app.state.jwt_authenticator.authenticate(credentials.credentials)
     except ValueError as error:
@@ -132,9 +125,7 @@ def create_auth_router(
     websocket_ticket_service: WebSocketTicketService | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
-    service = reauthentication_service or ReauthenticationService(
-        InMemoryReauthenticationStore()
-    )
+    service = reauthentication_service or ReauthenticationService(InMemoryReauthenticationStore())
     verifier = password_verifier or InMemoryPasswordVerifier({})
 
     @router.post("/reauthenticate")
@@ -156,18 +147,14 @@ def create_auth_router(
         """
         repository = actor_repository
         if repository is None:
-            raise HTTPException(
-                status_code=503, detail="Actor lookup is not configured."
-            )
+            raise HTTPException(status_code=503, detail="Actor lookup is not configured.")
         actor = repository.get_by_email(request.email.strip().lower())
         if actor is None or not verifier.verify(actor.actor_id, request.password):
             raise HTTPException(status_code=401, detail="Invalid credentials")
         authenticator = getattr(http_request.app.state, "jwt_authenticator", None)
         secret = getattr(authenticator, "secret", None)
         if not secret:
-            raise HTTPException(
-                status_code=503, detail="JWT authentication is not configured."
-            )
+            raise HTTPException(status_code=503, detail="JWT authentication is not configured.")
         # Deferred import keeps this module free of adapter imports; the pure
         # signing function lives next to the verification logic it pairs with.
         from odp_api.adapters.auth.jwt import issue_token
@@ -175,16 +162,9 @@ def create_auth_router(
         return {"access_token": issue_token(actor.actor_id, secret)}
 
     @router.post("/websocket-ticket")
-    def websocket_ticket(
-        actor: Actor = Depends(actor_provider),
-    ) -> dict[str, str | int]:
+    def websocket_ticket(actor: Actor = Depends(actor_provider)) -> dict[str, str | int]:
         if websocket_ticket_service is None:
-            raise HTTPException(
-                status_code=503, detail="WebSocket authentication is not configured."
-            )
-        return {
-            "ticket": websocket_ticket_service.issue(actor.actor_id),
-            "expires_in": 60,
-        }
+            raise HTTPException(status_code=503, detail="WebSocket authentication is not configured.")
+        return {"ticket": websocket_ticket_service.issue(actor.actor_id), "expires_in": 60}
 
     return router

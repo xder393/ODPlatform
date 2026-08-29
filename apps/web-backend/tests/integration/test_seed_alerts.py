@@ -17,17 +17,7 @@ def test_alert_seed_is_idempotent_and_survives_a_new_feed(tmp_path: Path) -> Non
         seed_demo_alerts(sessions)
         seed_demo_alerts(sessions)
         with sessions() as session:
-            assert (
-                session.scalar(select(func.count()).select_from(InspectionAlertFeedRow))
-                == 10
-            )
-            assert [
-                row.cursor
-                for row in session.scalars(
-                    select(InspectionAlertFeedRow).order_by(
-                        InspectionAlertFeedRow.cursor
-                    )
-                )
-            ] == list(range(1, 11))
+            assert session.scalar(select(func.count()).select_from(InspectionAlertFeedRow)) == 10
+            assert [row.cursor for row in session.scalars(select(InspectionAlertFeedRow).order_by(InspectionAlertFeedRow.cursor))] == list(range(1, 11))
     finally:
         engine.dispose()

@@ -2,22 +2,20 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from alembic.config import Config
 from argon2 import PasswordHasher
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
-from alembic import command
 from odp_api.adapters.persistence.models import (
     ActorRow,
     Base,
     DefectCaseRow,
     InspectionEventRow,
 )
-from odp_api.adapters.persistence.repositories import (
-    SqlAlchemyPasswordCredentialRepository,
-)
+from odp_api.adapters.persistence.repositories import SqlAlchemyPasswordCredentialRepository
 from odp_api.db import create_engine_and_session
 from odp_api.seed import DEMO_ACCOUNTS, build_demo_seed, main, seed_business_data
 
@@ -48,20 +46,17 @@ def test_repeated_seed_does_not_duplicate_business_rows(
 
     seed_business_data(session_factory, build_demo_seed(), hasher)
     first_actor = build_demo_seed().actors[0]
-    original_hash = SqlAlchemyPasswordCredentialRepository(
-        session_factory
-    ).password_hash(first_actor.actor_id)
+    original_hash = SqlAlchemyPasswordCredentialRepository(session_factory).password_hash(
+        first_actor.actor_id
+    )
     seed_business_data(session_factory, build_demo_seed(), hasher)
 
     assert count_rows(session_factory, ActorRow) == 3
     assert count_rows(session_factory, DefectCaseRow) == 10
     assert count_rows(session_factory, InspectionEventRow) == 10
-    assert (
-        SqlAlchemyPasswordCredentialRepository(session_factory).password_hash(
-            first_actor.actor_id
-        )
-        == original_hash
-    )
+    assert SqlAlchemyPasswordCredentialRepository(session_factory).password_hash(
+        first_actor.actor_id
+    ) == original_hash
 
 
 def test_seed_module_runs_against_migrated_database_without_plaintext_output(
@@ -87,9 +82,7 @@ def test_seed_module_runs_against_migrated_database_without_plaintext_output(
         engine.dispose()
 
 
-def test_seed_module_raises_when_its_configured_database_cannot_open(
-    tmp_path, monkeypatch
-) -> None:
+def test_seed_module_raises_when_its_configured_database_cannot_open(tmp_path, monkeypatch) -> None:
     database_url = f"sqlite:///{tmp_path / 'missing' / 'seeded.db'}"
     monkeypatch.setenv("ODP_DATABASE_URL", database_url)
 

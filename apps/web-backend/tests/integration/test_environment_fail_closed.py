@@ -10,9 +10,7 @@ def test_unknown_environment_is_rejected() -> None:
 
 
 @pytest.mark.parametrize("environment", ["docker", "staging", "production"])
-def test_external_environments_require_postgresql_redis_and_pgvector(
-    environment: str,
-) -> None:
+def test_external_environments_require_postgresql_redis_and_pgvector(environment: str) -> None:
     with pytest.raises(ValidationError):
         Settings(environment=environment)
 
@@ -30,9 +28,7 @@ def test_docker_environment_accepts_only_explicit_runtime_dependencies() -> None
 
 
 @pytest.mark.parametrize("environment", ["staging", "production"])
-def test_privileged_environments_reject_startup_seeds_and_dev_triggers(
-    environment: str,
-) -> None:
+def test_privileged_environments_reject_startup_seeds_and_dev_triggers(environment: str) -> None:
     with pytest.raises(ValidationError):
         Settings(
             environment=environment,
@@ -44,12 +40,8 @@ def test_privileged_environments_reject_startup_seeds_and_dev_triggers(
         )
 
 
-@pytest.mark.parametrize(
-    "setting", [{"seed_demo": True}, {"seed_knowledge_on_startup": True}]
-)
-def test_privileged_environments_reject_each_startup_seed(
-    setting: dict[str, bool],
-) -> None:
+@pytest.mark.parametrize("setting", [{"seed_demo": True}, {"seed_knowledge_on_startup": True}])
+def test_privileged_environments_reject_each_startup_seed(setting: dict[str, bool]) -> None:
     with pytest.raises(ValidationError):
         Settings(
             environment="production",

@@ -3,12 +3,11 @@
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel
-
 from odp_api.modules.inspection.models import DefectCase
 from odp_api.observability.metrics import DEFAULT_REGISTRY, MetricRegistry
 from odp_api.ports.generation import GenerationRequest, LLMGenerationPort
 from odp_api.ports.retrieval import RAGRetrievalPort, RetrievalFilters, RetrievedChunk
+from pydantic import BaseModel
 
 HUMAN_REVIEW_MESSAGE = "AI advice unavailable. Please use human review."
 LOW_CONFIDENCE_ANSWER = (

@@ -4,8 +4,6 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
-
 from odp_api.adapters.persistence.models import Base
 from odp_api.adapters.persistence.task_control import SqlAlchemyTaskControlRepository
 from odp_api.adapters.persistence.task_models import (
@@ -16,12 +14,10 @@ from odp_api.adapters.persistence.task_models import (
     PublishedInferenceResultRow,
 )
 from odp_api.db import create_engine_and_session
-from odp_api.modules.tasks.commands import (
-    InferenceExecutionContract,
-    PublishInferenceCommand,
-)
+from odp_api.modules.tasks.commands import InferenceExecutionContract, PublishInferenceCommand
 from odp_api.modules.tasks.models import TaskStatus
 from odp_api.ports.tasks import StaleLease, TaskExecutionPort
+from sqlalchemy import select
 
 
 def test_execution_port_exposes_fenced_mutations():
@@ -36,66 +32,18 @@ def test_duplicate_delivery_creates_one_attempt_and_tenant_guard_fails_closed(tm
     org, camera, artifact, task_id = uuid4(), uuid4(), uuid4(), uuid4()
     now = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
     with sessions.begin() as s:
-        s.add_all(
-            [
-                FrameArtifactRow(
-                    artifact_id=artifact,
-                    organization_id=org,
-                    camera_id=camera,
-                    stream_session_id=uuid4(),
-                    frame_sequence=1,
-                    captured_at=now,
-                    sha256="a" * 64,
-                    state="AVAILABLE",
-                    lifecycle="PROCESSING",
-                    created_at=now,
-                    updated_at=now,
-                ),
-                InferenceTaskRow(
-                    task_id=task_id,
-                    organization_id=org,
-                    camera_id=camera,
-                    artifact_id=artifact,
-                    idempotency_key="k",
-                    status=TaskStatus.READY.value,
-                    dispatch_seq=1,
-                    attempt_count=0,
-                    fence_token=0,
-                    created_at=now,
-                    updated_at=now,
-                ),
-                CameraInferenceStateRow(
-                    organization_id=org,
-                    camera_id=camera,
-                    running_task_id=None,
-                    ready_count=1,
-                    version=0,
-                ),
-            ]
-        )
+        s.add_all([
+            FrameArtifactRow(artifact_id=artifact, organization_id=org, camera_id=camera, stream_session_id=uuid4(), frame_sequence=1, captured_at=now, sha256='a'*64, state='AVAILABLE', lifecycle='PROCESSING', created_at=now, updated_at=now),
+            InferenceTaskRow(task_id=task_id, organization_id=org, camera_id=camera, artifact_id=artifact, idempotency_key='k', status=TaskStatus.READY.value, dispatch_seq=1, attempt_count=0, fence_token=0, created_at=now, updated_at=now),
+            CameraInferenceStateRow(organization_id=org, camera_id=camera, running_task_id=None, ready_count=1, version=0),
+        ])
     repo = SqlAlchemyTaskControlRepository(sessions)
-    assert repo.claim(task_id, org, "a", now) is not None
-    assert repo.claim(task_id, org, "b", now) is None
-    assert repo.claim(task_id, uuid4(), "c", now) is None
+    assert repo.claim(task_id, org, 'a', now) is not None
+    assert repo.claim(task_id, org, 'b', now) is None
+    assert repo.claim(task_id, uuid4(), 'c', now) is None
     with sessions() as s:
-        assert (
-            s.scalar(
-                select(InferenceAttemptRow).where(
-                    InferenceAttemptRow.task_id == task_id
-                )
-            )
-            is not None
-        )
-        assert (
-            len(
-                s.scalars(
-                    select(InferenceAttemptRow).where(
-                        InferenceAttemptRow.task_id == task_id
-                    )
-                ).all()
-            )
-            == 1
-        )
+        assert s.scalar(select(InferenceAttemptRow).where(InferenceAttemptRow.task_id == task_id)) is not None
+        assert len(s.scalars(select(InferenceAttemptRow).where(InferenceAttemptRow.task_id == task_id)).all()) == 1
     engine.dispose()
 
 
@@ -105,126 +53,38 @@ def test_renewal_preserves_token_and_rejects_wrong_owner_or_tenant(tmp_path):
     org, camera, artifact, task_id = uuid4(), uuid4(), uuid4(), uuid4()
     now = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
     with sessions.begin() as s:
-        s.add_all(
-            [
-                FrameArtifactRow(
-                    artifact_id=artifact,
-                    organization_id=org,
-                    camera_id=camera,
-                    stream_session_id=uuid4(),
-                    frame_sequence=1,
-                    captured_at=now,
-                    sha256="a" * 64,
-                    state="AVAILABLE",
-                    lifecycle="PROCESSING",
-                    created_at=now,
-                    updated_at=now,
-                ),
-                InferenceTaskRow(
-                    task_id=task_id,
-                    organization_id=org,
-                    camera_id=camera,
-                    artifact_id=artifact,
-                    idempotency_key="k",
-                    status="READY",
-                    dispatch_seq=1,
-                    attempt_count=0,
-                    fence_token=0,
-                    created_at=now,
-                    updated_at=now,
-                ),
-                CameraInferenceStateRow(
-                    organization_id=org,
-                    camera_id=camera,
-                    running_task_id=None,
-                    ready_count=1,
-                    version=0,
-                ),
-            ]
-        )
+        s.add_all([FrameArtifactRow(artifact_id=artifact, organization_id=org, camera_id=camera, stream_session_id=uuid4(), frame_sequence=1, captured_at=now, sha256='a'*64, state='AVAILABLE', lifecycle='PROCESSING', created_at=now, updated_at=now), InferenceTaskRow(task_id=task_id, organization_id=org, camera_id=camera, artifact_id=artifact, idempotency_key='k', status='READY', dispatch_seq=1, attempt_count=0, fence_token=0, created_at=now, updated_at=now), CameraInferenceStateRow(organization_id=org, camera_id=camera, running_task_id=None, ready_count=1, version=0)])
     repo = SqlAlchemyTaskControlRepository(sessions)
-    claim = repo.claim(task_id, org, "owner", now)
+    claim = repo.claim(task_id, org, 'owner', now)
     assert claim is not None
     renewed = repo.renew(claim, now + timedelta(seconds=5))
-    assert (
-        renewed is not None
-        and renewed.fence_token == claim.fence_token
-        and renewed.lease_expires_at >= claim.lease_expires_at
-    )
+    assert renewed is not None and renewed.fence_token == claim.fence_token and renewed.lease_expires_at >= claim.lease_expires_at
     from dataclasses import replace
-
-    assert repo.renew(replace(claim, lease_owner="other"), now) is None
+    assert repo.renew(replace(claim, lease_owner='other'), now) is None
     assert repo.renew(replace(claim, organization_id=uuid4()), now) is None
     engine.dispose()
 
 
 def _running_repo(tmp_path):
-    engine, sessions = create_engine_and_session(
-        f"sqlite:///{tmp_path / 'finalize.db'}"
-    )
+    engine, sessions = create_engine_and_session(f"sqlite:///{tmp_path / 'finalize.db'}")
     Base.metadata.create_all(engine)
     org, camera, artifact, task_id = uuid4(), uuid4(), uuid4(), uuid4()
     now = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
     with sessions.begin() as s:
-        s.add_all(
-            [
-                FrameArtifactRow(
-                    artifact_id=artifact,
-                    organization_id=org,
-                    camera_id=camera,
-                    stream_session_id=uuid4(),
-                    frame_sequence=1,
-                    captured_at=now,
-                    sha256="a" * 64,
-                    state="AVAILABLE",
-                    lifecycle="PROCESSING",
-                    created_at=now,
-                    updated_at=now,
-                ),
-                InferenceTaskRow(
-                    task_id=task_id,
-                    organization_id=org,
-                    camera_id=camera,
-                    artifact_id=artifact,
-                    idempotency_key="k",
-                    status="READY",
-                    dispatch_seq=1,
-                    attempt_count=0,
-                    fence_token=0,
-                    created_at=now,
-                    updated_at=now,
-                ),
-                CameraInferenceStateRow(
-                    organization_id=org,
-                    camera_id=camera,
-                    running_task_id=None,
-                    ready_count=1,
-                    version=0,
-                ),
-            ]
-        )
+        s.add_all([
+            FrameArtifactRow(artifact_id=artifact, organization_id=org, camera_id=camera, stream_session_id=uuid4(), frame_sequence=1, captured_at=now, sha256='a'*64, state='AVAILABLE', lifecycle='PROCESSING', created_at=now, updated_at=now),
+            InferenceTaskRow(task_id=task_id, organization_id=org, camera_id=camera, artifact_id=artifact, idempotency_key='k', status='READY', dispatch_seq=1, attempt_count=0, fence_token=0, created_at=now, updated_at=now),
+            CameraInferenceStateRow(organization_id=org, camera_id=camera, running_task_id=None, ready_count=1, version=0),
+        ])
     repo = SqlAlchemyTaskControlRepository(sessions)
-    claim = repo.claim(task_id, org, "owner", now)
+    claim = repo.claim(task_id, org, 'owner', now)
     assert claim is not None
     return engine, sessions, repo, org, task_id, claim, now
 
 
 def _command(claim, now):
-    contract = InferenceExecutionContract(
-        "m",
-        "b" * 64,
-        "1",
-        "cpu",
-        (1, 3, 4, 4),
-        "pre",
-        "post",
-        0.5,
-        0.5,
-        "hard",
-        False,
-        "classes",
-    )
-    return PublishInferenceCommand(claim, contract, "a" * 64, (), (), uuid4(), now)
+    contract = InferenceExecutionContract('m', 'b'*64, '1', 'cpu', (1, 3, 4, 4), 'pre', 'post', .5, .5, 'hard', False, 'classes')
+    return PublishInferenceCommand(claim, contract, 'a'*64, (), (), uuid4(), now)
 
 
 def test_complete_no_defect_finishes_attempt_clears_camera_without_publishing(tmp_path):
@@ -234,7 +94,7 @@ def test_complete_no_defect_finishes_attempt_clears_camera_without_publishing(tm
         task = s.get(InferenceTaskRow, task_id)
         attempt = s.get(InferenceAttemptRow, claim.attempt_id)
         state = s.get(CameraInferenceStateRow, (org, task.camera_id))
-        assert task.status == "SUCCEEDED" and attempt.finished_at is not None
+        assert task.status == 'SUCCEEDED' and attempt.finished_at is not None
         assert state.running_task_id is None
         assert s.scalars(select(PublishedInferenceResultRow)).all() == []
     engine.dispose()
@@ -242,12 +102,12 @@ def test_complete_no_defect_finishes_attempt_clears_camera_without_publishing(tm
 
 def test_record_failure_finishes_attempt_clears_camera_and_waits_for_retry(tmp_path):
     engine, sessions, repo, org, task_id, claim, now = _running_repo(tmp_path)
-    repo.record_failure(claim, "boom", now)
+    repo.record_failure(claim, 'boom', now)
     with sessions() as s:
         task = s.get(InferenceTaskRow, task_id)
         attempt = s.get(InferenceAttemptRow, claim.attempt_id)
         state = s.get(CameraInferenceStateRow, (org, task.camera_id))
-        assert task.status == "RETRY_WAIT" and task.error_detail == "boom"
+        assert task.status == 'RETRY_WAIT' and task.error_detail == 'boom'
         assert attempt.finished_at is not None and state.running_task_id is None
     engine.dispose()
 
@@ -261,7 +121,7 @@ def test_expired_publish_success_is_stale_and_has_no_result(tmp_path):
     except StaleLease:
         pass
     else:
-        raise AssertionError("expired lease must be stale")
+        raise AssertionError('expired lease must be stale')
     with sessions() as s:
         assert s.scalars(select(PublishedInferenceResultRow)).all() == []
         task = s.get(InferenceTaskRow, task_id)
@@ -275,19 +135,14 @@ def test_expired_publish_success_is_stale_and_has_no_result(tmp_path):
 
 def test_wrong_tenant_owner_or_token_finalize_fails_closed(tmp_path):
     from dataclasses import replace
-
     engine, sessions, repo, org, task_id, claim, now = _running_repo(tmp_path)
-    for bad in (
-        replace(claim, organization_id=uuid4()),
-        replace(claim, lease_owner="other"),
-        replace(claim, fence_token=claim.fence_token + 1),
-    ):
+    for bad in (replace(claim, organization_id=uuid4()), replace(claim, lease_owner='other'), replace(claim, fence_token=claim.fence_token + 1)):
         try:
             repo.publish_success(_command(bad, now))
         except StaleLease:
             pass
         else:
-            raise AssertionError("invalid claim must be stale")
+            raise AssertionError('invalid claim must be stale')
     with sessions() as s:
         assert s.scalars(select(PublishedInferenceResultRow)).all() == []
         task = s.get(InferenceTaskRow, task_id)
@@ -302,9 +157,7 @@ def test_wrong_tenant_owner_or_token_finalize_fails_closed(tmp_path):
 def test_expired_same_task_is_reclaimed_with_new_fence_and_attempt(tmp_path):
     engine, sessions, repo, org, task_id, claim, now = _running_repo(tmp_path)
     with sessions.begin() as session:
-        session.get(InferenceTaskRow, task_id).lease_expires_at = now - timedelta(
-            seconds=1
-        )
+        session.get(InferenceTaskRow, task_id).lease_expires_at = now - timedelta(seconds=1)
 
     replacement = repo.claim(task_id, org, "worker-b", now)
 
@@ -334,9 +187,7 @@ def test_expired_same_task_is_reclaimed_with_new_fence_and_attempt(tmp_path):
 
 
 def test_expired_other_task_releases_camera_and_claims_ready_target(tmp_path):
-    engine, sessions, repo, org, expired_task_id, expired_claim, now = _running_repo(
-        tmp_path
-    )
+    engine, sessions, repo, org, expired_task_id, expired_claim, now = _running_repo(tmp_path)
     target_task_id, target_artifact_id = uuid4(), uuid4()
     with sessions.begin() as session:
         expired_task = session.get(InferenceTaskRow, expired_task_id)
@@ -393,9 +244,7 @@ def test_expired_other_task_releases_camera_and_claims_ready_target(tmp_path):
     ("attribute", "value"),
     (("fence_token", 999), ("worker_id", "impostor"), ("attempt_no", 999)),
 )
-def test_finalize_rejects_attempt_that_does_not_match_lease_identity(
-    tmp_path, attribute, value
-):
+def test_finalize_rejects_attempt_that_does_not_match_lease_identity(tmp_path, attribute, value):
     engine, sessions, repo, org, task_id, claim, now = _running_repo(tmp_path)
     with sessions.begin() as session:
         setattr(session.get(InferenceAttemptRow, claim.attempt_id), attribute, value)

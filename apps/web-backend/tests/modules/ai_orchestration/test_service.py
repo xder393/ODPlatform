@@ -11,8 +11,6 @@ WEB_BACKEND_SRC = Path(__file__).parents[3] / "src"
 SHARED_SCHEMAS_SRC = Path(__file__).parents[5] / "packages" / "shared-schemas" / "src"
 sys.path[:0] = [str(WEB_BACKEND_SRC), str(SHARED_SCHEMAS_SRC)]
 
-from odp_schemas.events import InspectionAlert
-
 from odp_api.adapters.generation.mock import MockLLMAdapter
 from odp_api.main import create_app
 from odp_api.modules.ai_orchestration.router import create_advice_router
@@ -26,6 +24,8 @@ from odp_api.modules.identity.service import get_current_actor
 from odp_api.modules.inspection.models import DefectCase, InspectionEvent
 from odp_api.ports.generation import GeneratedAdvice, GenerationRequest
 from odp_api.ports.retrieval import RetrievalFilters, RetrievedChunk
+
+from odp_schemas.events import InspectionAlert
 
 GOLDEN_DATASET = json.loads(
     (Path(__file__).parents[2] / "golden" / "rag_advice.json").read_text()
@@ -123,9 +123,7 @@ class GoldenRetrieval:
         return []
 
 
-def test_golden_dataset_assigns_confidence_and_source_provenance_deterministically() -> (
-    None
-):
+def test_golden_dataset_assigns_confidence_and_source_provenance_deterministically() -> None:
     for record in GOLDEN_DATASET:
         case = make_case()
         advice_service = AdviceService(GoldenRetrieval(case, record), MockLLMAdapter())
@@ -148,33 +146,23 @@ def test_golden_dataset_assigns_confidence_and_source_provenance_deterministical
 
 def test_low_confidence_advice_never_recommends_pausing_a_line() -> None:
     case = make_case()
-    record = next(
-        record for record in GOLDEN_DATASET if record["scope"] == "cross_product"
-    )
+    record = next(record for record in GOLDEN_DATASET if record["scope"] == "cross_product")
 
-    response = AdviceService(GoldenRetrieval(case, record), MockLLMAdapter()).advise(
-        case
-    )
+    response = AdviceService(GoldenRetrieval(case, record), MockLLMAdapter()).advise(case)
 
     assert response.confidence == "LOW"
     assert "pause" not in response.answer.lower()
 
 
-def test_low_confidence_advice_removes_any_line_pause_recommendation_from_generator() -> (
-    None
-):
+def test_low_confidence_advice_removes_any_line_pause_recommendation_from_generator() -> None:
     class UnsafeGenerator:
         def generate(self, request: GenerationRequest) -> GeneratedAdvice:
             return GeneratedAdvice("Pause the production line immediately.", ())
 
     case = make_case()
-    record = next(
-        record for record in GOLDEN_DATASET if record["scope"] == "cross_product"
-    )
+    record = next(record for record in GOLDEN_DATASET if record["scope"] == "cross_product")
 
-    response = AdviceService(GoldenRetrieval(case, record), UnsafeGenerator()).advise(
-        case
-    )
+    response = AdviceService(GoldenRetrieval(case, record), UnsafeGenerator()).advise(case)
 
     assert response.confidence == "LOW"
     assert "pause" not in response.answer.lower()

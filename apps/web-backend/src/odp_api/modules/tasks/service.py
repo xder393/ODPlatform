@@ -49,9 +49,7 @@ class InMemoryTaskRepository:
         )
 
     def unpublished(self) -> Sequence[TaskRecord]:
-        return tuple(
-            record for record in self.outstanding() if record.published_at is None
-        )
+        return tuple(record for record in self.outstanding() if record.published_at is None)
 
 
 class InMemoryTaskQueue:
@@ -128,9 +126,7 @@ class TaskService:
 
     def recover_unpublished(self) -> list[TaskRecord]:
         """Republish persisted work left behind when a prior queue write failed."""
-        return [
-            self._publish_if_needed(task) for task in self._repository.unpublished()
-        ]
+        return [self._publish_if_needed(task) for task in self._repository.unpublished()]
 
     def get(self, task_id: UUID) -> TaskRecord:
         record = self._repository.get(task_id)
@@ -154,16 +150,14 @@ class TaskService:
 
         running = self._save(replace(task, status="RUNNING", next_attempt_at=None))
         try:
-            await asyncio.wait_for(
-                inference(running.payload), timeout=VISION_TIMEOUT_SECONDS
-            )
+            await asyncio.wait_for(inference(running.payload), timeout=VISION_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
             return self._retry_or_dead_letter(
                 running,
                 "vision inference exceeded 30 second timeout",
                 current_time,
             )
-        except Exception as error:  # noqa: BLE001 - worker failures must be persisted as retries.
+        except Exception as error:
             return self._retry_or_dead_letter(running, str(error), current_time)
         return self._save(replace(running, status="SUCCEEDED", last_error=None))
 
@@ -174,9 +168,7 @@ class TaskService:
         for task in self._repository.outstanding():
             if task.task_type != "vision_inference" or task.frame_status != "PENDING":
                 continue
-            if current_time - task.created_at <= timedelta(
-                seconds=STALE_FRAME_CUTOFF_SECONDS
-            ):
+            if current_time - task.created_at <= timedelta(seconds=STALE_FRAME_CUTOFF_SECONDS):
                 continue
             skipped.append(
                 self._save(
@@ -234,9 +226,7 @@ class TaskService:
         try:
             self._queue.enqueue(task)
         except OSError as error:
-            return self._save(
-                replace(task, last_error=f"queue publication pending: {error}")
-            )
+            return self._save(replace(task, last_error=f"queue publication pending: {error}"))
         return self._save(replace(task, published_at=datetime.now(UTC)))
 
     def _save(self, task: TaskRecord) -> TaskRecord:

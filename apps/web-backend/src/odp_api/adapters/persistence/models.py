@@ -37,17 +37,13 @@ class ActorRow(Base):
     organization_id: Mapped[UUID] = mapped_column(Uuid, index=True)
     role: Mapped[str] = mapped_column(String(32))
     email: Mapped[str | None] = mapped_column(String(320), unique=True)
-    enabled: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=True, server_default=true()
-    )
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=true())
 
 
 class ActorLineGrantRow(Base):
     __tablename__ = "actor_line_grants"
 
-    actor_id: Mapped[UUID] = mapped_column(
-        ForeignKey("actors.actor_id"), primary_key=True
-    )
+    actor_id: Mapped[UUID] = mapped_column(ForeignKey("actors.actor_id"), primary_key=True)
     line_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
     organization_id: Mapped[UUID] = mapped_column(Uuid, index=True)
 
@@ -55,9 +51,7 @@ class ActorLineGrantRow(Base):
 class PasswordCredentialRow(Base):
     __tablename__ = "password_credentials"
 
-    actor_id: Mapped[UUID] = mapped_column(
-        ForeignKey("actors.actor_id"), primary_key=True
-    )
+    actor_id: Mapped[UUID] = mapped_column(ForeignKey("actors.actor_id"), primary_key=True)
     organization_id: Mapped[UUID] = mapped_column(Uuid, index=True)
     password_hash: Mapped[str] = mapped_column(String(512))
 
@@ -82,9 +76,7 @@ class InspectionEventRow(Base):
     )
 
     event_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
-    case_id: Mapped[UUID] = mapped_column(
-        ForeignKey("defect_cases.case_id"), index=True
-    )
+    case_id: Mapped[UUID] = mapped_column(ForeignKey("defect_cases.case_id"), index=True)
     organization_id: Mapped[UUID] = mapped_column(Uuid, index=True)
     camera_id: Mapped[UUID] = mapped_column(Uuid)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -103,9 +95,7 @@ class InspectionEventRow(Base):
         index=True,
     )
     evidence_artifact_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey(
-            "frame_artifacts.artifact_id", name="fk_inspection_events_evidence_artifact"
-        ),
+        ForeignKey("frame_artifacts.artifact_id", name="fk_inspection_events_evidence_artifact"),
         index=True,
     )
 
@@ -114,9 +104,7 @@ class CaseTransitionRow(Base):
     __tablename__ = "case_transitions"
 
     transition_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
-    case_id: Mapped[UUID] = mapped_column(
-        ForeignKey("defect_cases.case_id"), index=True
-    )
+    case_id: Mapped[UUID] = mapped_column(ForeignKey("defect_cases.case_id"), index=True)
     organization_id: Mapped[UUID] = mapped_column(Uuid, index=True)
     from_status: Mapped[str] = mapped_column(String(32))
     to_status: Mapped[str] = mapped_column(String(32))
@@ -157,9 +145,7 @@ class AlertRow(Base):
 
     alert_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
     organization_id: Mapped[UUID] = mapped_column(Uuid, index=True)
-    event_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("inspection_events.event_id")
-    )
+    event_id: Mapped[UUID | None] = mapped_column(ForeignKey("inspection_events.event_id"))
     line_id: Mapped[UUID | None] = mapped_column(Uuid, index=True)
     alert_type: Mapped[str] = mapped_column(String(128))
     payload: Mapped[dict[str, Any]] = mapped_column(JSON)
@@ -172,11 +158,7 @@ class InspectionAlertFeedRow(Base):
     __tablename__ = "inspection_alerts"
 
     cursor: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    __table_args__ = (
-        UniqueConstraint(
-            "organization_id", "event_id", name="uq_inspection_alerts_org_event"
-        ),
-    )
+    __table_args__ = (UniqueConstraint("organization_id", "event_id", name="uq_inspection_alerts_org_event"),)
 
     event_id: Mapped[UUID] = mapped_column(Uuid)
     organization_id: Mapped[UUID] = mapped_column(Uuid, index=True)
