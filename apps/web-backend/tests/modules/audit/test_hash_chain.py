@@ -1,18 +1,23 @@
 import asyncio
+import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from itertools import pairwise
 from pathlib import Path
-import sys
 from threading import Event
-import time
 from uuid import UUID, uuid4
 
 import pytest
 
-
 WEB_BACKEND_SRC = Path(__file__).parents[3] / "src"
 sys.path[:0] = [str(WEB_BACKEND_SRC)]
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from odp_api.main import create_app
+from odp_api.modules.audit import verify as audit_verify
 from odp_api.modules.audit.models import AuditCommand
 from odp_api.modules.audit.service import AuditService, InMemoryAuditRepository
 from odp_api.modules.audit.verify import (
@@ -20,17 +25,12 @@ from odp_api.modules.audit.verify import (
     AuditVerificationMonitor,
     InMemoryP0FailureReporter,
 )
-from odp_api.modules.audit import verify as audit_verify
 from odp_api.modules.cases.errors import InvalidCaseTransition
 from odp_api.modules.cases.router import InMemoryCaseRepository, create_cases_router
 from odp_api.modules.identity.models import Actor, Role
 from odp_api.modules.identity.policies import AuthorizationDenied
 from odp_api.modules.identity.service import get_current_actor
 from odp_api.modules.inspection.models import DefectCase, InspectionEvent
-from odp_api.main import create_app
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-
 
 ORGANIZATION_ID = UUID("00000000-0000-0000-0000-000000000001")
 RESOURCE_ID = UUID("00000000-0000-0000-0000-000000000002")
@@ -60,7 +60,10 @@ def test_hash_uses_the_canonical_sha256_input_for_exact_command_fields() -> None
     entry = service.append(command())
 
     assert entry.previous_hash == "0" * 64
-    assert entry.entry_hash == "dc39d1bb627353f5dbfaf9e15dab89f3931cc99438da563b06f89f5b239a5316"
+    assert (
+        entry.entry_hash
+        == "dc39d1bb627353f5dbfaf9e15dab89f3931cc99438da563b06f89f5b239a5316"
+    )
 
 
 def test_concurrent_appends_form_one_continuous_organization_chain() -> None:
@@ -69,7 +72,9 @@ def test_concurrent_appends_form_one_continuous_organization_chain() -> None:
     with ThreadPoolExecutor(max_workers=8) as executor:
         entries = list(
             executor.map(
-                lambda index: service.append(command(action=f"case.transition.{index}")),
+                lambda index: service.append(
+                    command(action=f"case.transition.{index}")
+                ),
                 range(20),
             )
         )
@@ -78,7 +83,7 @@ def test_concurrent_appends_form_one_continuous_organization_chain() -> None:
     assert [entry.sequence for entry in ordered] == list(range(1, 21))
     assert all(
         current.previous_hash == previous.entry_hash
-        for previous, current in zip(ordered, ordered[1:])
+        for previous, current in pairwise(ordered)
     )
     assert service.verify_organization_chain(ORGANIZATION_ID).is_valid
 
@@ -97,7 +102,9 @@ def test_verification_fails_when_a_stored_row_is_tampered() -> None:
     assert "entry hash" in result.reason
 
 
-def test_failed_startup_verification_emits_p0_and_blocks_appends_until_recovery() -> None:
+def test_failed_startup_verification_emits_p0_and_blocks_appends_until_recovery() -> (
+    None
+):
     repository = InMemoryAuditRepository()
     service = AuditService(repository)
     first = service.append(command())
@@ -132,7 +139,9 @@ def test_verification_reads_entries_and_chain_head_from_one_locked_snapshot() ->
     repository.pause_consistent_snapshot_for_test(snapshot_started, release_snapshot)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        verification = executor.submit(service.verify_organization_chain, ORGANIZATION_ID)
+        verification = executor.submit(
+            service.verify_organization_chain, ORGANIZATION_ID
+        )
         assert snapshot_started.wait(timeout=1)
         append = executor.submit(service.append, command(action="case.resolve"))
         assert not append.done()
@@ -163,7 +172,9 @@ def test_managed_daily_verifier_runs_and_blocks_a_failed_organization() -> None:
     repository.unsafe_replace_change_summary_for_test(entry.audit_id, "tampered")
     reporter = InMemoryP0FailureReporter()
     monitor = AuditVerificationMonitor(service, reporter)
-    managed = audit_verify.ManagedDailyAuditVerification(monitor, interval_seconds=0.001)
+    managed = audit_verify.ManagedDailyAuditVerification(
+        monitor, interval_seconds=0.001
+    )
 
     async def run_daily_check() -> None:
         managed.start()
@@ -200,7 +211,9 @@ def test_app_lifespan_starts_and_stops_the_managed_daily_full_verifier() -> None
                 break
             time.sleep(0.001)
         else:
-            pytest.fail("The managed daily verification did not block the failed organization.")
+            pytest.fail(
+                "The managed daily verification did not block the failed organization."
+            )
 
     assert not app.state.daily_audit_verification.is_running
 
@@ -232,10 +245,14 @@ def test_case_transition_and_audit_append_share_a_mutation_boundary() -> None:
     app.dependency_overrides[get_current_actor] = lambda: Actor(
         ACTOR_ID, ORGANIZATION_ID, Role.ADMINISTRATOR, frozenset()
     )
-    app.include_router(create_cases_router(case_repository, audit_service=audit_service))
+    app.include_router(
+        create_cases_router(case_repository, audit_service=audit_service)
+    )
     client = TestClient(app, raise_server_exceptions=False)
 
-    successful = client.post(f"/api/v1/cases/{RESOURCE_ID}/transitions", json={"status": "IN_REVIEW"})
+    successful = client.post(
+        f"/api/v1/cases/{RESOURCE_ID}/transitions", json={"status": "IN_REVIEW"}
+    )
 
     assert successful.status_code == 200
     audit_entries = repository.entries_for_organization(ORGANIZATION_ID)
@@ -244,7 +261,9 @@ def test_case_transition_and_audit_append_share_a_mutation_boundary() -> None:
     assert audit_entries[0].action == "defect_case.transition"
 
     audit_service.block_appends(ORGANIZATION_ID)
-    blocked = client.post(f"/api/v1/cases/{RESOURCE_ID}/transitions", json={"status": "RESOLVED"})
+    blocked = client.post(
+        f"/api/v1/cases/{RESOURCE_ID}/transitions", json={"status": "RESOLVED"}
+    )
 
     assert blocked.status_code == 503
     assert case_repository.get(RESOURCE_ID, ORGANIZATION_ID).case.status == "IN_REVIEW"
@@ -286,16 +305,27 @@ def test_concurrent_case_transitions_commit_exactly_one_case_and_audit_entry() -
         )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        first, second = executor.submit(transition_once), executor.submit(transition_once)
+        first, second = (
+            executor.submit(transition_once),
+            executor.submit(transition_once),
+        )
         outcomes = [future.exception() or future.result() for future in (first, second)]
 
-    assert sum(outcome is not None and not isinstance(outcome, Exception) for outcome in outcomes) == 1
+    assert (
+        sum(
+            outcome is not None and not isinstance(outcome, Exception)
+            for outcome in outcomes
+        )
+        == 1
+    )
     assert sum(isinstance(outcome, InvalidCaseTransition) for outcome in outcomes) == 1
     assert case_repository.get(RESOURCE_ID, ORGANIZATION_ID).case.status == "IN_REVIEW"
     assert len(audit_repository.entries_for_organization(ORGANIZATION_ID)) == 1
 
 
-def test_transition_transaction_preserves_forbidden_response_for_unauthorized_actor() -> None:
+def test_transition_transaction_preserves_forbidden_response_for_unauthorized_actor() -> (
+    None
+):
     case = DefectCase(
         case_id=RESOURCE_ID,
         organization_id=ORGANIZATION_ID,
@@ -322,6 +352,8 @@ def test_transition_transaction_preserves_forbidden_response_for_unauthorized_ac
     app.include_router(create_cases_router(InMemoryCaseRepository((case,))))
     client = TestClient(app, raise_server_exceptions=False)
 
-    response = client.post(f"/api/v1/cases/{RESOURCE_ID}/transitions", json={"status": "IN_REVIEW"})
+    response = client.post(
+        f"/api/v1/cases/{RESOURCE_ID}/transitions", json={"status": "IN_REVIEW"}
+    )
 
     assert response.status_code == 403

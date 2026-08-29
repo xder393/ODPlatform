@@ -1,10 +1,11 @@
 """Append-only audit service and an in-memory transactional adapter for tests."""
 
 from collections import defaultdict
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import replace
 from threading import Event, Lock, RLock
-from typing import Callable, Protocol
+from typing import Protocol
 from uuid import UUID
 
 from odp_api.modules.audit.models import (
@@ -64,7 +65,9 @@ class InMemoryAuditRepository:
         self, command: AuditCommand, make_entry: Callable[[int, str], AuditLog]
     ) -> AuditLog:
         with self._lock_for(command.organization_id):
-            head = self._heads.get(command.organization_id, AuditChainHead(command.organization_id))
+            head = self._heads.get(
+                command.organization_id, AuditChainHead(command.organization_id)
+            )
             entry = make_entry(head.last_sequence + 1, head.head_hash)
             self._entries[command.organization_id].append(entry)
             self._heads[command.organization_id] = replace(
@@ -83,7 +86,10 @@ class InMemoryAuditRepository:
     def read_consistent_chain(self, organization_id: UUID) -> AuditChainSnapshot:
         """Read entries and head under exactly one organization lock."""
         with self._lock_for(organization_id):
-            if self._snapshot_started is not None and self._release_snapshot is not None:
+            if (
+                self._snapshot_started is not None
+                and self._release_snapshot is not None
+            ):
                 self._snapshot_started.set()
                 if not self._release_snapshot.wait(timeout=5):
                     raise TimeoutError("Test snapshot pause was not released.")
@@ -98,7 +104,9 @@ class InMemoryAuditRepository:
         with self._locks_guard:
             return tuple(self._heads)
 
-    def unsafe_replace_change_summary_for_test(self, audit_id: UUID, value: str) -> None:
+    def unsafe_replace_change_summary_for_test(
+        self, audit_id: UUID, value: str
+    ) -> None:
         """Deliberately bypass immutability only to prove tamper detection in tests."""
         for organization_id in self.organization_ids():
             with self._lock_for(organization_id):
@@ -109,7 +117,9 @@ class InMemoryAuditRepository:
                         return
         raise KeyError(audit_id)
 
-    def pause_consistent_snapshot_for_test(self, started: Event, release: Event) -> None:
+    def pause_consistent_snapshot_for_test(
+        self, started: Event, release: Event
+    ) -> None:
         """Inject an append interleaving point while the chain lock remains held."""
         with self._locks_guard:
             self._snapshot_started = started
@@ -147,7 +157,7 @@ class AuditService:
 
     def ensure_append_allowed(self, organization_id: UUID) -> None:
         with self.append_guard(organization_id):
-            return None
+            return
 
     def verify_organization_chain(self, organization_id: UUID) -> VerificationResult:
         from odp_api.modules.audit.verify import verify_organization_chain

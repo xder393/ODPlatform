@@ -9,7 +9,6 @@ from odp_api.main import create_app
 from odp_api.seed import DEMO_ACCOUNTS, DEMO_ORG_ID, build_demo_seed
 from odp_api.settings import Settings
 
-
 CORRELATION_ID = UUID("40000000-0000-4000-8000-000000000002")
 
 
@@ -23,7 +22,9 @@ def _settings(tmp_path: Path) -> Settings:
 
 def _login(client: TestClient) -> str:
     email, password, _role = DEMO_ACCOUNTS[0]
-    response = client.post("/api/v1/auth/login", json={"email": email, "password": password})
+    response = client.post(
+        "/api/v1/auth/login", json={"email": email, "password": password}
+    )
     response.raise_for_status()
     return response.json()["access_token"]
 
@@ -60,10 +61,14 @@ def test_transition_history_and_audit_chain_survive_runtime_restart(tmp_path) ->
             "correlation_id": str(CORRELATION_ID),
         }
         assert history["occurred_at"].endswith("Z")
-        assert restarted.app.state.audit_service.verify_organization_chain(DEMO_ORG_ID).is_valid
+        assert restarted.app.state.audit_service.verify_organization_chain(
+            DEMO_ORG_ID
+        ).is_valid
 
 
-def test_successful_simulated_pause_is_appended_to_the_durable_audit_chain(tmp_path) -> None:
+def test_successful_simulated_pause_is_appended_to_the_durable_audit_chain(
+    tmp_path,
+) -> None:
     """Removing the pause audit command makes this durable audit fact disappear."""
     settings = _settings(tmp_path)
     seed = build_demo_seed()
@@ -83,7 +88,9 @@ def test_successful_simulated_pause_is_appended_to_the_durable_audit_chain(tmp_p
         )
 
         assert paused.status_code == 200
-        entries = client.app.state.audit_service.repository.read_consistent_chain(DEMO_ORG_ID).entries
+        entries = client.app.state.audit_service.repository.read_consistent_chain(
+            DEMO_ORG_ID
+        ).entries
         assert entries[-1].action == "defect_case.pause.simulated"
         assert entries[-1].correlation_id == CORRELATION_ID
 
@@ -96,7 +103,9 @@ def test_disabled_actor_stays_disabled_after_runtime_restart(tmp_path) -> None:
         token = _login(first)
         actor_id = first.app.state.jwt_authenticator.authenticate(token).actor_id
         with first.app.state.session_factory.begin() as session:
-            session.scalar(select(ActorRow).where(ActorRow.actor_id == actor_id)).enabled = False
+            session.scalar(
+                select(ActorRow).where(ActorRow.actor_id == actor_id)
+            ).enabled = False
 
     with TestClient(create_app(settings=settings, seed=seed)) as restarted:
         response = restarted.post(

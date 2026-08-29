@@ -11,7 +11,6 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from odp_api.adapters.persistence.models import Base
 from sqlalchemy import (
     JSON,
     BigInteger,
@@ -30,6 +29,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import Uuid
+
+from odp_api.adapters.persistence.models import Base
 
 
 class CameraInferenceStateRow(Base):
@@ -54,7 +55,9 @@ class CameraInferenceStateRow(Base):
         Integer, nullable=False, default=0, server_default=text("0")
     )
     reservation_id: Mapped[UUID | None] = mapped_column(Uuid)
-    reservation_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reservation_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     last_admitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     version: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
@@ -112,7 +115,9 @@ class FrameArtifactRow(Base):
             "frame_sequence",
             name="uq_frame_artifact_tenant_camera_session_sequence",
         ),
-        CheckConstraint("frame_sequence >= 1", name="ck_frame_artifact_sequence_positive"),
+        CheckConstraint(
+            "frame_sequence >= 1", name="ck_frame_artifact_sequence_positive"
+        ),
         CheckConstraint(
             "content_length IS NULL OR content_length >= 0",
             name="ck_frame_artifact_content_length_nonnegative",
@@ -126,7 +131,9 @@ class FrameArtifactRow(Base):
         ForeignKey("inspection_sessions.session_id"), nullable=False, index=True
     )
     frame_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
-    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
     object_key: Mapped[str | None] = mapped_column(String(1024))
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     content_length: Mapped[int | None] = mapped_column(BigInteger)
@@ -148,9 +155,15 @@ class InferenceTaskRow(Base):
 
     __tablename__ = "inference_tasks"
     __table_args__ = (
-        UniqueConstraint("organization_id", "idempotency_key", name="uq_inference_task_tenant_key"),
-        CheckConstraint("dispatch_seq >= 1", name="ck_inference_task_dispatch_positive"),
-        CheckConstraint("attempt_count >= 0", name="ck_inference_task_attempt_nonnegative"),
+        UniqueConstraint(
+            "organization_id", "idempotency_key", name="uq_inference_task_tenant_key"
+        ),
+        CheckConstraint(
+            "dispatch_seq >= 1", name="ck_inference_task_dispatch_positive"
+        ),
+        CheckConstraint(
+            "attempt_count >= 0", name="ck_inference_task_attempt_nonnegative"
+        ),
         CheckConstraint("fence_token >= 0", name="ck_inference_task_fence_nonnegative"),
     )
 
@@ -212,7 +225,9 @@ class InferenceAttemptRow(Base):
     worker_id: Mapped[str] = mapped_column(String(255), nullable=False)
     attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
     fence_token: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     outcome: Mapped[str | None] = mapped_column(String(64))
     error_code: Mapped[str | None] = mapped_column(String(128))
@@ -345,7 +360,9 @@ class MessageQuarantineRow(Base):
     event_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
     event_type: Mapped[str] = mapped_column(String(255), nullable=False)
     schema_version: Mapped[str] = mapped_column(String(32), nullable=False)
-    raw_payload: Mapped[bytes] = mapped_column(LargeBinary(length=65536), nullable=False)
+    raw_payload: Mapped[bytes] = mapped_column(
+        LargeBinary(length=65536), nullable=False
+    )
     error: Mapped[str] = mapped_column(Text, nullable=False)
     task_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("inference_tasks.task_id"), index=True
@@ -376,7 +393,9 @@ class DefectEpisodeRow(Base):
             "spatial_zone",
             name="uq_defect_episode_tenant_camera_defect_zone",
         ),
-        CheckConstraint("length(spatial_zone) > 0", name="ck_defect_episode_zone_nonempty"),
+        CheckConstraint(
+            "length(spatial_zone) > 0", name="ck_defect_episode_zone_nonempty"
+        ),
     )
 
     episode_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
@@ -389,7 +408,9 @@ class DefectEpisodeRow(Base):
     current_case_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("defect_cases.case_id"), index=True
     )
-    episode_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    episode_expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

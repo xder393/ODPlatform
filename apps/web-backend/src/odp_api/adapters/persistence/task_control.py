@@ -5,6 +5,11 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.orm import Session, sessionmaker
+
 from odp_api.adapters.persistence.models import AuditChainHeadRow, AuditLogRow
 from odp_api.adapters.persistence.task_models import (
     CameraInferenceStateRow,
@@ -25,7 +30,11 @@ from odp_api.modules.tasks.models import (
     TaskRecord,
     TaskStatus,
 )
-from odp_api.modules.tasks.recovery import QuarantineResult, ReplayResult, SystemRecoveryScope
+from odp_api.modules.tasks.recovery import (
+    QuarantineResult,
+    ReplayResult,
+    SystemRecoveryScope,
+)
 from odp_api.ports.tasks import (
     AdmissionRejected,
     AdmissionRequest,
@@ -34,10 +43,6 @@ from odp_api.ports.tasks import (
     StaleLease,
     TaskExecutionPort,
 )
-from sqlalchemy import func, select, update
-from sqlalchemy.dialects.postgresql import insert as postgresql_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.orm import Session, sessionmaker
 
 RESERVATION_TTL_SECONDS = 30
 LEASE_SECONDS = 20
@@ -70,7 +75,9 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
         with self._session_factory() as session:
             try:
                 current_time = self._db_now(session)
-                state = self._lock_camera_state(session, request.organization_id, request.camera_id)
+                state = self._lock_camera_state(
+                    session, request.organization_id, request.camera_id
+                )
                 self._require_session(session, request)
 
                 existing = session.scalar(
@@ -283,7 +290,11 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                 raise
 
     def fail_upload(
-        self, reservation_id: UUID, organization_id: UUID, error_code: str, now: datetime
+        self,
+        reservation_id: UUID,
+        organization_id: UUID,
+        error_code: str,
+        now: datetime,
     ) -> None:
         """Mark a pending Artifact failed and release its camera reservation."""
 
@@ -353,7 +364,9 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                     return None
                 # The camera anchor is the serialization point shared with admission
                 # and finalize.  Do not lock the task before it.
-                state = self._lock_camera_state(session, organization_id, task.camera_id)
+                state = self._lock_camera_state(
+                    session, organization_id, task.camera_id
+                )
                 task = session.scalar(
                     select(InferenceTaskRow)
                     .where(
@@ -400,7 +413,9 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                                 else TaskStatus.RETRY_WAIT.value
                             )
                             running.next_attempt_at = (
-                                None if running.status == TaskStatus.DEAD_LETTER.value else current
+                                None
+                                if running.status == TaskStatus.DEAD_LETTER.value
+                                else current
                             )
                             running.lease_owner = None
                             running.lease_expires_at = None
@@ -497,7 +512,8 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                     InferenceTaskRow.lease_expires_at > current,
                 )
                 .values(
-                    lease_expires_at=current + timedelta(seconds=LEASE_SECONDS), updated_at=current
+                    lease_expires_at=current + timedelta(seconds=LEASE_SECONDS),
+                    updated_at=current,
                 )
             )
             if result.rowcount != 1:
@@ -522,7 +538,11 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
         self._finalize(command, "SUCCEEDED")
 
     def _finalize(
-        self, command: PublishInferenceCommand, outcome: str, *, publish_result: bool = True
+        self,
+        command: PublishInferenceCommand,
+        outcome: str,
+        *,
+        publish_result: bool = True,
     ) -> None:
         claim = command.claim
         with self._session_factory() as session:
@@ -664,9 +684,14 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
             attempt.outcome = "FAILED"
             attempt.error_detail = detail
             retryable = (
-                failure_kind is FailureKind.RETRYABLE_INFRA and task.attempt_count < MAX_ATTEMPTS
+                failure_kind is FailureKind.RETRYABLE_INFRA
+                and task.attempt_count < MAX_ATTEMPTS
             )
-            task.status = TaskStatus.RETRY_WAIT.value if retryable else TaskStatus.DEAD_LETTER.value
+            task.status = (
+                TaskStatus.RETRY_WAIT.value
+                if retryable
+                else TaskStatus.DEAD_LETTER.value
+            )
             task.next_attempt_at = (
                 current + timedelta(seconds=task.attempt_count) if retryable else None
             )
@@ -734,7 +759,10 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                     select(CameraInferenceStateRow)
                     .join(
                         InferenceTaskRow,
-                        (InferenceTaskRow.task_id == CameraInferenceStateRow.running_task_id)
+                        (
+                            InferenceTaskRow.task_id
+                            == CameraInferenceStateRow.running_task_id
+                        )
                         & (
                             InferenceTaskRow.organization_id
                             == CameraInferenceStateRow.organization_id
@@ -844,7 +872,9 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                         and task.status == TaskStatus.BLOCKED_COMPATIBILITY.value
                     ):
                         session.commit()
-                        return QuarantineResult(existing.quarantine_id, ack_after_commit=True)
+                        return QuarantineResult(
+                            existing.quarantine_id, ack_after_commit=True
+                        )
                     raise AdmissionRejected("QUARANTINE_MESSAGE_NOT_CURRENTLY_BLOCKED")
                 task = session.scalar(
                     select(InferenceTaskRow)
@@ -902,9 +932,16 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                     )
                     .with_for_update()
                 )
-                if task is None or task.status != TaskStatus.BLOCKED_COMPATIBILITY.value:
+                if (
+                    task is None
+                    or task.status != TaskStatus.BLOCKED_COMPATIBILITY.value
+                ):
                     raise AdmissionRejected("TASK_NOT_BLOCKED_COMPATIBILITY")
-                task.status, task.error_code, task.error_detail = TaskStatus.READY.value, None, None
+                task.status, task.error_code, task.error_detail = (
+                    TaskStatus.READY.value,
+                    None,
+                    None,
+                )
                 outbox_id = self._add_dispatch_outbox(session, task, current)
                 quarantine = session.scalar(
                     select(MessageQuarantineRow)
@@ -940,7 +977,9 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                 raise
 
     @staticmethod
-    def _add_dispatch_outbox(session: Session, task: InferenceTaskRow, current: datetime) -> UUID:
+    def _add_dispatch_outbox(
+        session: Session, task: InferenceTaskRow, current: datetime
+    ) -> UUID:
         task.dispatch_seq += 1
         task.last_dispatched_at, task.updated_at = current, current
         outbox_id = uuid4()
@@ -954,7 +993,10 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                 dispatch_seq=task.dispatch_seq,
                 event_type=INFERENCE_REQUEST_EVENT,
                 schema_version=EVENT_SCHEMA_VERSION,
-                payload={"task_id": str(task.task_id), "dispatch_seq": task.dispatch_seq},
+                payload={
+                    "task_id": str(task.task_id),
+                    "dispatch_seq": task.dispatch_seq,
+                },
                 available_at=current,
                 claim_owner=None,
                 claim_expires_at=None,
@@ -981,7 +1023,9 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
         )
         if head is None:
             head = AuditChainHeadRow(
-                organization_id=command.organization_id, last_sequence=0, head_hash="0" * 64
+                organization_id=command.organization_id,
+                last_sequence=0,
+                head_hash="0" * 64,
             )
             session.add(head)
             session.flush()

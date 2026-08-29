@@ -1,7 +1,7 @@
 import asyncio
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-import sys
 from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
@@ -53,7 +53,9 @@ def test_registry_renders_valid_prometheus_exposition_format() -> None:
     assert "sample_latency_seconds_count 2.0" in rendered
 
 
-def test_inspection_event_increments_alert_counter_and_metrics_endpoint(tmp_path) -> None:
+def test_inspection_event_increments_alert_counter_and_metrics_endpoint(
+    tmp_path,
+) -> None:
     registry = MetricRegistry()
     app = create_app(metric_registry=registry, settings=make_settings(tmp_path))
 
@@ -95,7 +97,7 @@ def test_metrics_endpoint_exposes_task_dead_letter_total(tmp_path) -> None:
             record = asyncio.run(
                 task_service.process_vision(record.task_id, fail_inference, now=now)
             )
-            now = now + timedelta(seconds=2 ** attempt)
+            now = now + timedelta(seconds=2**attempt)
 
         assert task_service.get(record.task_id).status == "DEAD_LETTER"
         body = client.get("/metrics").text
@@ -121,7 +123,9 @@ def test_audit_chain_verification_failure_increments_counter() -> None:
         )
     )
     entry = repository.entries_for_organization(organization_id)[0]
-    repository.unsafe_replace_change_summary_for_test(entry.audit_id, '{"tampered": true}')
+    repository.unsafe_replace_change_summary_for_test(
+        entry.audit_id, '{"tampered": true}'
+    )
 
     registry = MetricRegistry()
     monitor = AuditVerificationMonitor(service, metric_registry=registry)

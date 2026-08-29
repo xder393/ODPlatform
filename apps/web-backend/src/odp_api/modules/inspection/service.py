@@ -1,12 +1,12 @@
-from datetime import UTC, datetime
 import time
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
+
+from odp_schemas.events import InspectionAlert
 
 from odp_api.modules.inspection.models import DefectCase, InspectionEvent
 from odp_api.observability.metrics import DEFAULT_REGISTRY, MetricRegistry
 from odp_api.ports.vision import FrameInput, VisionInferencePort
-
-from odp_schemas.events import InspectionAlert
 
 
 class InspectionService:
@@ -32,7 +32,9 @@ class InspectionService:
             self._metrics.inc("vision_inference_errors_total")
             raise
         finally:
-            self._metrics.observe("vision_inference_seconds", time.perf_counter() - started_at)
+            self._metrics.observe(
+                "vision_inference_seconds", time.perf_counter() - started_at
+            )
         self._metrics.inc("inspection_alert_total")
         alert = InspectionAlert(
             event_id=event_id or uuid4(),

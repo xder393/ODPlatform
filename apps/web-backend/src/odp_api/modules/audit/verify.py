@@ -1,14 +1,14 @@
 """Verification and operational health checks for audit chains."""
 
 import asyncio
-from dataclasses import dataclass
 import logging
+from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
 from odp_api.modules.audit.models import (
-    AuditP0Failure,
     GENESIS_HASH,
+    AuditP0Failure,
     VerificationResult,
     calculate_entry_hash,
 )
@@ -32,15 +32,27 @@ def verify_organization_chain(
     for entry in entries:
         if entry.organization_id != organization_id:
             return VerificationResult(
-                organization_id, False, expected_sequence - 1, entry.sequence, "organization mismatch"
+                organization_id,
+                False,
+                expected_sequence - 1,
+                entry.sequence,
+                "organization mismatch",
             )
         if entry.sequence != expected_sequence:
             return VerificationResult(
-                organization_id, False, expected_sequence - 1, entry.sequence, "sequence discontinuity"
+                organization_id,
+                False,
+                expected_sequence - 1,
+                entry.sequence,
+                "sequence discontinuity",
             )
         if entry.previous_hash != expected_previous_hash:
             return VerificationResult(
-                organization_id, False, expected_sequence - 1, entry.sequence, "previous hash mismatch"
+                organization_id,
+                False,
+                expected_sequence - 1,
+                entry.sequence,
+                "previous hash mismatch",
             )
         expected_entry_hash = calculate_entry_hash(
             organization_id=entry.organization_id,
@@ -57,12 +69,19 @@ def verify_organization_chain(
         )
         if entry.entry_hash != expected_entry_hash:
             return VerificationResult(
-                organization_id, False, expected_sequence - 1, entry.sequence, "entry hash mismatch"
+                organization_id,
+                False,
+                expected_sequence - 1,
+                entry.sequence,
+                "entry hash mismatch",
             )
         expected_previous_hash = entry.entry_hash
         expected_sequence += 1
     head = snapshot.head
-    if head.last_sequence != expected_sequence - 1 or head.head_hash != expected_previous_hash:
+    if (
+        head.last_sequence != expected_sequence - 1
+        or head.head_hash != expected_previous_hash
+    ):
         return VerificationResult(
             organization_id,
             False,
@@ -114,14 +133,20 @@ class AuditVerificationMonitor:
         self._reporter = reporter or LoggingP0FailureReporter()
         self._metrics = metric_registry or DEFAULT_REGISTRY
 
-    def startup_sample_verify(self, sample_size: int = 10) -> dict[UUID, VerificationResult]:
-        organization_ids = sorted(self._service.repository.organization_ids(), key=str)[:sample_size]
+    def startup_sample_verify(
+        self, sample_size: int = 10
+    ) -> dict[UUID, VerificationResult]:
+        organization_ids = sorted(self._service.repository.organization_ids(), key=str)[
+            :sample_size
+        ]
         return self._verify_and_hold(organization_ids)
 
     def daily_full_verify(self) -> dict[UUID, VerificationResult]:
         return self._verify_and_hold(self._service.repository.organization_ids())
 
-    def _verify_and_hold(self, organization_ids: tuple[UUID, ...] | list[UUID]) -> dict[UUID, VerificationResult]:
+    def _verify_and_hold(
+        self, organization_ids: tuple[UUID, ...] | list[UUID]
+    ) -> dict[UUID, VerificationResult]:
         results = {
             organization_id: self._service.verify_organization_chain(organization_id)
             for organization_id in organization_ids
@@ -137,7 +162,9 @@ class AuditVerificationMonitor:
 class ManagedDailyAuditVerification:
     """Lifecycle-managed background task that runs the full audit check daily."""
 
-    def __init__(self, monitor: AuditVerificationMonitor, interval_seconds: float = 24 * 60 * 60) -> None:
+    def __init__(
+        self, monitor: AuditVerificationMonitor, interval_seconds: float = 24 * 60 * 60
+    ) -> None:
         if interval_seconds <= 0:
             raise ValueError("The verification interval must be positive.")
         self._monitor = monitor
@@ -153,7 +180,9 @@ class ManagedDailyAuditVerification:
         if self.is_running:
             return
         self._stop_requested.clear()
-        self._task = asyncio.create_task(self._run(), name="audit-daily-full-verification")
+        self._task = asyncio.create_task(
+            self._run(), name="audit-daily-full-verification"
+        )
 
     async def stop(self) -> None:
         if self._task is None:
@@ -165,7 +194,9 @@ class ManagedDailyAuditVerification:
     async def _run(self) -> None:
         while not self._stop_requested.is_set():
             try:
-                await asyncio.wait_for(self._stop_requested.wait(), timeout=self._interval_seconds)
+                await asyncio.wait_for(
+                    self._stop_requested.wait(), timeout=self._interval_seconds
+                )
             except TimeoutError:
                 self._monitor.daily_full_verify()
 

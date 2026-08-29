@@ -39,12 +39,16 @@ class SystemRecoveryScope:
 
 class RecoveryRepository(Protocol):
     def release_due_retries(self, now: datetime, scope: SystemRecoveryScope) -> int: ...
-    def redispatch_stale_ready(self, now: datetime, scope: SystemRecoveryScope) -> int: ...
+    def redispatch_stale_ready(
+        self, now: datetime, scope: SystemRecoveryScope
+    ) -> int: ...
     def expire_leases(self, now: datetime, scope: SystemRecoveryScope) -> int: ...
 
 
 class RecoveryService:
-    def __init__(self, repository: RecoveryRepository, scope: SystemRecoveryScope) -> None:
+    def __init__(
+        self, repository: RecoveryRepository, scope: SystemRecoveryScope
+    ) -> None:
         if not isinstance(scope, SystemRecoveryScope):
             raise TypeError("RecoveryService requires a SystemRecoveryScope")
         self._repository = repository
@@ -53,6 +57,8 @@ class RecoveryService:
     def run_once(self, now: datetime) -> RecoverySummary:
         return RecoverySummary(
             retries_released=self._repository.release_due_retries(now, self._scope),
-            stale_ready_redispatched=self._repository.redispatch_stale_ready(now, self._scope),
+            stale_ready_redispatched=self._repository.redispatch_stale_ready(
+                now, self._scope
+            ),
             leases_expired=self._repository.expire_leases(now, self._scope),
         )

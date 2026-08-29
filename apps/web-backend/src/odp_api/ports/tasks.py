@@ -49,7 +49,9 @@ class AdmissionRejected(RuntimeError):
 class CameraAdmissionPort(Protocol):
     """Reserves camera capacity before uploading a frame object."""
 
-    def reserve(self, request: AdmissionRequest, now: datetime) -> AdmissionReservation: ...
+    def reserve(
+        self, request: AdmissionRequest, now: datetime
+    ) -> AdmissionReservation: ...
 
     def complete_upload(
         self,
@@ -61,7 +63,11 @@ class CameraAdmissionPort(Protocol):
     ) -> TaskRecord: ...
 
     def fail_upload(
-        self, reservation_id: UUID, organization_id: UUID, error_code: str, now: datetime
+        self,
+        reservation_id: UUID,
+        organization_id: UUID,
+        error_code: str,
+        now: datetime,
     ) -> None: ...
 
 
@@ -112,4 +118,6 @@ class TaskExecutionPort(Protocol):
     def renew(self, claim: LeaseClaim, now: datetime) -> LeaseClaim | None: ...
     def complete_no_defect(self, command: PublishInferenceCommand) -> None: ...
     def publish_success(self, command: PublishInferenceCommand) -> None: ...
-    def record_failure(self, claim: LeaseClaim, failure: object, now: datetime) -> None: ...
+    def record_failure(
+        self, claim: LeaseClaim, failure: object, now: datetime
+    ) -> None: ...

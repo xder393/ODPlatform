@@ -20,7 +20,11 @@ from odp_api.modules.knowledge.models import (
     KnowledgeDocument,
     KnowledgeParentChunk,
 )
-from odp_api.ports.generation import GeneratedAdvice, GeneratedCitation, GenerationRequest
+from odp_api.ports.generation import (
+    GeneratedAdvice,
+    GeneratedCitation,
+    GenerationRequest,
+)
 from odp_api.ports.retrieval import RetrievalFilters
 
 
@@ -98,7 +102,9 @@ def add_evidence(
     return child
 
 
-def test_real_retrieval_strict_scope_excludes_unscoped_and_nonmatching_evidence() -> None:
+def test_real_retrieval_strict_scope_excludes_unscoped_and_nonmatching_evidence() -> (
+    None
+):
     index = PgVectorRetrievalAdapter()
     case = make_case()
     direct = add_evidence(

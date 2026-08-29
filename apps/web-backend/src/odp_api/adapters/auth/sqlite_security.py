@@ -7,10 +7,12 @@ from uuid import UUID, uuid4
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from odp_api.adapters.persistence.models import ReauthenticationMarkerRow, WebSocketTicketRow
+from odp_api.adapters.persistence.models import (
+    ReauthenticationMarkerRow,
+    WebSocketTicketRow,
+)
 from odp_api.modules.identity.ports import REAUTHENTICATION_TTL_SECONDS
 from odp_api.modules.identity.tickets import WEBSOCKET_TICKET_TTL_SECONDS
-
 
 _SYSTEM_ORGANIZATION_ID = UUID(int=0)
 
@@ -64,7 +66,9 @@ class SqliteReauthenticationStore:
             if marker is None:
                 session.add(
                     ReauthenticationMarkerRow(
-                        actor_id=actor_id, occurred_at=occurred_at, expires_at=expires_at
+                        actor_id=actor_id,
+                        occurred_at=occurred_at,
+                        expires_at=expires_at,
                     )
                 )
             else:
@@ -90,7 +94,9 @@ class SqliteReauthenticationStore:
 
 
 def _delete_expired_tickets(session: Session, now: datetime) -> None:
-    session.execute(delete(WebSocketTicketRow).where(WebSocketTicketRow.expires_at <= now))
+    session.execute(
+        delete(WebSocketTicketRow).where(WebSocketTicketRow.expires_at <= now)
+    )
 
 
 def _ticket_digest(ticket: str) -> str:

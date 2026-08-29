@@ -18,7 +18,11 @@ from odp_api.adapters.retrieval.pgvector import (
     _normalize,
     _tokens,
 )
-from odp_api.modules.knowledge.models import KnowledgeChunk, KnowledgeDocument, KnowledgeParentChunk
+from odp_api.modules.knowledge.models import (
+    KnowledgeChunk,
+    KnowledgeDocument,
+    KnowledgeParentChunk,
+)
 from odp_api.ports.retrieval import RetrievalFilters, RetrievedChunk
 
 
@@ -51,7 +55,8 @@ class InMemoryKnowledgeIndex:
         versions = [
             document.version
             for document in self._documents.values()
-            if document.organization_id == organization_id and document.source_name == source_name
+            if document.organization_id == organization_id
+            and document.source_name == source_name
         ]
         return max(versions, default=0) + 1
 
@@ -68,7 +73,9 @@ class InMemoryKnowledgeIndex:
                 and existing.source_name == document.source_name
                 and existing.status == "INDEXED"
             ):
-                self._documents[existing.document_id] = replace(existing, status="SUPERSEDED")
+                self._documents[existing.document_id] = replace(
+                    existing, status="SUPERSEDED"
+                )
         self._documents[document.document_id] = document
         self._parents.update({parent.parent_chunk_id: parent for parent in parents})
         self._chunks.update({chunk.chunk_id: chunk for chunk in chunks})
@@ -87,21 +94,29 @@ class InMemoryKnowledgeIndex:
                 return existing
             indexed = replace(
                 document,
-                version=self.next_version(document.organization_id, document.source_name),
+                version=self.next_version(
+                    document.organization_id, document.source_name
+                ),
             )
             self.index(indexed, parents, chunks)
             return indexed
 
     def record_failure(self, document: KnowledgeDocument) -> None:
         if document.status != "FAILED":
-            raise ValueError("Only failed documents may be recorded as ingestion failures.")
+            raise ValueError(
+                "Only failed documents may be recorded as ingestion failures."
+            )
         self._documents[document.document_id] = document
 
-    def record_failure_atomically(self, document: KnowledgeDocument) -> KnowledgeDocument:
+    def record_failure_atomically(
+        self, document: KnowledgeDocument
+    ) -> KnowledgeDocument:
         with self._ingest_lock:
             failed = replace(
                 document,
-                version=self.next_version(document.organization_id, document.source_name),
+                version=self.next_version(
+                    document.organization_id, document.source_name
+                ),
             )
             self.record_failure(failed)
             return failed
@@ -111,8 +126,16 @@ class InMemoryKnowledgeIndex:
 
     def chunks_for_document(self, document_id: UUID) -> list[KnowledgeChunk]:
         return sorted(
-            (chunk for chunk in self._chunks.values() if chunk.document_id == document_id),
-            key=lambda chunk: (chunk.page_number, chunk.paragraph_number, chunk.child_index),
+            (
+                chunk
+                for chunk in self._chunks.values()
+                if chunk.document_id == document_id
+            ),
+            key=lambda chunk: (
+                chunk.page_number,
+                chunk.paragraph_number,
+                chunk.child_index,
+            ),
         )
 
     def search(
@@ -133,15 +156,24 @@ class InMemoryKnowledgeIndex:
         if not candidates:
             return []
         query_tokens = _tokens(query)
-        vector_scores = [_cosine_similarity(query_tokens, _tokens(chunk.text)) for chunk in candidates]
-        bm25_scores = _bm25_scores(query_tokens, [_tokens(chunk.text) for chunk in candidates])
+        vector_scores = [
+            _cosine_similarity(query_tokens, _tokens(chunk.text))
+            for chunk in candidates
+        ]
+        bm25_scores = _bm25_scores(
+            query_tokens, [_tokens(chunk.text) for chunk in candidates]
+        )
         normal_vector = _normalize(vector_scores)
         normal_bm25 = _normalize(bm25_scores)
         results = [
             self._retrieved_chunk(chunk, vector, bm25, (vector + bm25) / 2)
-            for chunk, vector, bm25 in zip(candidates, normal_vector, normal_bm25)
+            for chunk, vector, bm25 in zip(
+                candidates, normal_vector, normal_bm25, strict=True
+            )
         ]
-        return sorted(results, key=lambda result: (-result.score, str(result.chunk_id)))[: filters.limit]
+        return sorted(
+            results, key=lambda result: (-result.score, str(result.chunk_id))
+        )[: filters.limit]
 
     def _matches_required_scope(
         self,
@@ -161,7 +193,9 @@ class InMemoryKnowledgeIndex:
                 filters.evidence_kind is None
                 or document.evidence_kind == filters.evidence_kind
             )
-            and (not filters.require_evidence_kind or document.evidence_kind is not None)
+            and (
+                not filters.require_evidence_kind or document.evidence_kind is not None
+            )
             and (
                 filters.line_id is None
                 or document.applicable_line_id == filters.line_id
@@ -220,7 +254,9 @@ class InMemoryKnowledgeIndex:
         chunks: Sequence[KnowledgeChunk],
     ) -> None:
         if document.status != "INDEXED":
-            raise ValueError("Only indexed documents may be added to a retrieval index.")
+            raise ValueError(
+                "Only indexed documents may be added to a retrieval index."
+            )
         parent_ids = {parent.parent_chunk_id for parent in parents}
         if any(
             parent.document_id != document.document_id
@@ -232,4 +268,6 @@ class InMemoryKnowledgeIndex:
             or chunk.parent_chunk_id not in parent_ids
             for chunk in chunks
         ):
-            raise ValueError("Every index row must belong to the document organization.")
+            raise ValueError(
+                "Every index row must belong to the document organization."
+            )

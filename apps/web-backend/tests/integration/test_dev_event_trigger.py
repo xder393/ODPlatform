@@ -5,13 +5,17 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+
 from odp_api.main import create_app
 from odp_api.seed import DEMO_ACCOUNTS, DEMO_LINE_ID, build_demo_seed
 from odp_api.settings import Settings
 
 
 def _settings(
-    tmp_path: Path, *, environment: str = "local", enable_dev_event_trigger: bool = False
+    tmp_path: Path,
+    *,
+    environment: str = "local",
+    enable_dev_event_trigger: bool = False,
 ) -> Settings:
     return Settings(
         environment=environment,
@@ -24,14 +28,21 @@ def _settings(
 
 def _token(client: TestClient) -> str:
     email, password, _ = DEMO_ACCOUNTS[0]
-    response = client.post("/api/v1/auth/login", json={"email": email, "password": password})
+    response = client.post(
+        "/api/v1/auth/login", json={"email": email, "password": password}
+    )
     response.raise_for_status()
     return response.json()["access_token"]
 
 
-def test_development_trigger_publishes_a_future_authorized_line_event(tmp_path: Path) -> None:
+def test_development_trigger_publishes_a_future_authorized_line_event(
+    tmp_path: Path,
+) -> None:
     """Replacing the trigger with an unauthenticated or cross-line publish is a security bug."""
-    app = create_app(settings=_settings(tmp_path, enable_dev_event_trigger=True), seed=build_demo_seed())
+    app = create_app(
+        settings=_settings(tmp_path, enable_dev_event_trigger=True),
+        seed=build_demo_seed(),
+    )
     event_id = uuid4()
     with TestClient(app) as client:
         token = _token(client)
@@ -49,7 +60,10 @@ def test_development_trigger_publishes_a_future_authorized_line_event(tmp_path: 
 
 def test_development_trigger_rejects_an_unauthorized_line(tmp_path: Path) -> None:
     """Deriving tenant scope only from request JSON would let an inspector publish to another line."""
-    app = create_app(settings=_settings(tmp_path, enable_dev_event_trigger=True), seed=build_demo_seed())
+    app = create_app(
+        settings=_settings(tmp_path, enable_dev_event_trigger=True),
+        seed=build_demo_seed(),
+    )
     with TestClient(app) as client:
         response = client.post(
             "/api/v1/dev/inspection-events",

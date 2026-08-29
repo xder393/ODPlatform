@@ -1,15 +1,14 @@
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
-from alembic import command
 from alembic.config import Config
 from sqlalchemy import inspect, text
 
+from alembic import command
 from odp_api.db import create_engine_and_session
-
 
 BACKEND_DIR = Path(__file__).parents[2]
 
@@ -22,6 +21,7 @@ def test_alembic_cli_uses_odp_database_url_for_a_real_sqlite_upgrade(tmp_path) -
         cwd=BACKEND_DIR,
         env={**os.environ, "ODP_DATABASE_URL": database_url},
         capture_output=True,
+        check=False,
         text=True,
     )
 
@@ -33,7 +33,9 @@ def test_alembic_cli_uses_odp_database_url_for_a_real_sqlite_upgrade(tmp_path) -
         engine.dispose()
 
 
-def test_programmatic_alembic_url_has_priority_over_odp_environment(tmp_path, monkeypatch) -> None:
+def test_programmatic_alembic_url_has_priority_over_odp_environment(
+    tmp_path, monkeypatch
+) -> None:
     """A caller-set Config URL is intentional and wins over ambient environment."""
     configured_url = f"sqlite:///{tmp_path / 'configured.db'}"
     environment_url = f"sqlite:///{tmp_path / 'environment.db'}"
@@ -63,12 +65,16 @@ def test_alembic_cli_renders_postgresql_ddl_and_widens_revision_storage() -> Non
             "ODP_DATABASE_URL": "postgresql+psycopg://odp:odp@localhost:5432/odp",
         },
         capture_output=True,
+        check=False,
         text=True,
     )
 
     assert result.returncode == 0, result.stderr
     assert "actor_id UUID NOT NULL" in result.stdout
-    assert "ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(64)" in result.stdout
+    assert (
+        "ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(64)"
+        in result.stdout
+    )
 
 
 @pytest.mark.skipif(

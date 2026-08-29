@@ -1,6 +1,5 @@
-from pathlib import Path
 import sys
-
+from pathlib import Path
 
 WEB_BACKEND_SRC = Path(__file__).parents[3] / "src"
 sys.path[:0] = [str(WEB_BACKEND_SRC)]
@@ -30,23 +29,32 @@ def test_admission_rejects_before_upload_when_worker_is_unhealthy():
 
 def test_admission_rejects_when_frame_ttl_is_exhausted():
     decision = AdmissionPolicy(frame_ttl_seconds=2).evaluate(
-        ready_count=0, oldest_ready_age_seconds=0, worker_healthy=True,
-        redis_available=True, frame_age_seconds=2,
+        ready_count=0,
+        oldest_ready_age_seconds=0,
+        worker_healthy=True,
+        redis_available=True,
+        frame_age_seconds=2,
     )
     assert decision.reason == "FRAME_TTL_EXHAUSTED"
 
 
 def test_admission_rejects_when_redis_is_unavailable():
     decision = AdmissionPolicy(frame_ttl_seconds=2).evaluate(
-        ready_count=0, oldest_ready_age_seconds=0, worker_healthy=True,
-        redis_available=False, frame_age_seconds=0.1,
+        ready_count=0,
+        oldest_ready_age_seconds=0,
+        worker_healthy=True,
+        redis_available=False,
+        frame_age_seconds=0.1,
     )
     assert decision.reason == "REDIS_UNAVAILABLE"
 
 
 def test_admission_rejects_when_oldest_ready_is_stale():
     decision = AdmissionPolicy(frame_ttl_seconds=2).evaluate(
-        ready_count=1, oldest_ready_age_seconds=2, worker_healthy=True,
-        redis_available=True, frame_age_seconds=0.1,
+        ready_count=1,
+        oldest_ready_age_seconds=2,
+        worker_healthy=True,
+        redis_available=True,
+        frame_age_seconds=0.1,
     )
     assert decision.reason == "READY_STALE"

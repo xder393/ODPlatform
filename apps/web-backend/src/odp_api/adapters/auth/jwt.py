@@ -1,12 +1,12 @@
 """Pure, HMAC-SHA256 JWT authentication adapter for the local API runtime."""
 
 import base64
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from hmac import compare_digest, new
-import json
 from typing import Protocol
 from uuid import UUID
 
@@ -78,9 +78,11 @@ def issue_token(
     encoded_header = _encode_segment(json.dumps(header, separators=(",", ":")))
     encoded_payload = _encode_segment(json.dumps(payload, separators=(",", ":")))
     signing_input = f"{encoded_header}.{encoded_payload}".encode()
-    signature = base64.urlsafe_b64encode(
-        new(secret.encode(), signing_input, sha256).digest()
-    ).rstrip(b"=").decode()
+    signature = (
+        base64.urlsafe_b64encode(new(secret.encode(), signing_input, sha256).digest())
+        .rstrip(b"=")
+        .decode()
+    )
     return f"{encoded_header}.{encoded_payload}.{signature}"
 
 
@@ -135,5 +137,9 @@ def _validate_temporal_claims(payload: dict[object, object], now: datetime) -> N
     ):
         raise InvalidJwtSubject("JWT temporal claims are invalid.")
     current_timestamp = int(now.timestamp())
-    if expires_at <= issued_at or expires_at <= current_timestamp or issued_at > current_timestamp + 60:
+    if (
+        expires_at <= issued_at
+        or expires_at <= current_timestamp
+        or issued_at > current_timestamp + 60
+    ):
         raise InvalidJwtSubject("JWT temporal claims are invalid.")

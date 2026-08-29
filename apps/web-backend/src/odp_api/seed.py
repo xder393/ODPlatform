@@ -100,14 +100,17 @@ def build_demo_seed() -> DemoSeed:
     )
     passwords = {
         actor.actor_id: password
-        for actor, (_email, password, _role) in zip(actors, DEMO_ACCOUNTS)
+        for actor, (_email, password, _role) in zip(actors, DEMO_ACCOUNTS, strict=True)
     }
 
     inspection_service = InspectionService(MockVisionAdapter())
     cases = []
     for index in range(SEED_CASE_COUNT):
         camera_id = DEMO_CAMERA_IDS[index % len(DEMO_CAMERA_IDS)]
-        frame = FrameInput(fixture_name=f"seed-frame-{index + 1:02d}", content=f"seed-frame-{index + 1:02d}".encode())
+        frame = FrameInput(
+            fixture_name=f"seed-frame-{index + 1:02d}",
+            content=f"seed-frame-{index + 1:02d}".encode(),
+        )
         base_case = inspection_service.inspect_fixture(
             frame,
             organization_id=DEMO_ORG_ID,
@@ -117,7 +120,8 @@ def build_demo_seed() -> DemoSeed:
         # ``inspect_fixture`` leaves case/event scope unset; the seeded cases
         # must carry it, otherwise evidence tiering degrades to UNAVAILABLE.
         scoped_events = tuple(
-            replace(event, line_id=DEMO_LINE_ID) for event in base_case.inspection_events
+            replace(event, line_id=DEMO_LINE_ID)
+            for event in base_case.inspection_events
         )
         cases.append(
             replace(
@@ -135,12 +139,15 @@ def build_demo_seed() -> DemoSeed:
             filename="scratch-inspection-specification.pdf",
             content=_pdf_bytes(
                 (
-                    "scratch inspection specification: stop the line and re-inspect "
-                    "immediately when scratch defect confidence exceeds 0.9.",
-                    "inspection follows the shell injection part standard; record the "
-                    "model release and threshold used for the decision.",
-                    "simulated line pause requires reauthentication completed within "
-                    "five minutes.",
+                    (
+                        "scratch inspection specification: stop the line and re-inspect "
+                        "immediately when scratch defect confidence exceeds 0.9."
+                    ),
+                    (
+                        "inspection follows the shell injection part standard; record the "
+                        "model release and threshold used for the decision."
+                    ),
+                    "simulated line pause requires reauthentication completed within five minutes.",
                 )
             ),
             evidence_kind="CURRENT_SPECIFICATION",
@@ -150,10 +157,14 @@ def build_demo_seed() -> DemoSeed:
             filename="scratch-historical-cases.pdf",
             content=_pdf_bytes(
                 (
-                    "scratch historical case 2026-03: a shell injection part surface "
-                    "scratch at confidence 0.95 was confirmed as a false positive.",
-                    "scratch historical case 2026-05: a scratch on the same line was "
-                    "confirmed as a real defect; the threshold was raised afterwards.",
+                    (
+                        "scratch historical case 2026-03: a shell injection part surface "
+                        "scratch at confidence 0.95 was confirmed as a false positive."
+                    ),
+                    (
+                        "scratch historical case 2026-05: a scratch on the same line was "
+                        "confirmed as a real defect; the threshold was raised afterwards."
+                    ),
                 )
             ),
             evidence_kind="HISTORICAL_CASE",
@@ -185,7 +196,9 @@ def seed_business_data(
             actor_row = session.get(ActorRow, actor.actor_id)
             if actor_row is None:
                 existing_email = (
-                    session.scalar(select(ActorRow).where(ActorRow.email == actor.email))
+                    session.scalar(
+                        select(ActorRow).where(ActorRow.email == actor.email)
+                    )
                     if actor.email is not None
                     else None
                 )
@@ -246,7 +259,9 @@ def seed_business_data(
                             defect_class=event.defect_class,
                             confidence=event.confidence,
                             model_release=event.model_release,
-                            preprocessing_parameters=[list(item) for item in event.preprocessing_parameters],
+                            preprocessing_parameters=[
+                                list(item) for item in event.preprocessing_parameters
+                            ],
                             threshold=event.threshold,
                             input_frame_sha256=event.input_frame_sha256,
                             line_id=event.line_id,

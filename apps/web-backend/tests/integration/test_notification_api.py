@@ -11,6 +11,8 @@ WEB_BACKEND_SRC = Path(__file__).parents[2] / "src"
 SHARED_SCHEMAS_SRC = Path(__file__).parents[4] / "packages" / "shared-schemas" / "src"
 sys.path[:0] = [str(WEB_BACKEND_SRC), str(SHARED_SCHEMAS_SRC)]
 
+from odp_schemas.events import InspectionAlert
+
 from odp_api.adapters.notifications.redis_stream import RedisStreamInspectionAlertFeed
 from odp_api.adapters.redis_stream import RedisSocketStreamClient
 from odp_api.adapters.tasks.redis_stream import RedisStreamTaskQueue
@@ -21,8 +23,6 @@ from odp_api.modules.notifications.router import (
     InMemoryInspectionAlertRepository,
     create_notifications_router,
 )
-
-from odp_schemas.events import InspectionAlert
 
 
 def test_reconnect_returns_unseen_alert_and_websocket_emits_alert_contract() -> None:
@@ -38,20 +38,30 @@ def test_reconnect_returns_unseen_alert_and_websocket_emits_alert_contract() -> 
     app = FastAPI()
     actor = Actor(uuid4(), alert.organization_id, Role.ADMINISTRATOR, frozenset())
     app.dependency_overrides[get_current_actor] = lambda: actor
-    app.include_router(create_notifications_router(InMemoryInspectionAlertRepository((alert,))))
+    app.include_router(
+        create_notifications_router(InMemoryInspectionAlertRepository((alert,)))
+    )
     client = TestClient(app)
 
     reconciled = client.get("/api/v1/inspection-events")
 
     assert reconciled.status_code == 200
-    assert reconciled.json()["items"] == [{"cursor": "1", "alert": alert.model_dump(mode="json")}]
+    assert reconciled.json()["items"] == [
+        {"cursor": "1", "alert": alert.model_dump(mode="json")}
+    ]
 
     with client.websocket_connect("/ws/inspection-events") as websocket:
-        assert websocket.receive_json() == {"cursor": "1", "alert": alert.model_dump(mode="json")}
+        assert websocket.receive_json() == {
+            "cursor": "1",
+            "alert": alert.model_dump(mode="json"),
+        }
 
 
-def test_redis_stream_notification_feed_preserves_the_existing_reconciliation_contract() -> None:
+def test_redis_stream_notification_feed_preserves_the_existing_reconciliation_contract() -> (
+    None
+):
     """A Redis-backed feed must return the same authorized alert data as the local feed."""
+
     class FakeRedisStream:
         def __init__(self) -> None:
             self.entries: list[tuple[str, dict[str, str]]] = []
@@ -82,6 +92,7 @@ def test_redis_stream_notification_feed_preserves_the_existing_reconciliation_co
 
 def test_redis_stream_notification_feed_accepts_redis_byte_fields() -> None:
     """A real redis-py consumer returns bytes, not the string fields used by the fake."""
+
     class ByteRedisStream:
         def xadd(self, stream: str, fields: dict[str, str]) -> str:
             return "1-0"
@@ -109,13 +120,19 @@ def test_redis_stream_notification_feed_accepts_redis_byte_fields() -> None:
     )
 
     assert stored == []
-    assert RedisStreamInspectionAlertFeed(ByteRedisStream()).list(
-        UUID("00000000-0000-0000-0000-000000000002")
-    )[0].alert.defect_class == "scratch"
+    assert (
+        RedisStreamInspectionAlertFeed(ByteRedisStream())
+        .list(UUID("00000000-0000-0000-0000-000000000002"))[0]
+        .alert.defect_class
+        == "scratch"
+    )
 
 
-def test_runtime_composes_redis_stream_for_notification_reconciliation_and_task_work() -> None:
+def test_runtime_composes_redis_stream_for_notification_reconciliation_and_task_work() -> (
+    None
+):
     """Runtime must not silently fall back to an in-process feed or task queue."""
+
     class FakeRedisStream:
         def __init__(self) -> None:
             self.entries: list[tuple[str, dict[str, str]]] = []
@@ -139,6 +156,7 @@ def test_runtime_composes_redis_stream_for_notification_reconciliation_and_task_
 
 def test_runtime_fixture_alert_is_idempotent_across_app_restarts() -> None:
     """A new app composition must not emit another copy of the stable demo alert."""
+
     class FakeRedisStream:
         def __init__(self) -> None:
             self.entries: list[tuple[str, dict[str, str]]] = []
@@ -173,11 +191,14 @@ def test_runtime_fixture_alert_is_idempotent_across_app_restarts() -> None:
         UUID("00000000-0000-0000-0000-000000000001"), None, 100
     )
 
-    assert [item.alert.event_id for item in after] == [item.alert.event_id for item in before]
+    assert [item.alert.event_id for item in after] == [
+        item.alert.event_id for item in before
+    ]
 
 
 def test_alert_publication_recovers_a_persisted_claim_after_xadd_fails() -> None:
     """A restart must finish a pending claim without duplicating the stream event."""
+
     class RecoverableRedisStream:
         def __init__(self) -> None:
             self.claims: dict[str, str] = {}
@@ -236,7 +257,9 @@ def test_alert_publication_recovers_a_persisted_claim_after_xadd_fails() -> None
     assert len(redis.entries) == 1
 
 
-def test_rediss_stream_client_selects_tls_for_the_parsed_host(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_rediss_stream_client_selects_tls_for_the_parsed_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Treating rediss as plain Redis would expose credentials and stream contents."""
     import io
 
@@ -270,15 +293,26 @@ def test_rediss_stream_client_selects_tls_for_the_parsed_host(monkeypatch: pytes
         def __init__(self) -> None:
             self.server_hostname: str | None = None
 
-        def wrap_socket(self, connection: FakeConnection, *, server_hostname: str) -> FakeConnection:
+        def wrap_socket(
+            self, connection: FakeConnection, *, server_hostname: str
+        ) -> FakeConnection:
             self.server_hostname = server_hostname
             return connection
 
     context = FakeContext()
     from odp_api.adapters import redis_stream
 
-    monkeypatch.setattr(redis_stream.socket, "create_connection", lambda address, timeout: FakeConnection())
+    monkeypatch.setattr(
+        redis_stream.socket,
+        "create_connection",
+        lambda address, timeout: FakeConnection(),
+    )
     monkeypatch.setattr(redis_stream.ssl, "create_default_context", lambda: context)
 
-    assert RedisSocketStreamClient("rediss://:secret@example.test:6380/4").xlen("odp:tasks") == 0
+    assert (
+        RedisSocketStreamClient("rediss://:secret@example.test:6380/4").xlen(
+            "odp:tasks"
+        )
+        == 0
+    )
     assert context.server_hostname == "example.test"

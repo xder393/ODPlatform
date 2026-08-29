@@ -19,7 +19,12 @@ from odp_api.adapters.persistence.models import (
     InspectionEventRow,
     PasswordCredentialRow,
 )
-from odp_api.modules.audit.models import AuditChainHead, AuditChainSnapshot, AuditCommand, AuditLog
+from odp_api.modules.audit.models import (
+    AuditChainHead,
+    AuditChainSnapshot,
+    AuditCommand,
+    AuditLog,
+)
 from odp_api.modules.cases.ports import CaseTransition, StoredCase
 from odp_api.modules.identity.models import Actor, Role
 from odp_api.modules.inspection.models import DefectCase, InspectionEvent
@@ -32,14 +37,18 @@ class SqlAlchemyActorRepository:
     def get(self, actor_id: UUID) -> Actor | None:
         with self._session_factory() as session:
             row = session.scalar(
-                select(ActorRow).where(ActorRow.actor_id == actor_id, ActorRow.enabled.is_(True))
+                select(ActorRow).where(
+                    ActorRow.actor_id == actor_id, ActorRow.enabled.is_(True)
+                )
             )
             return _to_actor(session, row) if row is not None else None
 
     def get_by_email(self, email: str) -> Actor | None:
         with self._session_factory() as session:
             row = session.scalar(
-                select(ActorRow).where(ActorRow.email == email, ActorRow.enabled.is_(True))
+                select(ActorRow).where(
+                    ActorRow.email == email, ActorRow.enabled.is_(True)
+                )
             )
             return _to_actor(session, row) if row is not None else None
 
@@ -56,7 +65,9 @@ class SqlAlchemyPasswordCredentialRepository:
 
 def _to_actor(session: Session, row: ActorRow) -> Actor:
     line_ids = session.scalars(
-        select(ActorLineGrantRow.line_id).where(ActorLineGrantRow.actor_id == row.actor_id)
+        select(ActorLineGrantRow.line_id).where(
+            ActorLineGrantRow.actor_id == row.actor_id
+        )
     )
     return Actor(
         actor_id=row.actor_id,
@@ -73,12 +84,18 @@ class SqlAlchemyCaseRepository:
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self._session_factory = session_factory
 
-    def list(self, organization_id: UUID, updated_after: datetime | None) -> list[StoredCase]:
+    def list(
+        self, organization_id: UUID, updated_after: datetime | None
+    ) -> list[StoredCase]:
         with self._session_factory() as session:
-            statement = select(DefectCaseRow).where(DefectCaseRow.organization_id == organization_id)
+            statement = select(DefectCaseRow).where(
+                DefectCaseRow.organization_id == organization_id
+            )
             if updated_after is not None:
                 statement = statement.where(DefectCaseRow.updated_at > updated_after)
-            rows = session.scalars(statement.order_by(DefectCaseRow.updated_at.desc())).all()
+            rows = session.scalars(
+                statement.order_by(DefectCaseRow.updated_at.desc())
+            ).all()
             return [
                 stored
                 for row in rows
@@ -111,9 +128,9 @@ class SqlAlchemyAuditRepository:
             if session.get_bind().dialect.name == "sqlite":
                 session.connection().exec_driver_sql("BEGIN IMMEDIATE")
             try:
-                entry = SqlAlchemyAuditSessionRepository(session).append_under_head_lock(
-                    command, make_entry
-                )
+                entry = SqlAlchemyAuditSessionRepository(
+                    session
+                ).append_under_head_lock(command, make_entry)
                 session.commit()
                 return entry
             except BaseException:
@@ -125,7 +142,9 @@ class SqlAlchemyAuditRepository:
             if session.get_bind().dialect.name == "sqlite":
                 session.connection().exec_driver_sql("BEGIN IMMEDIATE")
             try:
-                return SqlAlchemyAuditSessionRepository(session).read_consistent_chain(organization_id)
+                return SqlAlchemyAuditSessionRepository(session).read_consistent_chain(
+                    organization_id
+                )
             finally:
                 session.rollback()
 
@@ -140,11 +159,17 @@ class SqlAlchemyCaseSessionRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
-    def list(self, organization_id: UUID, updated_after: datetime | None) -> list[StoredCase]:
-        statement = select(DefectCaseRow).where(DefectCaseRow.organization_id == organization_id)
+    def list(
+        self, organization_id: UUID, updated_after: datetime | None
+    ) -> list[StoredCase]:
+        statement = select(DefectCaseRow).where(
+            DefectCaseRow.organization_id == organization_id
+        )
         if updated_after is not None:
             statement = statement.where(DefectCaseRow.updated_at > updated_after)
-        rows = self._session.scalars(statement.order_by(DefectCaseRow.updated_at.desc())).all()
+        rows = self._session.scalars(
+            statement.order_by(DefectCaseRow.updated_at.desc())
+        ).all()
         return [
             stored
             for row in rows
@@ -263,7 +288,9 @@ class SqlAlchemyAuditSessionRepository:
         if dialect == "postgresql":
             self._session.execute(
                 postgresql_insert(AuditChainHeadRow)
-                .values(organization_id=organization_id, last_sequence=0, head_hash="0" * 64)
+                .values(
+                    organization_id=organization_id, last_sequence=0, head_hash="0" * 64
+                )
                 .on_conflict_do_nothing(index_elements=["organization_id"])
             )
             head = self._session.scalar(
@@ -293,7 +320,9 @@ def _stored_case(session: Session, row: DefectCaseRow) -> StoredCase:
             defect_class=event.defect_class,
             confidence=event.confidence,
             model_release=event.model_release,
-            preprocessing_parameters=tuple((str(key), str(value)) for key, value in event.preprocessing_parameters),
+            preprocessing_parameters=tuple(
+                (str(key), str(value)) for key, value in event.preprocessing_parameters
+            ),
             threshold=event.threshold,
             input_frame_sha256=event.input_frame_sha256,
             line_id=event.line_id,
@@ -336,7 +365,9 @@ def _stored_case_or_none(session: Session, row: DefectCaseRow) -> StoredCase | N
     return _stored_case(session, row) if events_exist is not None else None
 
 
-def _history(session: Session, case_id: UUID, organization_id: UUID) -> list[CaseTransition]:
+def _history(
+    session: Session, case_id: UUID, organization_id: UUID
+) -> list[CaseTransition]:
     return [
         CaseTransition(
             from_status=row.from_status,

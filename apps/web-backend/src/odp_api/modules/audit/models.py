@@ -1,11 +1,10 @@
 """Immutable records and canonical serialization for the audit hash chain."""
 
-from dataclasses import dataclass
-from datetime import UTC, datetime
 import hashlib
 import json
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
-
 
 GENESIS_HASH = "0" * 64
 
@@ -14,7 +13,9 @@ def canonical_timestamp(value: datetime) -> str:
     """Return the one timestamp representation permitted in a chain hash."""
     if value.tzinfo is None:
         raise ValueError("Audit timestamps must be timezone-aware.")
-    return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    return (
+        value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,7 +121,9 @@ def canonical_hash_input(
         "sequence": sequence,
         "version": 1,
     }
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
 
 
 def calculate_entry_hash(
@@ -154,7 +157,9 @@ def calculate_entry_hash(
     ).hexdigest()
 
 
-def audit_log_from_command(command: AuditCommand, *, sequence: int, previous_hash: str) -> AuditLog:
+def audit_log_from_command(
+    command: AuditCommand, *, sequence: int, previous_hash: str
+) -> AuditLog:
     return AuditLog(
         audit_id=uuid4(),
         organization_id=command.organization_id,

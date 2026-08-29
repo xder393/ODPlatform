@@ -56,7 +56,9 @@ class SQLiteStreamClient:
             )
         return f"{cursor.lastrowid}-0"
 
-    def xadd_bounded(self, stream: str, fields: dict[str, str], maxlen: int = 10_000) -> str:
+    def xadd_bounded(
+        self, stream: str, fields: dict[str, str], maxlen: int = 10_000
+    ) -> str:
         """SQLite transport compatibility; durable feed remains the source of truth."""
         entry = self.xadd(stream, fields)
         with self._lock, self._connection:
@@ -67,11 +69,14 @@ class SQLiteStreamClient:
             )
         return entry
 
-    def xadd_once(self, stream: str, claim_key: str, fields: dict[str, str]) -> str | None:
+    def xadd_once(
+        self, stream: str, claim_key: str, fields: dict[str, str]
+    ) -> str | None:
         """Claim and append in one SQLite transaction."""
         with self._lock, self._connection:
             claim = self._connection.execute(
-                "INSERT OR IGNORE INTO stream_idempotency (idempotency_key) VALUES (?)", (claim_key,)
+                "INSERT OR IGNORE INTO stream_idempotency (idempotency_key) VALUES (?)",
+                (claim_key,),
             )
             if claim.rowcount != 1:
                 return None
@@ -94,12 +99,15 @@ class SQLiteStreamClient:
                 "SELECT entry_id, fields_json FROM stream_entries WHERE stream_name = ? ORDER BY entry_id",
                 (stream,),
             ).fetchall()
-        return [(f"{entry_id}-0", json.loads(fields_json)) for entry_id, fields_json in rows]
+        return [
+            (f"{entry_id}-0", json.loads(fields_json)) for entry_id, fields_json in rows
+        ]
 
     def setnx(self, key: str, value: str) -> bool:
         with self._lock, self._connection:
             cursor = self._connection.execute(
-                "INSERT OR IGNORE INTO stream_idempotency (idempotency_key) VALUES (?)", (key,)
+                "INSERT OR IGNORE INTO stream_idempotency (idempotency_key) VALUES (?)",
+                (key,),
             )
         return cursor.rowcount == 1
 
@@ -135,26 +143,35 @@ class RedisSocketStreamClient:
         result = self._execute(*command)
         return _decode(result)
 
-    def xadd_bounded(self, stream: str, fields: dict[str, str], maxlen: int = 10_000) -> str:
+    def xadd_bounded(
+        self, stream: str, fields: dict[str, str], maxlen: int = 10_000
+    ) -> str:
         command = ["XADD", stream, "MAXLEN", "~", str(maxlen), "*"]
         for key, value in fields.items():
             command.extend((key, value))
         return _decode(self._execute(*command))
 
     def xread(self, stream: str, cursor: str, block_ms: int = 15_000) -> object:
-        return self._execute("XREAD", "BLOCK", str(block_ms), "COUNT", "100", "STREAMS", stream, cursor)
+        return self._execute(
+            "XREAD", "BLOCK", str(block_ms), "COUNT", "100", "STREAMS", stream, cursor
+        )
 
     def async_client(self):
         """Dedicated cancellable async connection for long-polling alert feeds."""
         from redis.asyncio import Redis
+
         scheme = "rediss" if self._use_tls else "redis"
         auth = f":{self._password}@" if self._password else ""
         return Redis.from_url(
             f"{scheme}://{auth}{self._host}:{self._port}/{self._database}",
-            socket_connect_timeout=1, socket_timeout=20, decode_responses=True,
+            socket_connect_timeout=1,
+            socket_timeout=20,
+            decode_responses=True,
         )
 
-    def xadd_once(self, stream: str, claim_key: str, fields: dict[str, str]) -> str | None:
+    def xadd_once(
+        self, stream: str, claim_key: str, fields: dict[str, str]
+    ) -> str | None:
         """Retry a pending append while suppressing completed event publications."""
         args = [item for pair in fields.items() for item in pair]
         result = self.eval(_RECOVERABLE_XADD_ONCE, [claim_key, stream], args)
@@ -191,7 +208,9 @@ class RedisSocketStreamClient:
         return self._execute("EVAL", script, str(len(keys)), *keys, *args)
 
     def _execute(self, *command: str) -> object:
-        connection = socket.create_connection((self._host, self._port), self._timeout_seconds)
+        connection = socket.create_connection(
+            (self._host, self._port), self._timeout_seconds
+        )
         if self._use_tls:
             connection = ssl.create_default_context().wrap_socket(
                 connection, server_hostname=self._host

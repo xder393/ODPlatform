@@ -1,5 +1,7 @@
 """One transaction for a case mutation, transition history, and audit-chain append."""
 
+from typing import Self
+
 from sqlalchemy.orm import Session, sessionmaker
 
 from odp_api.adapters.persistence.repositories import (
@@ -16,7 +18,7 @@ class SqlAlchemyBusinessUnitOfWork:
         self._session: Session | None = None
         self._committed = False
 
-    def __enter__(self) -> "SqlAlchemyBusinessUnitOfWork":
+    def __enter__(self) -> Self:
         self._session = self._session_factory()
         if self._session.get_bind().dialect.name == "sqlite":
             # SQLite has no row locks. Acquiring the write reservation before

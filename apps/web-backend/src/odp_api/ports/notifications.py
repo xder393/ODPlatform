@@ -21,13 +21,18 @@ class InspectionAlertFeedPort(Protocol):
     """Supplies persisted alerts to REST reconciliation and websocket delivery."""
 
     def list(
-        self, organization_id: UUID, after_cursor: str | None, limit: int,
+        self,
+        organization_id: UUID,
+        after_cursor: str | None,
+        limit: int,
         authorized_line_ids: frozenset[UUID] | None = None,
     ) -> Sequence[StoredInspectionAlert]: ...
 
     def publish(self, alert: InspectionAlert, line_id: UUID | None) -> str: ...
 
-    def subscribe(self, after_cursor: str | None) -> AsyncIterator[StoredInspectionAlert]: ...
+    def subscribe(
+        self, after_cursor: str | None
+    ) -> AsyncIterator[StoredInspectionAlert]: ...
 
 
 class InspectionAlertPublisherPort(Protocol):

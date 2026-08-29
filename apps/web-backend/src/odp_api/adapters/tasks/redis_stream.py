@@ -19,7 +19,9 @@ class RedisStreamClient(Protocol):
 class RedisStreamTaskQueue:
     """Publishes task references to a Redis Stream for independently running workers."""
 
-    def __init__(self, client: RedisStreamClient, stream_name: str = "odp:tasks") -> None:
+    def __init__(
+        self, client: RedisStreamClient, stream_name: str = "odp:tasks"
+    ) -> None:
         self._client = client
         self._stream_name = stream_name
 
@@ -30,7 +32,9 @@ class RedisStreamTaskQueue:
                 "task_id": str(task.task_id),
                 "task_type": task.task_type,
                 "idempotency_key": task.idempotency_key,
-                "payload": json.dumps(task.payload, default=_json_default, sort_keys=True),
+                "payload": json.dumps(
+                    task.payload, default=_json_default, sort_keys=True
+                ),
             },
         )
 
@@ -41,7 +45,9 @@ class RedisStreamTaskQueue:
 class RedisStreamTaskAlertPublisher:
     """Writes final task failures to a Redis Stream for cross-instance alerting."""
 
-    def __init__(self, client: RedisStreamClient, stream_name: str = "odp:task-alerts") -> None:
+    def __init__(
+        self, client: RedisStreamClient, stream_name: str = "odp:task-alerts"
+    ) -> None:
         self._client = client
         self._stream_name = stream_name
 

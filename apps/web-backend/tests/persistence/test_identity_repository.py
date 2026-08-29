@@ -21,9 +21,11 @@ def test_sqlite_actor_and_credential_survive_new_session(tmp_path) -> None:
 
     assert actor is not None
     assert actor.role is Role.INSPECTOR
-    assert SqlAlchemyPasswordCredentialRepository(sessions).password_hash(
-        actor.actor_id
-    ).startswith("$argon2id$")
+    assert (
+        SqlAlchemyPasswordCredentialRepository(sessions)
+        .password_hash(actor.actor_id)
+        .startswith("$argon2id$")
+    )
 
 
 def test_disabled_actor_is_hidden_and_seed_does_not_reenable_it(tmp_path) -> None:

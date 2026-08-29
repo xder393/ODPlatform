@@ -15,8 +15,14 @@ def test_recovery_service_reports_each_scheduler_transition():
         redispatch_stale_ready=lambda now, scope: 3,
         expire_leases=lambda now, scope: 1,
     )
-    summary = RecoveryService(repo, SystemRecoveryScope("scheduler")).run_once(datetime.now(UTC))
-    assert (summary.retries_released, summary.stale_ready_redispatched, summary.leases_expired) == (
+    summary = RecoveryService(repo, SystemRecoveryScope("scheduler")).run_once(
+        datetime.now(UTC)
+    )
+    assert (
+        summary.retries_released,
+        summary.stale_ready_redispatched,
+        summary.leases_expired,
+    ) == (
         2,
         3,
         1,

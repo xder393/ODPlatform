@@ -11,9 +11,41 @@ import math
 import threading
 from typing import Final
 
-VISION_INFERENCE_SECONDS_BUCKETS: Final = (0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0)
-CASE_RESOLUTION_SECONDS_BUCKETS: Final = (60.0, 300.0, 900.0, 1800.0, 3600.0, 14400.0, 86400.0)
-_AUTO_HISTOGRAM_BUCKETS: Final = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0)
+VISION_INFERENCE_SECONDS_BUCKETS: Final = (
+    0.005,
+    0.01,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.5,
+    5.0,
+    10.0,
+    30.0,
+)
+CASE_RESOLUTION_SECONDS_BUCKETS: Final = (
+    60.0,
+    300.0,
+    900.0,
+    1800.0,
+    3600.0,
+    14400.0,
+    86400.0,
+)
+_AUTO_HISTOGRAM_BUCKETS: Final = (
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.5,
+    5.0,
+    10.0,
+)
 
 # The standard metric set documented in the plan; every registry, injected or
 # default, resolves these names to the same kind, help text and buckets.
@@ -169,7 +201,9 @@ class MetricRegistry:
         """Increment the named counter, registering it on first use."""
         metric = self._get_or_create(name, Counter)
         if not isinstance(metric, Counter):
-            raise TypeError(f"Metric {name} is a {type(metric).__name__}, not a counter.")
+            raise TypeError(
+                f"Metric {name} is a {type(metric).__name__}, not a counter."
+            )
         metric.inc(value)
 
     def set(self, name: str, value: float) -> None:
@@ -189,7 +223,9 @@ class MetricRegistry:
         """Record an observation in the named histogram, registering it on first use."""
         metric = self._get_or_create(name, Histogram)
         if not isinstance(metric, Histogram):
-            raise TypeError(f"Metric {name} is a {type(metric).__name__}, not a histogram.")
+            raise TypeError(
+                f"Metric {name} is a {type(metric).__name__}, not a histogram."
+            )
         metric.observe(value)
 
     def render(self) -> str:
@@ -245,7 +281,9 @@ def _standard_or_auto_metric(name: str, metric_type):
         help_text, buckets = _STANDARD_HISTOGRAMS[name]
         return Histogram(name, help_text, buckets)
     if metric_type is Histogram:
-        return Histogram(name, f"Histogram {name} (auto-registered).", _AUTO_HISTOGRAM_BUCKETS)
+        return Histogram(
+            name, f"Histogram {name} (auto-registered).", _AUTO_HISTOGRAM_BUCKETS
+        )
     return metric_type(name, f"{metric_type.__name__} {name} (auto-registered).")
 
 

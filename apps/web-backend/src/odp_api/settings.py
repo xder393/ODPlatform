@@ -3,7 +3,6 @@ from typing import Literal
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 Environment = Literal["local", "test", "docker", "staging", "production"]
 RetrievalBackend = Literal["inmemory", "pgvector"]
 
@@ -35,17 +34,25 @@ class Settings(BaseSettings):
         if self.environment in {"local", "test"}:
             return self
         if not self.database_url.startswith("postgresql"):
-            raise ValueError("Non-local environments require a PostgreSQL ODP_DATABASE_URL.")
+            raise ValueError(
+                "Non-local environments require a PostgreSQL ODP_DATABASE_URL."
+            )
         if not self.redis_url or not self.redis_url.startswith("redis://"):
             raise ValueError("Non-local environments require ODP_REDIS_URL.")
         if self.retrieval_backend != "pgvector":
-            raise ValueError("Non-local environments require ODP_RETRIEVAL_BACKEND=pgvector.")
+            raise ValueError(
+                "Non-local environments require ODP_RETRIEVAL_BACKEND=pgvector."
+            )
         if not self.postgres_url or not self.postgres_url.startswith("postgresql://"):
-            raise ValueError("Non-local environments require a PostgreSQL ODP_POSTGRES_URL.")
+            raise ValueError(
+                "Non-local environments require a PostgreSQL ODP_POSTGRES_URL."
+            )
         if self.environment in {"staging", "production"} and (
             self.seed_demo
             or self.seed_knowledge_on_startup is True
             or self.enable_dev_event_trigger
         ):
-            raise ValueError("Staging and production prohibit startup seeds and dev triggers.")
+            raise ValueError(
+                "Staging and production prohibit startup seeds and dev triggers."
+            )
         return self

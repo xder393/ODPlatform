@@ -1,11 +1,11 @@
 """End-to-end contracts for opaque, one-time WebSocket tickets."""
 
-from datetime import UTC, datetime, timedelta
 import json
 import logging
 import logging.config
-from pathlib import Path
 import sys
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -16,13 +16,17 @@ from starlette.websockets import WebSocketDisconnect
 from odp_api.adapters.auth.redis_security import RedisWebSocketTicketStore
 from odp_api.adapters.auth.sqlite_security import SqliteWebSocketTicketStore
 from odp_api.adapters.persistence.models import WebSocketTicketRow
-from odp_api.adapters.persistence.repositories import SqlAlchemyPasswordCredentialRepository
+from odp_api.adapters.persistence.repositories import (
+    SqlAlchemyPasswordCredentialRepository,
+)
 from odp_api.main import create_app
-from odp_api.modules.identity.tickets import InvalidWebSocketTicket, WebSocketTicketService
+from odp_api.modules.identity.tickets import (
+    InvalidWebSocketTicket,
+    WebSocketTicketService,
+)
 from odp_api.observability.logging import configure_uvicorn_access_logging
 from odp_api.seed import DEMO_ACCOUNTS, build_demo_seed
 from odp_api.settings import Settings
-
 
 NOW = datetime(2026, 8, 24, 12, tzinfo=UTC)
 
@@ -37,23 +41,35 @@ def _settings(tmp_path: Path) -> Settings:
 
 def _login(client: TestClient) -> str:
     email, password, _role = DEMO_ACCOUNTS[0]
-    response = client.post("/api/v1/auth/login", json={"email": email, "password": password})
+    response = client.post(
+        "/api/v1/auth/login", json={"email": email, "password": password}
+    )
     response.raise_for_status()
     return response.json()["access_token"]
 
 
-def test_password_database_contains_argon2_hash_and_login_uses_it(tmp_path: Path) -> None:
+def test_password_database_contains_argon2_hash_and_login_uses_it(
+    tmp_path: Path,
+) -> None:
     """Replacing the runtime verifier with plaintext data would make this fail."""
-    with TestClient(create_app(settings=_settings(tmp_path), seed=build_demo_seed())) as client:
-        credentials = SqlAlchemyPasswordCredentialRepository(client.app.state.session_factory)
-        assert credentials.password_hash(build_demo_seed().actors[0].actor_id).startswith("$argon2id$")
+    with TestClient(
+        create_app(settings=_settings(tmp_path), seed=build_demo_seed())
+    ) as client:
+        credentials = SqlAlchemyPasswordCredentialRepository(
+            client.app.state.session_factory
+        )
+        assert credentials.password_hash(
+            build_demo_seed().actors[0].actor_id
+        ).startswith("$argon2id$")
         assert _login(client)
 
 
 def test_ticket_service_consumes_once_and_rejects_expiry(tmp_path: Path) -> None:
     """A non-atomic read or an ignored expiry would let a ticket authenticate twice."""
     app = create_app(settings=_settings(tmp_path), seed=build_demo_seed())
-    service = WebSocketTicketService(SqliteWebSocketTicketStore(app.state.session_factory))
+    service = WebSocketTicketService(
+        SqliteWebSocketTicketStore(app.state.session_factory)
+    )
     actor_id = uuid4()
 
     ticket = service.issue(actor_id, NOW)
@@ -67,10 +83,14 @@ def test_ticket_service_consumes_once_and_rejects_expiry(tmp_path: Path) -> None
         service.consume(expired, NOW + timedelta(seconds=61))
 
 
-def test_sqlite_ticket_store_prunes_expired_rows_on_consume_and_issue(tmp_path: Path) -> None:
+def test_sqlite_ticket_store_prunes_expired_rows_on_consume_and_issue(
+    tmp_path: Path,
+) -> None:
     """Without expiry cleanup, durable ticket rows grow indefinitely after their TTL."""
     app = create_app(settings=_settings(tmp_path), seed=build_demo_seed())
-    service = WebSocketTicketService(SqliteWebSocketTicketStore(app.state.session_factory))
+    service = WebSocketTicketService(
+        SqliteWebSocketTicketStore(app.state.session_factory)
+    )
     actor_id = uuid4()
 
     expired = service.issue(actor_id, NOW)
@@ -87,12 +107,15 @@ def test_sqlite_ticket_store_prunes_expired_rows_on_consume_and_issue(tmp_path: 
 
 def test_redis_ticket_store_uses_digest_key_ttl_and_atomic_consumption() -> None:
     """A raw-ticket key or non-atomic read/delete would expose or reuse the credential."""
+
     class FakeRedis:
         def __init__(self) -> None:
             self.values: dict[str, str] = {}
             self.set_calls: list[tuple[str, int, bool]] = []
 
-        def set_ex(self, key: str, value: str, seconds: int, *, nx: bool = False) -> bool:
+        def set_ex(
+            self, key: str, value: str, seconds: int, *, nx: bool = False
+        ) -> bool:
             self.set_calls.append((key, seconds, nx))
             if nx and key in self.values:
                 return False
@@ -118,9 +141,13 @@ def test_redis_ticket_store_uses_digest_key_ttl_and_atomic_consumption() -> None
     assert store.consume(ticket, NOW) is None
 
 
-def test_ticket_endpoint_is_bearer_protected_single_use_and_does_not_echo_ticket(tmp_path: Path) -> None:
+def test_ticket_endpoint_is_bearer_protected_single_use_and_does_not_echo_ticket(
+    tmp_path: Path,
+) -> None:
     """Returning JWT query authentication or echoing an invalid ticket leaks a reusable credential."""
-    with TestClient(create_app(settings=_settings(tmp_path), seed=build_demo_seed())) as client:
+    with TestClient(
+        create_app(settings=_settings(tmp_path), seed=build_demo_seed())
+    ) as client:
         token = _login(client)
         denied = client.post("/api/v1/auth/websocket-ticket")
         assert denied.status_code == 401
@@ -135,17 +162,23 @@ def test_ticket_endpoint_is_bearer_protected_single_use_and_does_not_echo_ticket
         assert payload["expires_in"] == 60
         assert token not in issued.text
 
-        with client.websocket_connect(f"/ws/inspection-events?ticket={ticket}") as websocket:
+        with client.websocket_connect(
+            f"/ws/inspection-events?ticket={ticket}"
+        ) as websocket:
             assert websocket.receive_json()["alert"]["defect_class"] == "scratch"
 
-        with pytest.raises(WebSocketDisconnect) as reused:
-            with client.websocket_connect(f"/ws/inspection-events?ticket={ticket}"):
-                pass
+        with (
+            pytest.raises(WebSocketDisconnect) as reused,
+            client.websocket_connect(f"/ws/inspection-events?ticket={ticket}"),
+        ):
+            pass
         assert reused.value.code == 1008
 
-        with pytest.raises(WebSocketDisconnect) as legacy:
-            with client.websocket_connect(f"/ws/inspection-events?token={token}"):
-                pass
+        with (
+            pytest.raises(WebSocketDisconnect) as legacy,
+            client.websocket_connect(f"/ws/inspection-events?token={token}"),
+        ):
+            pass
         assert legacy.value.code == 1008
 
 
@@ -172,7 +205,9 @@ def test_uvicorn_websocket_access_logs_strip_valid_reused_and_legacy_credentials
             f"/ws/inspection-events?token={legacy_jwt}",
         ):
             # This is Uvicorn's actual access-log argument shape for a handshake.
-            access_logger.info('%s - "%s %s HTTP/%s" %d', "testclient", "GET", path, "1.1", 101)
+            access_logger.info(
+                '%s - "%s %s HTTP/%s" %d', "testclient", "GET", path, "1.1", 101
+            )
         captured = capsys.readouterr()
     finally:
         access_logger.removeHandler(stderr_handler)
@@ -186,7 +221,9 @@ def test_uvicorn_websocket_access_logs_strip_valid_reused_and_legacy_credentials
         assert all(secret not in record.getMessage() for record in caplog.records)
 
 
-def test_uvicorn_error_websocket_handshake_logs_strip_query_credentials(caplog, capsys) -> None:
+def test_uvicorn_error_websocket_handshake_logs_strip_query_credentials(
+    caplog, capsys
+) -> None:
     """Uvicorn 0.52 logs WebSocket acceptance/rejection on ``uvicorn.error``."""
     configure_uvicorn_access_logging()
     error_logger = logging.getLogger("uvicorn.error")
@@ -236,9 +273,17 @@ def test_uvicorn_error_websocket_handshake_logs_strip_query_credentials(caplog, 
     assert "non-WebSocket lifecycle log remains readable" in captured.out
 
 
-def test_uvicorn_error_non_websocket_question_mark_message_survives_real_log_config(capsys) -> None:
+def test_uvicorn_error_non_websocket_question_mark_message_survives_real_log_config(
+    capsys,
+) -> None:
     """A broad sanitizer must not corrupt ordinary Uvicorn error formatting."""
-    config_path = Path(__file__).parents[2] / "src" / "odp_api" / "observability" / "uvicorn_logging.json"
+    config_path = (
+        Path(__file__).parents[2]
+        / "src"
+        / "odp_api"
+        / "observability"
+        / "uvicorn_logging.json"
+    )
     logging.config.dictConfig(json.loads(config_path.read_text()))
     logger = logging.getLogger("uvicorn.error")
 
@@ -249,7 +294,9 @@ def test_uvicorn_error_non_websocket_question_mark_message_survives_real_log_con
     assert "Logging error" not in captured.err
 
 
-def test_reauthentication_marker_survives_a_local_runtime_restart(tmp_path: Path) -> None:
+def test_reauthentication_marker_survives_a_local_runtime_restart(
+    tmp_path: Path,
+) -> None:
     """Replacing durable markers with a process-local dictionary loses high-risk authorization."""
     settings = _settings(tmp_path)
     seed = build_demo_seed()
@@ -264,8 +311,11 @@ def test_reauthentication_marker_survives_a_local_runtime_restart(tmp_path: Path
 
     with TestClient(create_app(settings=settings, seed=seed)) as restarted:
         token = _login(restarted)
-        case_id = restarted.get("/api/v1/cases", headers={"Authorization": f"Bearer {token}"}).json()[0]["case_id"]
+        case_id = restarted.get(
+            "/api/v1/cases", headers={"Authorization": f"Bearer {token}"}
+        ).json()[0]["case_id"]
         paused = restarted.post(
-            f"/api/v1/cases/{case_id}/pause", headers={"Authorization": f"Bearer {token}"}
+            f"/api/v1/cases/{case_id}/pause",
+            headers={"Authorization": f"Bearer {token}"},
         )
         assert paused.status_code == 200

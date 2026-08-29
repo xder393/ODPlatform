@@ -25,7 +25,9 @@ def configure_uvicorn_access_logging() -> None:
     """Install query sanitization on both Uvicorn HTTP and WebSocket loggers."""
     for logger_name in ("uvicorn.access", "uvicorn.error"):
         logger = logging.getLogger(logger_name)
-        if not any(isinstance(item, UvicornAccessSecretFilter) for item in logger.filters):
+        if not any(
+            isinstance(item, UvicornAccessSecretFilter) for item in logger.filters
+        ):
             logger.addFilter(UvicornAccessSecretFilter())
 
 

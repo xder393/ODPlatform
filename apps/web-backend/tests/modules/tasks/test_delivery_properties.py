@@ -5,10 +5,12 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from alembic import command
 from alembic.config import Config
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from sqlalchemy import func, select
+
+from alembic import command
 from odp_api.adapters.persistence.inspection_effects import SqlAlchemyInspectionEffects
 from odp_api.adapters.persistence.models import InspectionEventRow
 from odp_api.adapters.persistence.task_control import SqlAlchemyTaskControlRepository
@@ -18,10 +20,12 @@ from odp_api.adapters.persistence.task_models import (
 )
 from odp_api.db import create_engine_and_session
 from odp_api.modules.inspection.effects import InspectionEffectService
-from odp_api.modules.tasks.commands import InferenceExecutionContract, PublishInferenceCommand
+from odp_api.modules.tasks.commands import (
+    InferenceExecutionContract,
+    PublishInferenceCommand,
+)
 from odp_api.modules.tasks.recovery import RecoveryService, SystemRecoveryScope
 from odp_api.ports.tasks import AdmissionRequest, StaleLease
-from sqlalchemy import func, select
 
 
 class DeliveryHarness:
@@ -31,9 +35,13 @@ class DeliveryHarness:
         self._tmp_path_factory = tmp_path_factory
 
     def reset(self) -> None:
-        database_path = self._tmp_path_factory.mktemp("delivery-order") / "control-plane.db"
+        database_path = (
+            self._tmp_path_factory.mktemp("delivery-order") / "control-plane.db"
+        )
         _upgrade_sqlite(database_path)
-        self.engine, self.sessions = create_engine_and_session(f"sqlite:///{database_path}")
+        self.engine, self.sessions = create_engine_and_session(
+            f"sqlite:///{database_path}"
+        )
         self.now = datetime.now(UTC)
         self.organization_id = uuid4()
         self.camera_id = uuid4()
@@ -74,8 +82,12 @@ class DeliveryHarness:
             1,
             self.now,
         )
-        self.effects = InspectionEffectService(SqlAlchemyInspectionEffects(self.sessions))
-        self.recovery = RecoveryService(self.repository, SystemRecoveryScope("property-test"))
+        self.effects = InspectionEffectService(
+            SqlAlchemyInspectionEffects(self.sessions)
+        )
+        self.recovery = RecoveryService(
+            self.repository, SystemRecoveryScope("property-test")
+        )
         self.claim = None
 
     def apply(self, action: str) -> None:
@@ -112,7 +124,8 @@ class DeliveryHarness:
                 .select_from(InspectionEventRow)
                 .join(
                     PublishedInferenceResultRow,
-                    InspectionEventRow.source_result_id == PublishedInferenceResultRow.result_id,
+                    InspectionEventRow.source_result_id
+                    == PublishedInferenceResultRow.result_id,
                 )
                 .where(PublishedInferenceResultRow.task_id == self.task.task_id)
             )
@@ -131,9 +144,17 @@ def harness(tmp_path_factory: pytest.TempPathFactory):
             value.close()
 
 
-@given(actions=st.lists(st.sampled_from(["deliver", "renew", "expire", "complete"]), min_size=1, max_size=20))
+@given(
+    actions=st.lists(
+        st.sampled_from(["deliver", "renew", "expire", "complete"]),
+        min_size=1,
+        max_size=20,
+    )
+)
 @settings(deadline=None)
-def test_any_duplicate_delivery_order_has_at_most_one_published_result(harness, actions):
+def test_any_duplicate_delivery_order_has_at_most_one_published_result(
+    harness, actions
+):
     harness.reset()
     for action in actions:
         harness.apply(action)
@@ -168,7 +189,11 @@ def _publish_command(claim, now: datetime) -> PublishInferenceCommand:
         ),
         frame_sha256="a" * 64,
         detections=(
-            {"defect_type": "scratch", "confidence": 0.91, "spatial_zone": "property-zone"},
+            {
+                "defect_type": "scratch",
+                "confidence": 0.91,
+                "spatial_zone": "property-zone",
+            },
         ),
         stage_durations=(("model", 1.0),),
         correlation_id=uuid4(),

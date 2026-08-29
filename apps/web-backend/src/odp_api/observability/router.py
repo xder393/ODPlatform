@@ -16,6 +16,8 @@ def create_metrics_router(registry: MetricRegistry) -> APIRouter:
         # Intentionally unauthenticated so Prometheus can scrape it without
         # credentials. Production deployments must restrict this route at the
         # ingress layer to an IP allowlist for the scrape server instead.
-        return Response(content=registry.render(), media_type=PROMETHEUS_TEXT_CONTENT_TYPE)
+        return Response(
+            content=registry.render(), media_type=PROMETHEUS_TEXT_CONTENT_TYPE
+        )
 
     return router
