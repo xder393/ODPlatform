@@ -34,8 +34,7 @@ class SqlAlchemyInspectionEffects:
             try:
                 # Camera is the serialization anchor, then artifact, task, attempt.
                 task = s.scalar(
-                    select(InferenceTaskRow)
-                    .where(InferenceTaskRow.task_id == c.task_id)
+                    select(InferenceTaskRow).where(InferenceTaskRow.task_id == c.task_id)
                 )
                 if task is None or task.organization_id != c.organization_id:
                     raise StaleLease("tenant mismatch")
@@ -46,7 +45,14 @@ class SqlAlchemyInspectionEffects:
                 )
                 if state is None:
                     raise StaleLease("camera anchor missing")
-                task = s.scalar(select(InferenceTaskRow).where(InferenceTaskRow.task_id == c.task_id, InferenceTaskRow.organization_id == c.organization_id).with_for_update())
+                task = s.scalar(
+                    select(InferenceTaskRow)
+                    .where(
+                        InferenceTaskRow.task_id == c.task_id,
+                        InferenceTaskRow.organization_id == c.organization_id,
+                    )
+                    .with_for_update()
+                )
                 attempt = s.scalar(
                     select(InferenceAttemptRow)
                     .where(InferenceAttemptRow.attempt_id == c.attempt_id)
@@ -60,7 +66,11 @@ class SqlAlchemyInspectionEffects:
                     or attempt.organization_id != c.organization_id
                 ):
                     raise StaleLease("invalid attempt")
-                if attempt.attempt_no != c.attempt_no or attempt.fence_token != c.fence_token or attempt.worker_id != c.lease_owner:
+                if (
+                    attempt.attempt_no != c.attempt_no
+                    or attempt.fence_token != c.fence_token
+                    or attempt.worker_id != c.lease_owner
+                ):
                     raise StaleLease("attempt identity mismatch")
                 now = s.scalar(select(func.now())).replace(tzinfo=UTC)
                 old = s.scalar(
@@ -70,11 +80,41 @@ class SqlAlchemyInspectionEffects:
                 )
                 contract = command.execution_contract
                 if old:
-                    if (
-                        old.frame_sha256 != command.frame_sha256
-                        or old.detections != list(command.detections)
-                        or old.model_release != contract.model_release
-                    ):
+                    stored = (
+                        old.model_release,
+                        old.model_sha256,
+                        old.onnxruntime_version,
+                        old.execution_provider,
+                        tuple(old.actual_input_shape),
+                        old.preprocessing_version,
+                        old.postprocessing_version,
+                        old.confidence_threshold,
+                        old.iou_threshold,
+                        old.nms_mode,
+                        old.nms_in_model,
+                        old.class_map_version,
+                        old.frame_sha256,
+                        old.detections,
+                        old.stage_durations,
+                    )
+                    incoming = (
+                        contract.model_release,
+                        contract.model_sha256,
+                        contract.onnxruntime_version,
+                        contract.execution_provider,
+                        tuple(contract.actual_input_shape),
+                        contract.preprocessing_version,
+                        contract.postprocessing_version,
+                        contract.confidence_threshold,
+                        contract.iou_threshold,
+                        contract.nms_mode,
+                        contract.nms_in_model,
+                        contract.class_map_version,
+                        command.frame_sha256,
+                        list(command.detections),
+                        dict(command.stage_durations),
+                    )
+                    if stored != incoming:
                         raise PublishConflict("payload differs")
                     ev = s.scalar(
                         select(InspectionEventRow).where(
@@ -199,7 +239,14 @@ class SqlAlchemyInspectionEffects:
                             organization_id=c.organization_id,
                             event_id=eid,
                             alert_type="INSPECTION",
-                            payload=d,
+                            payload={
+                                "event_id": str(eid),
+                                "organization_id": str(c.organization_id),
+                                "camera_id": str(task.camera_id),
+                                "occurred_at": now.isoformat(),
+                                "defect_class": typ,
+                                "confidence": float(d.get("confidence", 0)),
+                            },
                             created_at=now,
                         )
                     )
@@ -207,7 +254,14 @@ class SqlAlchemyInspectionEffects:
                         InspectionAlertFeedRow(
                             event_id=eid,
                             organization_id=c.organization_id,
-                            payload=d,
+                            payload={
+                                "event_id": str(eid),
+                                "organization_id": str(c.organization_id),
+                                "camera_id": str(task.camera_id),
+                                "occurred_at": now.isoformat(),
+                                "defect_class": typ,
+                                "confidence": float(d.get("confidence", 0)),
+                            },
                             created_at=now,
                         )
                     )
@@ -227,12 +281,23 @@ class SqlAlchemyInspectionEffects:
                         updated_at=now,
                     )
                     s.add(outbox)
-                    audit = AuditCommand(c.organization_id, "inspection_event", eid,
-                        "INSPECTION_PUBLISHED", "{}", None, now,
-                        command.correlation_id, None)
+                    audit = AuditCommand(
+                        c.organization_id,
+                        "inspection_event",
+                        eid,
+                        "INSPECTION_PUBLISHED",
+                        "{}",
+                        None,
+                        now,
+                        command.correlation_id,
+                        None,
+                    )
                     SqlAlchemyAuditSessionRepository(s).append_under_head_lock(
-                        audit, lambda sequence, previous_hash: audit_log_from_command(
-                            audit, sequence=sequence, previous_hash=previous_hash))
+                        audit,
+                        lambda sequence, previous_hash: audit_log_from_command(
+                            audit, sequence=sequence, previous_hash=previous_hash
+                        ),
+                    )
                 s.flush()
                 s.commit()
                 return PublishedEffect(

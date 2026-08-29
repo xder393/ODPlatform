@@ -14,8 +14,8 @@ from odp_api.adapters.persistence.models import (
     InspectionAlertFeedRow,
     InspectionEventRow,
 )
-from odp_api.adapters.persistence.task_control import SqlAlchemyTaskControlRepository
 from odp_api.adapters.persistence.repositories import SqlAlchemyAuditSessionRepository
+from odp_api.adapters.persistence.task_control import SqlAlchemyTaskControlRepository
 from odp_api.adapters.persistence.task_models import (
     CameraInferenceStateRow,
     DefectEpisodeRow,
@@ -173,6 +173,50 @@ def test_exact_duplicate_returns_original_ids_but_conflicting_payload_is_rejecte
         assert session.scalar(select(func.count()).select_from(OutboxEventRow)) == 1
 
 
+@pytest.mark.parametrize(
+    "field",
+    [
+        "model_release",
+        "model_sha256",
+        "onnxruntime_version",
+        "execution_provider",
+        "actual_input_shape",
+        "preprocessing_version",
+        "postprocessing_version",
+        "confidence_threshold",
+        "iou_threshold",
+        "nms_mode",
+        "nms_in_model",
+        "class_map_version",
+    ],
+)
+def test_every_execution_field_conflict_is_rejected(runtime, field):
+    now = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    _org, _camera, _artifact, _task, claim = _running(runtime, now)
+    command = _command(claim, now, ({"defect_type": "scratch", "confidence": 0.91},))
+    service = _service(runtime)
+    service.publish(command)
+    values = {
+        "model_release": "other",
+        "model_sha256": "c" * 64,
+        "onnxruntime_version": "other",
+        "execution_provider": "other",
+        "actual_input_shape": (9,),
+        "preprocessing_version": "other",
+        "postprocessing_version": "other",
+        "confidence_threshold": 0.6,
+        "iou_threshold": 0.6,
+        "nms_mode": "other",
+        "nms_in_model": True,
+        "class_map_version": "other",
+    }
+    mutated = replace(
+        command, execution_contract=replace(command.execution_contract, **{field: values[field]})
+    )
+    with pytest.raises(PublishConflict):
+        service.publish(mutated)
+
+
 def test_stale_or_wrong_tenant_claim_has_zero_effects(runtime):
     now = datetime(2026, 8, 25, 12, tzinfo=UTC)
     _org, _camera, _artifact, _task, claim = _running(runtime, now)
@@ -215,11 +259,15 @@ def test_episode_reuses_open_case_and_expiry_creates_a_new_case(runtime):
 def test_downstream_failure_rolls_back_every_effect(runtime, monkeypatch):
     now = datetime(2026, 8, 25, 12, tzinfo=UTC)
     _org, _camera, _artifact, task, claim = _running(runtime, now)
+
     def fail(*_args, **_kwargs):
         raise RuntimeError("injected")
+
     monkeypatch.setattr(SqlAlchemyAuditSessionRepository, "append_under_head_lock", fail)
     with pytest.raises(RuntimeError, match="injected"):
-        _service(runtime).publish(_command(claim, now, ({"defect_type": "scratch", "confidence": 0.91},)))
+        _service(runtime).publish(
+            _command(claim, now, ({"defect_type": "scratch", "confidence": 0.91},))
+        )
     with runtime() as session:
         assert session.scalar(select(func.count()).select_from(PublishedInferenceResultRow)) == 0
         assert session.scalar(select(func.count()).select_from(InspectionEventRow)) == 0
