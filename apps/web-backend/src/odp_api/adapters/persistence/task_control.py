@@ -27,6 +27,7 @@ from odp_api.ports.tasks import (
     AdmissionReservation,
     CameraAdmissionPort,
     StaleLease,
+    TaskExecutionPort,
 )
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
@@ -42,7 +43,7 @@ INFERENCE_REQUEST_EVENT = "vision.inference.requested.v1"
 EVENT_SCHEMA_VERSION = "v1"
 
 
-class SqlAlchemyTaskControlRepository(CameraAdmissionPort):
+class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
     """Persist admission facts with one serialized camera-state lock.
 
     Lock order for all admission operations is deliberately explicit:
@@ -340,7 +341,6 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort):
                         InferenceTaskRow.task_id == task_id,
                         InferenceTaskRow.organization_id == organization_id,
                     )
-                    .with_for_update()
                 )
                 if task is None:
                     session.commit()
@@ -548,19 +548,19 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort):
     def record_failure(self, claim: LeaseClaim, failure: object, now: datetime) -> None:
         with self._session_factory() as session:
             current = self._db_now(session)
-            task = session.scalar(
-                select(InferenceTaskRow)
-                .where(
-                    InferenceTaskRow.task_id == claim.task_id,
-                    InferenceTaskRow.organization_id == claim.organization_id,
-                )
-                .with_for_update()
-            )
             state = session.scalar(
                 select(CameraInferenceStateRow)
                 .where(
                     CameraInferenceStateRow.organization_id == claim.organization_id,
                     CameraInferenceStateRow.running_task_id == claim.task_id,
+                )
+                .with_for_update()
+            )
+            task = session.scalar(
+                select(InferenceTaskRow)
+                .where(
+                    InferenceTaskRow.task_id == claim.task_id,
+                    InferenceTaskRow.organization_id == claim.organization_id,
                 )
                 .with_for_update()
             )
