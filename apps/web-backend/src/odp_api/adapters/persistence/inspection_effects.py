@@ -1,9 +1,11 @@
-from datetime import UTC, timedelta
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from odp_schemas.events import InspectionAlert
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from odp_api.adapters.persistence.models import (
     AlertRow,
@@ -28,8 +30,14 @@ from odp_api.ports.tasks import StaleLease
 
 
 class SqlAlchemyInspectionEffects:
-    def __init__(self, session_factory):
+    def __init__(
+        self,
+        session_factory,
+        *,
+        clock: Callable[[Session], datetime] | None = None,
+    ):
         self._session_factory = session_factory
+        self._clock = clock
 
     def publish(self, command):
         c = command.claim
@@ -75,7 +83,7 @@ class SqlAlchemyInspectionEffects:
                     or attempt.worker_id != c.lease_owner
                 ):
                     raise StaleLease("attempt identity mismatch")
-                now = self._utc(s.scalar(select(func.now())))
+                now = self._db_now(s)
                 old = s.scalar(
                     select(PublishedInferenceResultRow)
                     .where(PublishedInferenceResultRow.task_id == task.task_id)
@@ -353,6 +361,11 @@ class SqlAlchemyInspectionEffects:
     @staticmethod
     def _utc(value):
         return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+    def _db_now(self, session: Session) -> datetime:
+        if self._clock is not None:
+            return self._utc(self._clock(session))
+        return self._utc(session.scalar(select(func.now())))
 
     @staticmethod
     def _alert_id(s, event_id):

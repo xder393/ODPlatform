@@ -85,7 +85,9 @@ class DeliveryHarness:
             1,
             self.now,
         )
-        self.effects = InspectionEffectService(SqlAlchemyInspectionEffects(self.sessions))
+        self.effects = InspectionEffectService(
+            SqlAlchemyInspectionEffects(self.sessions, clock=lambda _session: self.clock)
+        )
         self.recovery = RecoveryService(self.repository, SystemRecoveryScope("property-test"))
         self.claim = None
         self._stale_publish_rejected = False
@@ -99,6 +101,16 @@ class DeliveryHarness:
         renewed_claim = self.repository.renew(initial_claim, self.clock)
         assert renewed_claim is not None
         self.clock += timedelta(seconds=LEASE_SECONDS + 1)
+        try:
+            self.effects.publish(_publish_command(renewed_claim, self.clock))
+        except StaleLease:
+            self._stale_publish_rejected = True
+        else:
+            raise AssertionError("expired lease must reject stale completion")
+        expired = self.recovery.run_once(self.clock)
+        assert expired.leases_expired == 1
+        released = self.recovery.run_once(self.clock)
+        assert released.retries_released == 1
         replacement_claim = self.repository.claim(
             self.task.task_id, self.organization_id, "property-worker-b", self.clock
         )
@@ -106,7 +118,7 @@ class DeliveryHarness:
         try:
             self.effects.publish(_publish_command(renewed_claim, self.clock))
         except StaleLease:
-            self._stale_publish_rejected = True
+            pass
         else:
             raise AssertionError("reclaimed lease must reject stale completion")
         self.claim = replacement_claim
@@ -188,6 +200,21 @@ def test_expired_claim_cannot_publish_after_reclaim_and_duplicate_delivery(harne
     assert harness.published_result_count() == 1
     assert harness.inspection_event_count() == 1
     assert harness.stale_publish_was_rejected()
+
+
+def test_finalize_uses_controlled_database_time_before_recovery(harness):
+    harness.reset()
+    claim = harness.repository.claim(
+        harness.task.task_id, harness.organization_id, "property-worker-a", harness.clock
+    )
+    assert claim is not None
+    harness.clock += timedelta(seconds=LEASE_SECONDS + 1)
+
+    with pytest.raises(StaleLease, match="stale lease"):
+        harness.effects.publish(_publish_command(claim, harness.clock))
+
+    assert harness.published_result_count() == 0
+    assert harness.inspection_event_count() == 0
 
 
 def _upgrade_sqlite(database_path: Path) -> None:
