@@ -5,22 +5,27 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+from odp_api.adapters.persistence.models import AuditChainHeadRow, AuditLogRow
 from odp_api.adapters.persistence.task_models import (
     CameraInferenceStateRow,
     FrameArtifactRow,
     InferenceAttemptRow,
     InferenceTaskRow,
     InspectionSessionRow,
+    MessageQuarantineRow,
     OutboxEventRow,
     PublishedInferenceResultRow,
 )
+from odp_api.modules.audit.models import AuditCommand, audit_log_from_command
 from odp_api.modules.tasks.commands import LeaseClaim, PublishInferenceCommand
 from odp_api.modules.tasks.models import (
     ArtifactLifecycle,
     ArtifactState,
+    FailureKind,
     TaskRecord,
     TaskStatus,
 )
+from odp_api.modules.tasks.recovery import QuarantineResult, ReplayResult
 from odp_api.ports.tasks import (
     AdmissionRejected,
     AdmissionRequest,
@@ -42,6 +47,8 @@ INFERENCE_TIMEOUT_SECONDS = 10
 TASK_TYPE = "vision_inference"
 INFERENCE_REQUEST_EVENT = "vision.inference.requested.v1"
 EVENT_SCHEMA_VERSION = "v1"
+REDISPATCH_AFTER_SECONDS = 10
+MAX_QUARANTINE_PAYLOAD_BYTES = 65536
 
 
 class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
@@ -193,8 +200,7 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                 artifact.updated_at = current_time
 
                 task = session.scalar(
-                    select(InferenceTaskRow)
-                    .where(
+                    select(InferenceTaskRow).where(
                         InferenceTaskRow.organization_id == state.organization_id,
                         InferenceTaskRow.camera_id == state.camera_id,
                         InferenceTaskRow.artifact_id == artifact.artifact_id,
@@ -337,8 +343,7 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
             try:
                 current = self._db_now(session)
                 task = session.scalar(
-                    select(InferenceTaskRow)
-                    .where(
+                    select(InferenceTaskRow).where(
                         InferenceTaskRow.task_id == task_id,
                         InferenceTaskRow.organization_id == organization_id,
                     )
@@ -363,30 +368,40 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                 live = state.running_task_id is not None
                 if live:
                     running = session.scalar(
-                        select(InferenceTaskRow).where(
+                        select(InferenceTaskRow)
+                        .where(
                             InferenceTaskRow.task_id == state.running_task_id,
                             InferenceTaskRow.organization_id == organization_id,
-                        ).with_for_update()
+                        )
+                        .with_for_update()
                     )
                     expired = running is not None and (
                         running.lease_expires_at is None
                         or _as_utc(running.lease_expires_at) <= current
                     )
                     if expired:
-                        old_attempt = session.scalar(select(InferenceAttemptRow).where(
-                            InferenceAttemptRow.task_id == running.task_id,
-                            InferenceAttemptRow.organization_id == organization_id,
-                            InferenceAttemptRow.attempt_no == running.attempt_count,
-                            InferenceAttemptRow.fence_token == running.fence_token,
-                        ).with_for_update())
+                        old_attempt = session.scalar(
+                            select(InferenceAttemptRow)
+                            .where(
+                                InferenceAttemptRow.task_id == running.task_id,
+                                InferenceAttemptRow.organization_id == organization_id,
+                                InferenceAttemptRow.attempt_no == running.attempt_count,
+                                InferenceAttemptRow.fence_token == running.fence_token,
+                            )
+                            .with_for_update()
+                        )
                         if old_attempt is not None and old_attempt.finished_at is None:
                             old_attempt.finished_at = current
                             old_attempt.outcome = "LEASE_EXPIRED"
                         if running.task_id != task_id:
-                            running.status = (TaskStatus.DEAD_LETTER.value
+                            running.status = (
+                                TaskStatus.DEAD_LETTER.value
                                 if running.attempt_count >= MAX_ATTEMPTS
-                                else TaskStatus.RETRY_WAIT.value)
-                            running.next_attempt_at = None if running.status == TaskStatus.DEAD_LETTER.value else current
+                                else TaskStatus.RETRY_WAIT.value
+                            )
+                            running.next_attempt_at = (
+                                None if running.status == TaskStatus.DEAD_LETTER.value else current
+                            )
                             running.lease_owner = None
                             running.lease_expires_at = None
                             running.updated_at = current
@@ -640,11 +655,22 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
             if attempt is None:
                 session.rollback()
                 raise StaleLease("attempt is missing")
+            try:
+                failure_kind = FailureKind(failure)
+            except ValueError:
+                failure_kind = FailureKind.RETRYABLE_INFRA
             detail = str(failure)
             attempt.finished_at = current
             attempt.outcome = "FAILED"
             attempt.error_detail = detail
-            task.status = TaskStatus.RETRY_WAIT.value
+            retryable = (
+                failure_kind is FailureKind.RETRYABLE_INFRA and task.attempt_count < MAX_ATTEMPTS
+            )
+            task.status = TaskStatus.RETRY_WAIT.value if retryable else TaskStatus.DEAD_LETTER.value
+            task.next_attempt_at = (
+                current + timedelta(seconds=task.attempt_count) if retryable else None
+            )
+            task.error_code = failure_kind.value
             task.error_detail = detail
             task.lease_owner = None
             task.lease_expires_at = None
@@ -653,6 +679,275 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
             state.version += 1
             state.updated_at = current
             session.commit()
+
+    def release_due_retries(self, now: datetime) -> int:
+        """Turn due retry waits into a fresh durable dispatch using database time."""
+        with self._session_factory() as session:
+            try:
+                current = self._db_now(session)
+                rows = session.scalars(
+                    select(InferenceTaskRow)
+                    .where(
+                        InferenceTaskRow.status == TaskStatus.RETRY_WAIT.value,
+                        InferenceTaskRow.next_attempt_at <= current,
+                    )
+                    .with_for_update(skip_locked=True)
+                ).all()
+                for task in rows:
+                    task.status = TaskStatus.READY.value
+                    task.next_attempt_at = None
+                    self._add_dispatch_outbox(session, task, current)
+                session.commit()
+                return len(rows)
+            except BaseException:
+                session.rollback()
+                raise
+
+    def redispatch_stale_ready(self, now: datetime, organization_id: UUID | None = None) -> int:
+        """System-only cross-tenant scan; an optional tenant scopes diagnostics safely."""
+        with self._session_factory() as session:
+            try:
+                current = self._db_now(session)
+                query = select(InferenceTaskRow).where(
+                    InferenceTaskRow.status == TaskStatus.READY.value,
+                    InferenceTaskRow.last_dispatched_at.is_not(None),
+                    InferenceTaskRow.last_dispatched_at
+                    <= current - timedelta(seconds=REDISPATCH_AFTER_SECONDS),
+                )
+                if organization_id is not None:
+                    query = query.where(InferenceTaskRow.organization_id == organization_id)
+                rows = session.scalars(query.with_for_update(skip_locked=True)).all()
+                for task in rows:
+                    self._add_dispatch_outbox(session, task, current)
+                session.commit()
+                return len(rows)
+            except BaseException:
+                session.rollback()
+                raise
+
+    def expire_leases(self, now: datetime, organization_id: UUID | None = None) -> int:
+        with self._session_factory() as session:
+            try:
+                current = self._db_now(session)
+                query = select(InferenceTaskRow).where(
+                    InferenceTaskRow.status == TaskStatus.RUNNING.value,
+                    InferenceTaskRow.lease_expires_at <= current,
+                )
+                if organization_id is not None:
+                    query = query.where(InferenceTaskRow.organization_id == organization_id)
+                tasks = session.scalars(query.with_for_update(skip_locked=True)).all()
+                for task in tasks:
+                    state = self._lock_camera_state(session, task.organization_id, task.camera_id)
+                    attempt = session.scalar(
+                        select(InferenceAttemptRow)
+                        .where(
+                            InferenceAttemptRow.task_id == task.task_id,
+                            InferenceAttemptRow.organization_id == task.organization_id,
+                            InferenceAttemptRow.attempt_no == task.attempt_count,
+                            InferenceAttemptRow.fence_token == task.fence_token,
+                        )
+                        .with_for_update()
+                    )
+                    if attempt is not None and attempt.finished_at is None:
+                        attempt.finished_at, attempt.outcome, attempt.error_code = (
+                            current,
+                            "LEASE_EXPIRED",
+                            "LEASE_EXPIRED",
+                        )
+                    task.status = (
+                        TaskStatus.DEAD_LETTER.value
+                        if task.attempt_count >= MAX_ATTEMPTS
+                        else TaskStatus.RETRY_WAIT.value
+                    )
+                    task.next_attempt_at = (
+                        None if task.status == TaskStatus.DEAD_LETTER.value else current
+                    )
+                    task.lease_owner = task.lease_expires_at = None
+                    task.error_code, task.error_detail, task.updated_at = (
+                        "LEASE_EXPIRED",
+                        "worker lease expired",
+                        current,
+                    )
+                    if state.running_task_id == task.task_id:
+                        state.running_task_id = None
+                        state.version += 1
+                        state.updated_at = current
+                session.commit()
+                return len(tasks)
+            except BaseException:
+                session.rollback()
+                raise
+
+    def quarantine_message(
+        self,
+        stream: str,
+        message_id: str,
+        event_id: UUID,
+        event_type: str,
+        schema_version: str,
+        raw_payload: bytes,
+        task_id: UUID,
+        organization_id: UUID,
+        now: datetime,
+    ) -> QuarantineResult:
+        with self._session_factory() as session:
+            try:
+                current = self._db_now(session)
+                task = session.scalar(
+                    select(InferenceTaskRow)
+                    .where(
+                        InferenceTaskRow.task_id == task_id,
+                        InferenceTaskRow.organization_id == organization_id,
+                    )
+                    .with_for_update()
+                )
+                if task is None:
+                    raise AdmissionRejected("TASK_NOT_FOUND")
+                quarantine_id = uuid4()
+                session.add(
+                    MessageQuarantineRow(
+                        quarantine_id=quarantine_id,
+                        stream_name=stream,
+                        message_id=message_id,
+                        event_id=event_id,
+                        event_type=event_type,
+                        schema_version=schema_version,
+                        raw_payload=raw_payload[:MAX_QUARANTINE_PAYLOAD_BYTES],
+                        error="UNSUPPORTED_SCHEMA",
+                        task_id=task_id,
+                        organization_id=organization_id,
+                        status="QUARANTINED",
+                        quarantined_at=current,
+                        replayed_at=None,
+                        created_at=current,
+                        updated_at=current,
+                    )
+                )
+                task.status, task.error_code, task.error_detail, task.updated_at = (
+                    TaskStatus.BLOCKED_COMPATIBILITY.value,
+                    "UNSUPPORTED_SCHEMA",
+                    "message quarantined",
+                    current,
+                )
+                session.commit()
+                return QuarantineResult(quarantine_id, ack_after_commit=True)
+            except BaseException:
+                session.rollback()
+                raise
+
+    def replay_compatibility(
+        self, task_id: UUID, organization_id: UUID, now: datetime
+    ) -> ReplayResult:
+        with self._session_factory() as session:
+            try:
+                current = self._db_now(session)
+                task = session.scalar(
+                    select(InferenceTaskRow)
+                    .where(
+                        InferenceTaskRow.task_id == task_id,
+                        InferenceTaskRow.organization_id == organization_id,
+                    )
+                    .with_for_update()
+                )
+                if task is None or task.status != TaskStatus.BLOCKED_COMPATIBILITY.value:
+                    raise AdmissionRejected("TASK_NOT_BLOCKED_COMPATIBILITY")
+                task.status, task.error_code, task.error_detail = TaskStatus.READY.value, None, None
+                outbox_id = self._add_dispatch_outbox(session, task, current)
+                quarantine = session.scalar(
+                    select(MessageQuarantineRow)
+                    .where(
+                        MessageQuarantineRow.task_id == task_id,
+                        MessageQuarantineRow.organization_id == organization_id,
+                    )
+                    .order_by(MessageQuarantineRow.created_at.desc())
+                    .with_for_update()
+                )
+                if quarantine is not None:
+                    quarantine.status, quarantine.replayed_at, quarantine.updated_at = (
+                        "REPLAYED",
+                        current,
+                        current,
+                    )
+                command = AuditCommand(
+                    organization_id,
+                    "inference_task",
+                    task_id,
+                    "COMPATIBILITY_REPLAYED",
+                    "created a new dispatch after compatibility unblock",
+                    None,
+                    current,
+                    None,
+                    None,
+                )
+                self._append_replay_audit(session, command)
+                session.commit()
+                return ReplayResult(True, task.dispatch_seq, outbox_id)
+            except BaseException:
+                session.rollback()
+                raise
+
+    @staticmethod
+    def _add_dispatch_outbox(session: Session, task: InferenceTaskRow, current: datetime) -> UUID:
+        task.dispatch_seq += 1
+        task.last_dispatched_at, task.updated_at = current, current
+        outbox_id = uuid4()
+        session.add(
+            OutboxEventRow(
+                outbox_id=outbox_id,
+                organization_id=task.organization_id,
+                aggregate_type="inference_task",
+                aggregate_id=task.task_id,
+                task_id=task.task_id,
+                dispatch_seq=task.dispatch_seq,
+                event_type=INFERENCE_REQUEST_EVENT,
+                schema_version=EVENT_SCHEMA_VERSION,
+                payload={"task_id": str(task.task_id), "dispatch_seq": task.dispatch_seq},
+                available_at=current,
+                claim_owner=None,
+                claim_expires_at=None,
+                publish_attempts=0,
+                published_at=None,
+                last_error=None,
+                created_at=current,
+                updated_at=current,
+            )
+        )
+        return outbox_id
+
+    @staticmethod
+    def _append_replay_audit(session: Session, command: AuditCommand) -> None:
+        head = session.scalar(
+            select(AuditChainHeadRow)
+            .where(AuditChainHeadRow.organization_id == command.organization_id)
+            .with_for_update()
+        )
+        if head is None:
+            head = AuditChainHeadRow(
+                organization_id=command.organization_id, last_sequence=0, head_hash="0" * 64
+            )
+            session.add(head)
+            session.flush()
+        entry = audit_log_from_command(
+            command, sequence=head.last_sequence + 1, previous_hash=head.head_hash
+        )
+        session.add(
+            AuditLogRow(
+                audit_id=entry.audit_id,
+                organization_id=entry.organization_id,
+                sequence=entry.sequence,
+                resource_type=entry.resource_type,
+                resource_id=entry.resource_id,
+                action=entry.action,
+                change_summary=entry.change_summary,
+                actor_id=entry.actor_id,
+                occurred_at=entry.occurred_at,
+                correlation_id=entry.correlation_id,
+                request_ip=entry.request_ip,
+                previous_hash=entry.previous_hash,
+                entry_hash=entry.entry_hash,
+            )
+        )
+        head.last_sequence, head.head_hash = entry.sequence, entry.entry_hash
 
     @staticmethod
     def _lock_camera_state(
