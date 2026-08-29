@@ -21,12 +21,12 @@ from odp_api.modules.audit.models import AuditCommand, audit_log_from_command
 from odp_api.modules.inspection.effects import PublishConflict, PublishedEffect
 from odp_api.modules.tasks.models import TaskStatus
 from odp_api.ports.tasks import StaleLease
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 
 class SqlAlchemyInspectionEffects:
-    def __init__(self, session_factory, failure_hook=None):
-        self._session_factory, self._failure_hook = session_factory, failure_hook
+    def __init__(self, session_factory):
+        self._session_factory = session_factory
 
     def publish(self, command):
         c = command.claim
@@ -36,7 +36,6 @@ class SqlAlchemyInspectionEffects:
                 task = s.scalar(
                     select(InferenceTaskRow)
                     .where(InferenceTaskRow.task_id == c.task_id)
-                    .with_for_update()
                 )
                 if task is None or task.organization_id != c.organization_id:
                     raise StaleLease("tenant mismatch")
@@ -45,6 +44,9 @@ class SqlAlchemyInspectionEffects:
                     (c.organization_id, task.camera_id),
                     with_for_update=True,
                 )
+                if state is None:
+                    raise StaleLease("camera anchor missing")
+                task = s.scalar(select(InferenceTaskRow).where(InferenceTaskRow.task_id == c.task_id, InferenceTaskRow.organization_id == c.organization_id).with_for_update())
                 attempt = s.scalar(
                     select(InferenceAttemptRow)
                     .where(InferenceAttemptRow.attempt_id == c.attempt_id)
@@ -58,7 +60,9 @@ class SqlAlchemyInspectionEffects:
                     or attempt.organization_id != c.organization_id
                 ):
                     raise StaleLease("invalid attempt")
-                now = command.database_completed_at.astimezone(UTC)
+                if attempt.attempt_no != c.attempt_no or attempt.fence_token != c.fence_token or attempt.worker_id != c.lease_owner:
+                    raise StaleLease("attempt identity mismatch")
+                now = s.scalar(select(func.now())).replace(tzinfo=UTC)
                 old = s.scalar(
                     select(PublishedInferenceResultRow)
                     .where(PublishedInferenceResultRow.task_id == task.task_id)
@@ -230,8 +234,6 @@ class SqlAlchemyInspectionEffects:
                         audit, lambda sequence, previous_hash: audit_log_from_command(
                             audit, sequence=sequence, previous_hash=previous_hash))
                 s.flush()
-                if self._failure_hook:
-                    self._failure_hook(s)
                 s.commit()
                 return PublishedEffect(
                     result_id,
