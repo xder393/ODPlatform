@@ -214,3 +214,29 @@ def test_postgresql_expired_fence_cannot_publish_or_change_business_state():
             assert state.running_task_id == task_id
     finally:
         engine.dispose()
+
+
+def test_postgresql_expired_fence_is_reclaimed_with_new_attempt():
+    engine, sessions = create_engine_and_session(os.environ["ODP_POSTGRES_TEST_URL"])
+    try:
+        Base.metadata.create_all(engine)
+        organization_id, _, (task_id,) = _create_ready_tasks(sessions)
+        repository = SqlAlchemyTaskControlRepository(sessions)
+        old = repository.claim(task_id, organization_id, "worker-a", datetime.now(UTC))
+        assert old is not None
+        with sessions.begin() as session:
+            session.execute(update(InferenceTaskRow).where(
+                InferenceTaskRow.task_id == task_id,
+                InferenceTaskRow.organization_id == organization_id,
+            ).values(lease_expires_at=func.now() - text("interval '1 second'")))
+        new = repository.claim(task_id, organization_id, "worker-b", datetime.now(UTC))
+        assert new is not None
+        assert new.fence_token == old.fence_token + 1
+        with sessions() as session:
+            attempts = session.scalars(select(InferenceAttemptRow).where(
+                InferenceAttemptRow.task_id == task_id
+            ).order_by(InferenceAttemptRow.attempt_no)).all()
+            assert attempts[0].outcome == "LEASE_EXPIRED"
+            assert attempts[1].outcome is None
+    finally:
+        engine.dispose()

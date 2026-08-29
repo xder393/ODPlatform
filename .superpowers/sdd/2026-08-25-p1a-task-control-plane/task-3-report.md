@@ -51,3 +51,8 @@ Local exact output: `PYTHONPATH=apps/web-backend/src:packages/shared-schemas/src
    Exact result: `All checks passed!`. Both `git diff --check` and `git diff --check e8862bc..HEAD` produced no output.
 
 Self-review of `e8862bc..HEAD`: all fencing reads/updates are organization-scoped; claim and finalization lock the camera-state anchor before task/attempt locks; `claim`, `renew`, finalization, and failure transitions derive `current` via `_db_now(session)`/database `CURRENT_TIMESTAMP` rather than caller time; and `complete_no_defect` invokes `_finalize(..., publish_result=False)`, which guards the only PublishedInferenceResult write. No concerns found in the reviewed scope. The PostgreSQL-only paths remain unexecuted locally because the dedicated database URL is absent, as reflected in the expected skips.
+## Fix Round 1 evidence (2026-08-29)
+
+- Local fenced execution tests: 12 passed after reproducing 5 behavioral failures.
+- Implemented DB-time expired-anchor recovery, lease-expiry attempt closure, fenced reclaim, and strict attempt identity checks.
+- Added `ODP_POSTGRES_TEST_URL`-gated PostgreSQL expiry-then-reclaim coverage (skips locally when URL is absent).

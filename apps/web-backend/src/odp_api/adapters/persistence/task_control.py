@@ -36,6 +36,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 RESERVATION_TTL_SECONDS = 30
 LEASE_SECONDS = 20
+MAX_ATTEMPTS = 3
 RENEW_INTERVAL_SECONDS = 5
 INFERENCE_TIMEOUT_SECONDS = 10
 TASK_TYPE = "vision_inference"
@@ -360,6 +361,52 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                     session.commit()
                     return None
                 live = state.running_task_id is not None
+                if live:
+                    running = session.scalar(
+                        select(InferenceTaskRow).where(
+                            InferenceTaskRow.task_id == state.running_task_id,
+                            InferenceTaskRow.organization_id == organization_id,
+                        ).with_for_update()
+                    )
+                    expired = running is not None and (
+                        running.lease_expires_at is None
+                        or _as_utc(running.lease_expires_at) <= current
+                    )
+                    if expired:
+                        old_attempt = session.scalar(select(InferenceAttemptRow).where(
+                            InferenceAttemptRow.task_id == running.task_id,
+                            InferenceAttemptRow.organization_id == organization_id,
+                            InferenceAttemptRow.attempt_no == running.attempt_count,
+                            InferenceAttemptRow.fence_token == running.fence_token,
+                        ).with_for_update())
+                        if old_attempt is not None and old_attempt.finished_at is None:
+                            old_attempt.finished_at = current
+                            old_attempt.outcome = "LEASE_EXPIRED"
+                        if running.task_id != task_id:
+                            running.status = (TaskStatus.DEAD_LETTER.value
+                                if running.attempt_count >= MAX_ATTEMPTS
+                                else TaskStatus.RETRY_WAIT.value)
+                            running.next_attempt_at = None if running.status == TaskStatus.DEAD_LETTER.value else current
+                            running.lease_owner = None
+                            running.lease_expires_at = None
+                            running.updated_at = current
+                            state.running_task_id = None
+                        elif running.attempt_count >= MAX_ATTEMPTS:
+                            running.status = TaskStatus.DEAD_LETTER.value
+                            running.lease_owner = None
+                            running.lease_expires_at = None
+                            running.updated_at = current
+                            state.running_task_id = None
+                        else:
+                            running.status = TaskStatus.READY.value
+                            running.next_attempt_at = None
+                            running.lease_owner = None
+                            running.lease_expires_at = None
+                            running.updated_at = current
+                            state.running_task_id = None
+                        state.version += 1
+                        state.updated_at = current
+                        live = False
                 if (
                     live
                     and state.running_task_id == task_id
@@ -498,6 +545,9 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                     InferenceAttemptRow.attempt_id == claim.attempt_id,
                     InferenceAttemptRow.organization_id == claim.organization_id,
                     InferenceAttemptRow.task_id == claim.task_id,
+                    InferenceAttemptRow.attempt_no == claim.attempt_no,
+                    InferenceAttemptRow.fence_token == claim.fence_token,
+                    InferenceAttemptRow.worker_id == claim.lease_owner,
                 )
                 .with_for_update()
             )
@@ -581,6 +631,9 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                     InferenceAttemptRow.attempt_id == claim.attempt_id,
                     InferenceAttemptRow.organization_id == claim.organization_id,
                     InferenceAttemptRow.task_id == claim.task_id,
+                    InferenceAttemptRow.attempt_no == claim.attempt_no,
+                    InferenceAttemptRow.fence_token == claim.fence_token,
+                    InferenceAttemptRow.worker_id == claim.lease_owner,
                 )
                 .with_for_update()
             )
