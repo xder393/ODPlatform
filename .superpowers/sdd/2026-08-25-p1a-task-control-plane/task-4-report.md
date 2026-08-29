@@ -40,3 +40,13 @@ Initial result: `10 failed in 0.50s`. The failures were intentional and observab
 Added typed `RecoverySummary`, `QuarantineResult`, `ReplayResult`, and `RecoveryService`. The SQLAlchemy repository now uses database `CURRENT_TIMESTAMP` for recovery scheduling, locks candidate rows with `FOR UPDATE SKIP LOCKED`, increments `dispatch_seq` only while inserting a new unique dispatch Outbox, closes expired attempts and clears camera anchors, and supports tenant-guarded quarantine and compatibility replay.
 
 The real SQLite database tests cover: 1s/2s retry schedule and third-failure dead letter; immediate permanent failures; stale READY one-time redispatch; expired normal and cap attempts; 64KiB quarantine/tenant rollback/ack-after-commit; and BLOCKED-only replay with a new Outbox plus durable audit entry. Replay creates a new dispatch and does not reuse a Redis message. PostgreSQL-specific locking paths remain locally skipped solely because no `ODP_POSTGRES_TEST_URL` is configured.
+
+### Post-review exact verification (2026-08-29)
+
+Required full command: `uv run --project apps/web-backend --extra dev --with-editable packages/shared-schemas --with httpx2 pytest apps/web-backend/tests -q`.
+
+Exact result: `200 passed, 8 skipped in 12.86s`; pytest emitted no warnings. Because no warning appeared under the required `httpx2` environment, no warning-source rerun or regression fix was needed.
+
+Required focused command: `uv run --project apps/web-backend --extra dev --with-editable packages/shared-schemas --with httpx2 pytest apps/web-backend/tests/modules/tasks/test_recovery.py apps/web-backend/tests/persistence/test_task_recovery_transactions.py -q`.
+
+Exact result: `11 passed in 0.40s`. `git diff --check` produced no output before the report-only commit.
