@@ -64,3 +64,13 @@ Task 3 regression command: `uv run --project apps/web-backend --extra dev --with
 Exact full backend command: `uv run --project apps/web-backend --extra dev --with-editable packages/shared-schemas --with httpx2 pytest apps/web-backend/tests -q` → `207 passed, 9 skipped in 13.15s` with no warnings. Ruff on all changed source/tests reported `All checks passed!`; `git diff --check` produced no output.
 
 Self-review: quarantine now accepts only a tenant-matching READY task, except that a duplicate matching stream/message already durably quarantined for that task and tenant is idempotently ACKable. Non-READY and wrong-tenant requests create no row or state mutation. `SystemRecoveryScope` is required at both scheduler service and repository boundaries. Lease expiry locks camera anchors first using PostgreSQL `FOR UPDATE OF camera_inference_state SKIP LOCKED`, then locks/revalidates the tenant task and its attempt. The deferred audit-head race was not changed.
+
+### Fix Round 2 — duplicate quarantine revalidation (2026-08-29)
+
+New regression: `test_quarantine_duplicate_rejects_task_that_is_no_longer_compatibility_blocked`, parametrized for READY, RUNNING, SUCCEEDED, and DEAD_LETTER after a durable quarantine row already exists. The existing `test_quarantine_duplicate_message_for_blocked_task_is_idempotently_ackable` remains the positive current-BLOCKED control.
+
+RED command: `uv run --project apps/web-backend --extra dev --with-editable packages/shared-schemas --with httpx2 pytest apps/web-backend/tests/persistence/test_task_recovery_transactions.py -q` → `4 failed, 16 passed in 0.77s`; each failure was `Failed: DID NOT RAISE AdmissionRejected`, proving stale duplicates were ACKed incorrectly.
+
+GREEN focused Task 4 command: `uv run --project apps/web-backend --extra dev --with-editable packages/shared-schemas --with httpx2 pytest apps/web-backend/tests/modules/tasks/test_recovery.py apps/web-backend/tests/persistence/test_task_recovery_transactions.py apps/web-backend/tests/persistence/test_postgres_fencing.py -q` → `22 passed, 5 skipped in 0.63s`. Task 3 regression: `uv run --project apps/web-backend --extra dev --with-editable packages/shared-schemas --with httpx2 pytest apps/web-backend/tests/modules/tasks/test_fenced_execution.py -q` → `12 passed in 0.41s`. Ruff changed files reported `All checks passed!`; `git diff --check` produced no output.
+
+Implementation revalidates the tenant-scoped task under lock on the duplicate-row path and returns the existing ACKable quarantine result only when the task remains `BLOCKED_COMPATIBILITY`; all other duplicate states fail closed without writing another quarantine row or altering the task.

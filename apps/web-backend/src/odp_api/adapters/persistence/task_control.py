@@ -829,10 +829,23 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                     .with_for_update()
                 )
                 if existing is not None:
-                    if existing.task_id == task_id and existing.organization_id == organization_id:
+                    task = session.scalar(
+                        select(InferenceTaskRow)
+                        .where(
+                            InferenceTaskRow.task_id == task_id,
+                            InferenceTaskRow.organization_id == organization_id,
+                        )
+                        .with_for_update()
+                    )
+                    if (
+                        existing.task_id == task_id
+                        and existing.organization_id == organization_id
+                        and task is not None
+                        and task.status == TaskStatus.BLOCKED_COMPATIBILITY.value
+                    ):
                         session.commit()
                         return QuarantineResult(existing.quarantine_id, ack_after_commit=True)
-                    raise AdmissionRejected("QUARANTINE_MESSAGE_TENANT_MISMATCH")
+                    raise AdmissionRejected("QUARANTINE_MESSAGE_NOT_CURRENTLY_BLOCKED")
                 task = session.scalar(
                     select(InferenceTaskRow)
                     .where(

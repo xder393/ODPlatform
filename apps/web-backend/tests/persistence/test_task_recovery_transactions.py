@@ -298,6 +298,39 @@ def test_quarantine_duplicate_message_for_blocked_task_is_idempotently_ackable(r
         assert session.query(MessageQuarantineRow).count() == 1
 
 
+@pytest.mark.parametrize(
+    "status", [TaskStatus.READY, TaskStatus.RUNNING, TaskStatus.SUCCEEDED, TaskStatus.DEAD_LETTER]
+)
+def test_quarantine_duplicate_rejects_task_that_is_no_longer_compatibility_blocked(
+    repository, status
+):
+    tenant, _, task, now = _seed_task(repository)
+    repository.quarantine_message(
+        "inference.tasks", "stale-duplicate-0", uuid4(), "v9", "9", b"original", task, tenant, now
+    )
+    with repository._session_factory() as session:
+        row = session.get(InferenceTaskRow, task)
+        row.status = status.value
+        session.commit()
+
+    with pytest.raises(AdmissionRejected):
+        repository.quarantine_message(
+            "inference.tasks",
+            "stale-duplicate-0",
+            uuid4(),
+            "v9",
+            "9",
+            b"duplicate",
+            task,
+            tenant,
+            now,
+        )
+
+    with repository._session_factory() as session:
+        assert session.query(MessageQuarantineRow).count() == 1
+    assert _row(repository, task).status == status.value
+
+
 def test_recovery_repository_rejects_missing_or_invalid_system_scope(repository):
     tenant, _, task, now = _seed_task(repository)
     with pytest.raises(TypeError):
