@@ -144,21 +144,26 @@ def _seed_task(sessions):
     now = datetime.now(UTC)
     frame_sha = hashlib.sha256(b"recovery-frame").hexdigest()
     with sessions.begin() as session:
+        # These models intentionally omit ORM relationships, so make the
+        # parent insertion explicit for PostgreSQL's FK checks.
+        session.add(
+            InspectionSessionRow(
+                session_id=session_id,
+                organization_id=organization_id,
+                camera_id=camera_id,
+                line_id=uuid4(),
+                source_type="TEST",
+                sanitized_uri="fixture://recovery",
+                status="RUNNING",
+                idempotency_key=str(session_id),
+                started_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.flush()
         session.add_all(
             [
-                InspectionSessionRow(
-                    session_id=session_id,
-                    organization_id=organization_id,
-                    camera_id=camera_id,
-                    line_id=uuid4(),
-                    source_type="TEST",
-                    sanitized_uri="fixture://recovery",
-                    status="RUNNING",
-                    idempotency_key=str(session_id),
-                    started_at=now,
-                    created_at=now,
-                    updated_at=now,
-                ),
                 FrameArtifactRow(
                     artifact_id=artifact_id,
                     organization_id=organization_id,
@@ -267,7 +272,12 @@ async def test_worker_a_cancellation_and_worker_b_xautoclaim_recover_once():
         assert [item.message_id for item in recovered] == [
             message_id.decode() if isinstance(message_id, bytes) else str(message_id)
         ]
-        await worker_b.process(recovered[0])
+        result = await worker_b.process(recovered[0])
+        assert result.outcome == "SUCCEEDED"
+        assert result.acked is True
+        assert await redis.xpending_range(
+            STREAM_NAME, GROUP_NAME, min="-", max="+", count=10
+        ) == []
 
         with sessions() as session:
             assert session.scalar(
@@ -348,7 +358,12 @@ async def test_commit_before_ack_redelivery_is_terminal_duplicate_without_new_at
         )
         recovered = await consumer_b.claim_stale()
         assert recovered
-        await worker_b.process(recovered[0])
+        duplicate = await worker_b.process(recovered[0])
+        assert duplicate.outcome == "DUPLICATE"
+        assert duplicate.acked is True
+        assert await redis.xpending_range(
+            STREAM_NAME, GROUP_NAME, min="-", max="+", count=10
+        ) == []
 
         with sessions() as session:
             assert session.scalar(
@@ -357,10 +372,16 @@ async def test_commit_before_ack_redelivery_is_terminal_duplicate_without_new_at
                 )
             ) == 1
             assert session.scalar(
+                select(func.count()).select_from(DefectCaseRow).where(
+                    DefectCaseRow.organization_id == organization_id
+                )
+            ) == 1
+            assert session.scalar(
                 select(func.count()).select_from(InferenceAttemptRow).where(
                     InferenceAttemptRow.task_id == task_id
                 )
             ) == attempts_before
+            assert session.get(InferenceTaskRow, task_id).status == TaskStatus.SUCCEEDED.value
         await consumer_b.close()
         await consumer_a.close()
     finally:

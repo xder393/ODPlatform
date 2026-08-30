@@ -70,3 +70,46 @@ Result: `All checks passed!`. The staged diff also passes `git diff --cached
   suite, and the lockfile check remain for the parent integration checkpoint.
 - Production MinIO and ONNX adapters are intentionally not hard-coded here;
   artifact loading and inference remain injected ports for Tasks 4/6/7.
+
+## Integration checkpoint (2026-08-30)
+
+The recovery fixture initially produced a genuine PostgreSQL RED: Alembic head
+enforced `frame_artifacts.stream_session_id`, but the fixture added parent and
+child rows together while these models intentionally have no ORM relationships.
+The Task 2 fixture now flushes `inspection_sessions` before its child rows. The
+first isolated real run then passed both recovery tests in `41.03s`; after
+adding the final ACK/PEL/Case assertions, the same run passed `2 passed in
+41.00s` against PostgreSQL `0008_numeric_outbox_schema_version (head)` and
+Redis 7 on isolated local service ports.
+
+The two crash windows are now explicit: Worker A cancellation leaves a Redis
+PEL entry and no ACK, Worker B `XAUTOCLAIM`s it and produces exactly one Result
+and one Case across two fenced Attempts; the separate post-commit crash is
+redelivered as a terminal duplicate, ACKed, removes the PEL entry, preserves
+one Result/Case, and creates no new Attempt. Each test uses independent
+SQLAlchemy sessions through the repository/effect adapters, propagates the
+awaited process exception, and bounds recovery with the 20-second idle wait
+inside the documented 30-second budget.
+
+The bounded no-service run collected all Task 2 tests cleanly:
+
+```text
+8 passed, 2 skipped in 0.38s
+```
+
+The three existing P1A PostgreSQL files were temporarily edited while running
+the broad verification matrix: parent-FK flushes exposed a fixture ordering
+issue, the fencing command hash exposed a fixture mismatch, and camera
+admission needed a retry for its documented transient `ADMISSION_IN_PROGRESS`
+race. Those edits were verification-only and unrelated to Task 2, so they were
+reverted. The retained Task 2-only fixture change is the parent-first flush
+required for this recovery integration test to run against PostgreSQL.
+
+Changed-file PostgreSQL tests correctly collect and skip without CI services:
+`8 skipped in 0.27s`. Task 2 production, unit, and integration-test Ruff
+checks pass (`All checks passed!`).
+
+The parent integration checkpoint still needs to rerun the broad P1A/full
+backend matrix, expanded repository Ruff, and `uv lock --check` against a
+fresh CI-style database after this narrowed diff. No final Task 2 completion is
+claimed in this checkpoint.
