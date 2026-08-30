@@ -113,3 +113,58 @@ schema_version::integer`. Every PostgreSQL skip above is due to the absent
 deadlock path, READY-cap/count drift, tenant-chain bypass, public success API,
 alert-envelope/migration mismatch, or unrelated dependency churn. The two
 explicitly deferred schema items remain the only deferred findings.
+
+## Exceptional tenant-locator patch
+
+### Root cause and mutation caught
+
+The publication camera-lock preflight originally located `InferenceTaskRow` by
+`task_id` alone and only compared the requested organization in Python. The
+later locked lookup was tenant-scoped, so outward behavior was fail-closed, but
+the first repository lookup violated the binding tenant-locator rule. The
+regression captures the actual SQLAlchemy `before_cursor_execute` boundary for
+the first `SELECT ... FROM inference_tasks` and requires `organization_id` in
+its `WHERE` clause. It therefore fails if the production predicate is removed,
+without mocking the repository or inspecting source text.
+
+### Strict TDD evidence
+
+Before the production edit, the regression produced this genuine RED result:
+
+```text
+$ PYTHONPATH="$PWD/apps/web-backend/src:$PWD/packages/shared-schemas/src" \
+  uv run --directory apps/web-backend pytest \
+  tests/modules/inspection/test_effects.py::test_initial_task_locator_is_tenant_scoped_at_the_database_boundary -q
+
+1 failed in 0.41s
+AssertionError: assert ' where ' in 'select ... from inference_tasks where inference_tasks.task_id = ?'
+```
+
+The production change was limited to adding
+`InferenceTaskRow.organization_id == c.organization_id` to that initial
+locator. The focused inspection-effects suite then passed:
+
+```text
+29 passed in 1.07s
+```
+
+### Final verification after the exceptional patch
+
+```text
+expanded Ruff: All checks passed!
+property test: 3 passed in 6.55s
+P1A tasks + inspection + persistence: 114 passed, 11 skipped in 9.69s
+full backend: 246 passed, 11 skipped in 20.14s
+Alembic schema/startup/offline tests: 4 passed, 1 skipped in 0.77s
+uv lock --check: Resolved 51 packages in 3ms
+git diff --check: passed with no output
+```
+
+The lock remains FastAPI `0.141.1`, Starlette `1.6.0`, and Hypothesis
+`6.165.10`; no unrelated lock records changed. PostgreSQL-gated tests skipped
+only because `ODP_POSTGRES_TEST_URL` is absent. No test warnings were emitted.
+Final self-review of the complete wave confirms camera-first lock ordering,
+READY count/capacity synchronization, tenant-scoped publication and recovery
+guards, the composed-only success boundary, canonical alert/migration contract,
+and dependency/test validity. The two explicitly deferred schema items remain
+the only deferred findings.

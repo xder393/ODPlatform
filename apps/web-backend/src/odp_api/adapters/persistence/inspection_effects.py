@@ -116,7 +116,10 @@ class SqlAlchemyInspectionEffects:
             try:
                 # Camera is the serialization anchor, then artifact, task, attempt.
                 task = s.scalar(
-                    select(InferenceTaskRow).where(InferenceTaskRow.task_id == c.task_id)
+                    select(InferenceTaskRow).where(
+                        InferenceTaskRow.task_id == c.task_id,
+                        InferenceTaskRow.organization_id == c.organization_id,
+                    )
                 )
                 if task is None or task.organization_id != c.organization_id:
                     raise StaleLease("tenant mismatch")

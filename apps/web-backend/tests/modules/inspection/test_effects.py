@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 
 from odp_api.adapters.persistence.inspection_effects import SqlAlchemyInspectionEffects
 from odp_api.adapters.persistence.models import (
@@ -307,6 +307,31 @@ def test_stale_or_wrong_tenant_claim_has_zero_effects(runtime):
     with runtime() as session:
         assert session.scalar(select(func.count()).select_from(PublishedInferenceResultRow)) == 0
         assert session.scalar(select(func.count()).select_from(DefectCaseRow)) == 0
+
+
+def test_initial_task_locator_is_tenant_scoped_at_the_database_boundary(runtime):
+    now = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    _org, _camera, _artifact, _task, claim = _running(runtime, now)
+    statements = []
+    with runtime() as session:
+        engine = session.get_bind()
+
+    def capture_task_select(_conn, _cursor, statement, _parameters, _context, _executemany):
+        normalized = statement.lower()
+        if normalized.lstrip().startswith("select") and "inference_tasks" in normalized:
+            statements.append(normalized)
+
+    event.listen(engine, "before_cursor_execute", capture_task_select)
+    try:
+        with pytest.raises(StaleLease):
+            _service(runtime).publish(_command(replace(claim, organization_id=uuid4()), now))
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_task_select)
+
+    assert statements
+    statement = " ".join(statements[0].split())
+    assert " where " in statement
+    assert "organization_id" in statement.split(" where ", 1)[1]
 
 
 def test_publication_rejects_claim_artifact_not_owned_by_task(runtime):
