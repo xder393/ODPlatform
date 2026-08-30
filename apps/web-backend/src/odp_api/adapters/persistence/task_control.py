@@ -22,7 +22,15 @@ from odp_api.adapters.persistence.task_models import (
     OutboxEventRow,
 )
 from odp_api.modules.audit.models import AuditCommand, audit_log_from_command
-from odp_api.modules.tasks.commands import LeaseClaim
+from odp_api.modules.tasks.commands import (
+    DeliveryDecision,
+    DeliveryOutcome,
+    DeliveryRequest,
+    LeaseClaim,
+    QuarantineReason,
+    UnscopedQuarantineCommand,
+    WorkerDeliveryScope,
+)
 from odp_api.modules.tasks.models import (
     ArtifactLifecycle,
     ArtifactState,
@@ -347,6 +355,169 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
             )
             return _task_record(row) if row is not None else None
 
+    def accept_delivery(
+        self,
+        request: DeliveryRequest,
+        worker_id: str,
+        now: datetime,
+        scope: WorkerDeliveryScope,
+    ) -> DeliveryDecision:
+        """Atomically compare dispatch authority and claim or quarantine delivery."""
+
+        self._require_worker_delivery_scope(scope, worker_id)
+        with self._session_factory() as session:
+            try:
+                current = self._db_now(session)
+                candidate = session.scalar(
+                    select(InferenceTaskRow).where(
+                        InferenceTaskRow.task_id == request.task_id,
+                        InferenceTaskRow.organization_id == request.organization_id,
+                    )
+                )
+                if candidate is None:
+                    self._append_quarantine(
+                        session,
+                        stream_name=request.stream_name,
+                        message_id=request.message_id,
+                        event_id=request.event_id,
+                        event_type=request.event_type,
+                        schema_version=request.schema_version,
+                        raw_payload=request.raw_payload,
+                        reason=QuarantineReason.UNRESOLVED_TASK_REFERENCE,
+                        organization_id=request.organization_id,
+                        task_id=None,
+                        now=current,
+                    )
+                    session.commit()
+                    return DeliveryDecision(DeliveryOutcome.QUARANTINED)
+
+                state = self._lock_camera_state(
+                    session, request.organization_id, candidate.camera_id
+                )
+                task = session.scalar(
+                    select(InferenceTaskRow)
+                    .where(
+                        InferenceTaskRow.task_id == request.task_id,
+                        InferenceTaskRow.organization_id == request.organization_id,
+                    )
+                    .with_for_update()
+                )
+                if task is None:
+                    self._append_quarantine(
+                        session,
+                        stream_name=request.stream_name,
+                        message_id=request.message_id,
+                        event_id=request.event_id,
+                        event_type=request.event_type,
+                        schema_version=request.schema_version,
+                        raw_payload=request.raw_payload,
+                        reason=QuarantineReason.UNRESOLVED_TASK_REFERENCE,
+                        organization_id=request.organization_id,
+                        task_id=None,
+                        now=current,
+                    )
+                    session.commit()
+                    return DeliveryDecision(DeliveryOutcome.QUARANTINED)
+
+                if request.expected_dispatch_seq < task.dispatch_seq:
+                    session.commit()
+                    return DeliveryDecision(DeliveryOutcome.DUPLICATE)
+                if request.expected_dispatch_seq > task.dispatch_seq:
+                    self._append_quarantine(
+                        session,
+                        stream_name=request.stream_name,
+                        message_id=request.message_id,
+                        event_id=request.event_id,
+                        event_type=request.event_type,
+                        schema_version=request.schema_version,
+                        raw_payload=request.raw_payload,
+                        reason=QuarantineReason.FUTURE_DISPATCH_SEQUENCE,
+                        organization_id=request.organization_id,
+                        task_id=task.task_id,
+                        now=current,
+                    )
+                    session.commit()
+                    return DeliveryDecision(DeliveryOutcome.QUARANTINED)
+
+                if _is_terminal_status(task.status):
+                    session.commit()
+                    return DeliveryDecision(DeliveryOutcome.DUPLICATE)
+
+                if request.quarantine_reason is not None:
+                    if task.status != TaskStatus.READY.value:
+                        session.commit()
+                        return DeliveryDecision(DeliveryOutcome.PENDING)
+                    self._append_quarantine(
+                        session,
+                        stream_name=request.stream_name,
+                        message_id=request.message_id,
+                        event_id=request.event_id,
+                        event_type=request.event_type,
+                        schema_version=request.schema_version,
+                        raw_payload=request.raw_payload,
+                        reason=request.quarantine_reason,
+                        organization_id=request.organization_id,
+                        task_id=task.task_id,
+                        now=current,
+                    )
+                    task.status = TaskStatus.BLOCKED_COMPATIBILITY.value
+                    task.error_code = request.quarantine_reason.value
+                    task.error_detail = "message quarantined"
+                    task.updated_at = current
+                    self._sync_ready_count(session, state)
+                    state.version += 1
+                    state.updated_at = current
+                    session.commit()
+                    return DeliveryDecision(DeliveryOutcome.QUARANTINED)
+
+                claim = self._claim_locked(
+                    session,
+                    task=task,
+                    state=state,
+                    organization_id=request.organization_id,
+                    worker_id=worker_id,
+                    current=current,
+                )
+                session.commit()
+                if claim is None:
+                    return DeliveryDecision(DeliveryOutcome.PENDING)
+                return DeliveryDecision(DeliveryOutcome.CLAIMED, claim)
+            except BaseException:
+                session.rollback()
+                raise
+
+    def quarantine_unscoped(
+        self,
+        command: UnscopedQuarantineCommand,
+        now: datetime,
+        scope: WorkerDeliveryScope,
+    ) -> QuarantineResult:
+        """Durably consume poison bytes without granting cross-tenant task mutation."""
+
+        if not isinstance(scope, WorkerDeliveryScope):
+            raise TypeError("unscoped quarantine requires a WorkerDeliveryScope")
+        with self._session_factory() as session:
+            try:
+                current = self._db_now(session)
+                row = self._append_quarantine(
+                    session,
+                    stream_name=command.stream_name,
+                    message_id=command.message_id,
+                    event_id=command.event_id,
+                    event_type=command.event_type,
+                    schema_version=command.schema_version,
+                    raw_payload=command.raw_payload,
+                    reason=command.reason,
+                    organization_id=command.organization_id,
+                    task_id=None,
+                    now=current,
+                )
+                session.commit()
+                return QuarantineResult(row.quarantine_id, ack_after_commit=True)
+            except BaseException:
+                session.rollback()
+                raise
+
     def claim(
         self, task_id: UUID, organization_id: UUID, worker_id: str, now: datetime
     ) -> LeaseClaim | None:
@@ -484,6 +655,165 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
             except BaseException:
                 session.rollback()
                 raise
+
+    def _claim_locked(
+        self,
+        session: Session,
+        *,
+        task: InferenceTaskRow,
+        state: CameraInferenceStateRow,
+        organization_id: UUID,
+        worker_id: str,
+        current: datetime,
+    ) -> LeaseClaim | None:
+        """Claim an already camera/task-locked row for the Worker delivery API."""
+
+        self._sync_ready_count(session, state)
+        live = state.running_task_id is not None
+        if live:
+            running = session.scalar(
+                select(InferenceTaskRow)
+                .where(
+                    InferenceTaskRow.task_id == state.running_task_id,
+                    InferenceTaskRow.organization_id == organization_id,
+                )
+                .with_for_update()
+            )
+            expired = running is not None and (
+                running.lease_expires_at is None
+                or _as_utc(running.lease_expires_at) <= current
+            )
+            if expired:
+                old_attempt = session.scalar(
+                    select(InferenceAttemptRow)
+                    .where(
+                        InferenceAttemptRow.task_id == running.task_id,
+                        InferenceAttemptRow.organization_id == organization_id,
+                        InferenceAttemptRow.attempt_no == running.attempt_count,
+                        InferenceAttemptRow.fence_token == running.fence_token,
+                    )
+                    .with_for_update()
+                )
+                if old_attempt is not None and old_attempt.finished_at is None:
+                    old_attempt.finished_at = current
+                    old_attempt.outcome = "LEASE_EXPIRED"
+                if running.task_id != task.task_id:
+                    running.status = (
+                        TaskStatus.DEAD_LETTER.value
+                        if running.attempt_count >= MAX_ATTEMPTS
+                        else TaskStatus.RETRY_WAIT.value
+                    )
+                    running.next_attempt_at = (
+                        None if running.status == TaskStatus.DEAD_LETTER.value else current
+                    )
+                elif running.attempt_count >= MAX_ATTEMPTS:
+                    running.status = TaskStatus.DEAD_LETTER.value
+                else:
+                    running.status = TaskStatus.READY.value
+                    running.next_attempt_at = None
+                running.lease_owner = None
+                running.lease_expires_at = None
+                running.updated_at = current
+                state.running_task_id = None
+                state.version += 1
+                state.updated_at = current
+                live = False
+        if (
+            live
+            and state.running_task_id == task.task_id
+            and task.lease_expires_at
+            and _as_utc(task.lease_expires_at) > current
+        ):
+            return None
+        if live or task.status != TaskStatus.READY.value:
+            return None
+        task.status = TaskStatus.RUNNING.value
+        task.attempt_count += 1
+        task.fence_token += 1
+        task.lease_owner = worker_id
+        task.lease_expires_at = current + timedelta(seconds=LEASE_SECONDS)
+        task.updated_at = current
+        attempt = InferenceAttemptRow(
+            attempt_id=uuid4(),
+            task_id=task.task_id,
+            organization_id=organization_id,
+            worker_id=worker_id,
+            attempt_no=task.attempt_count,
+            fence_token=task.fence_token,
+            started_at=current,
+            finished_at=None,
+            outcome=None,
+            error_code=None,
+            error_detail=None,
+            duration_ms=None,
+        )
+        session.add(attempt)
+        state.running_task_id = task.task_id
+        self._sync_ready_count(session, state)
+        state.version += 1
+        state.updated_at = current
+        return LeaseClaim(
+            task.task_id,
+            organization_id,
+            task.artifact_id,
+            attempt.attempt_id,
+            task.attempt_count,
+            task.fence_token,
+            worker_id,
+            _as_utc(task.lease_expires_at),
+        )
+
+    def _append_quarantine(
+        self,
+        session: Session,
+        *,
+        stream_name: str,
+        message_id: str,
+        event_id: UUID,
+        event_type: str,
+        schema_version: str,
+        raw_payload: bytes,
+        reason: QuarantineReason,
+        organization_id: UUID | None,
+        task_id: UUID | None,
+        now: datetime,
+    ) -> MessageQuarantineRow:
+        existing = session.scalar(
+            select(MessageQuarantineRow)
+            .where(
+                MessageQuarantineRow.stream_name == _bounded_text(stream_name, 255),
+                MessageQuarantineRow.message_id == _bounded_text(message_id, 255),
+            )
+            .with_for_update()
+        )
+        if existing is not None:
+            return existing
+        row = MessageQuarantineRow(
+            quarantine_id=uuid4(),
+            stream_name=_bounded_text(stream_name, 255),
+            message_id=_bounded_text(message_id, 255),
+            event_id=event_id,
+            event_type=_bounded_text(event_type, 255),
+            schema_version=_bounded_text(schema_version, 32),
+            raw_payload=raw_payload[:MAX_QUARANTINE_PAYLOAD_BYTES],
+            error=_bounded_text(reason.value, 2048),
+            task_id=task_id,
+            organization_id=organization_id,
+            status="QUARANTINED",
+            quarantined_at=now,
+            replayed_at=None,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(row)
+        return row
+
+    @staticmethod
+    def _require_worker_delivery_scope(
+        scope: WorkerDeliveryScope, worker_id: str
+    ) -> None:
+        if not isinstance(scope, WorkerDeliveryScope) or scope.worker_id != worker_id:
+            raise TypeError("delivery processing requires the matching WorkerDeliveryScope")
 
     def renew(self, claim: LeaseClaim, now: datetime) -> LeaseClaim | None:
         with self._session_factory() as session:
@@ -1208,3 +1538,18 @@ def _as_utc(value: datetime) -> datetime:
 
 def _optional_utc(value: datetime | None) -> datetime | None:
     return _as_utc(value) if value is not None else None
+
+
+def _bounded_text(value: str, limit: int) -> str:
+    text_value = str(value)
+    return text_value[:limit]
+
+
+def _is_terminal_status(status: str) -> bool:
+    return status in {
+        TaskStatus.SUCCEEDED.value,
+        TaskStatus.DEAD_LETTER.value,
+        TaskStatus.BLOCKED_COMPATIBILITY.value,
+        TaskStatus.SKIPPED_STALE.value,
+        TaskStatus.SKIPPED_BACKPRESSURE.value,
+    }

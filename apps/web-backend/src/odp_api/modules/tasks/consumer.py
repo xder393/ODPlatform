@@ -273,7 +273,14 @@ def _messages_from_entries(
         if not isinstance(entry, Sequence) or len(entry) != 2:
             raise ValueError("Redis Stream entry must contain id and fields")
         message_id, raw_fields = entry
-        fields = _fields_from_response(raw_fields)
+        try:
+            fields = _fields_from_response(raw_fields)
+        except (TypeError, ValueError, UnicodeDecodeError):
+            # A Stream entry with a valid id is individually recoverable: keep
+            # its malformed fields as a bounded envelope so the Worker can
+            # durably quarantine and ACK that poison delivery.  Transport or
+            # database implementation errors are not caught here.
+            fields = {"envelope": _bounded_malformed_fields(raw_fields)}
         result.append(
             RedisInferenceMessage(
                 message_id=_decode(message_id),
@@ -295,6 +302,18 @@ def _fields_from_response(value: object) -> Mapping[str, object]:
         _decode(value[index]): value[index + 1]
         for index in range(0, len(value), 2)
     }
+
+
+def _bounded_malformed_fields(value: object) -> bytes:
+    """Retain bounded poison-message evidence without trusting its shape."""
+
+    if isinstance(value, bytes):
+        payload = value
+    elif isinstance(value, str):
+        payload = value.encode("utf-8", errors="surrogatepass")
+    else:
+        payload = repr(value).encode("utf-8", errors="replace")
+    return payload[:MAX_ENVELOPE_BYTES]
 
 
 def _decode(value: object) -> str:

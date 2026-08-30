@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import os
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -40,11 +41,12 @@ from odp_api.modules.tasks.consumer import (
     RedisInferenceConsumer,
 )
 from odp_api.modules.tasks.models import TaskStatus
-from odp_api.ports.tasks import StaleLease
 from odp_api.processes.inference_worker import (
     InferenceResult,
     InferenceWorker,
     LoadedArtifact,
+    ThreadedInspectionEffectAdapter,
+    ThreadedTaskControlAdapter,
 )
 
 pytestmark = [pytest.mark.anyio, pytest.mark.integration]
@@ -64,7 +66,7 @@ class _Loader:
         self.started = started
         self.release = release
 
-    async def load(self, task):
+    async def load(self, claim):
         if self.started is not None:
             self.started.set()
         if self.release is not None:
@@ -74,7 +76,7 @@ class _Loader:
 
 
 class _Inference:
-    async def infer(self, artifact, task):
+    async def infer(self, artifact, claim):
         return InferenceResult(
             execution_contract=InferenceExecutionContract(
                 "worker-test",
@@ -99,15 +101,8 @@ class _Inference:
                     "confidence": 0.9,
                 },
             ),
+            stage_durations=(("model", 0.001),),
         )
-
-
-class _Lookup:
-    def __init__(self, repository):
-        self.repository = repository
-
-    def get_task(self, task_id, organization_id):
-        return self.repository.get_task(task_id, organization_id)
 
 
 class _AckRecorder:
@@ -124,16 +119,15 @@ async def _run_worker(
     task_execution,
     *,
     effects,
-    lookup,
     loader=None,
 ):
+    task_control = ThreadedTaskControlAdapter(task_execution, consumer.consumer_name)
     return InferenceWorker(
         consumer,
-        task_execution,
-        effects,
-        task_repository=lookup,
-        artifact_loader=loader or _Loader(),
-        inference=_Inference(),
+        task_control,
+        ThreadedInspectionEffectAdapter(effects),
+        loader or _Loader(),
+        _Inference(),
         worker_id=consumer.consumer_name,
     )
 
@@ -230,13 +224,12 @@ async def test_worker_a_cancellation_and_worker_b_xautoclaim_recover_once():
     await redis.delete(STREAM_NAME)
     try:
         organization_id, _camera_id, task_id = _seed_task(sessions)
-        message_id = await redis.xadd(
+        await redis.xadd(
             STREAM_NAME,
             {"envelope": _envelope(task_id, organization_id).encode()},
         )
         execution = SqlAlchemyTaskControlRepository(sessions)
         effects = InspectionEffectService(SqlAlchemyInspectionEffects(sessions))
-        lookup = _Lookup(execution)
         consumer_a = RedisInferenceConsumer(redis, consumer_name=str(uuid4()))
         loader_a_started = asyncio.Event()
         loader_a_release = asyncio.Event()
@@ -245,18 +238,16 @@ async def test_worker_a_cancellation_and_worker_b_xautoclaim_recover_once():
             consumer_a,
             execution,
             effects=effects,
-            lookup=lookup,
             loader=_Loader(started=loader_a_started, release=loader_a_release),
         )
-        await consumer_a.start()
-        first = (await consumer_a.read_new())[0]
-        pending = asyncio.create_task(worker_a.process(first))
+        pending = asyncio.create_task(worker_a.run_once())
         await asyncio.wait_for(loader_a_started.wait(), timeout=1)
         pending.cancel()
         with pytest.raises(asyncio.CancelledError):
             await pending
         assert await redis.xpending_range(STREAM_NAME, GROUP_NAME, min="-", max="+", count=10)
 
+        recovery_started = time.monotonic()
         # XAUTOCLAIM's production threshold is 20 seconds.  This remains
         # below the documented 30-second recovery budget including DB fencing.
         await asyncio.sleep(20.2)
@@ -266,15 +257,9 @@ async def test_worker_a_cancellation_and_worker_b_xautoclaim_recover_once():
             consumer_b,
             execution,
             effects=effects,
-            lookup=lookup,
         )
-        recovered = await consumer_b.claim_stale()
-        assert [item.message_id for item in recovered] == [
-            message_id.decode() if isinstance(message_id, bytes) else str(message_id)
-        ]
-        result = await worker_b.process(recovered[0])
-        assert result.outcome == "SUCCEEDED"
-        assert result.acked is True
+        assert await worker_b.run_once() == 1
+        assert time.monotonic() - recovery_started < 30
         assert await redis.xpending_range(
             STREAM_NAME, GROUP_NAME, min="-", max="+", count=10
         ) == []
@@ -334,11 +319,8 @@ async def test_commit_before_ack_redelivery_is_terminal_duplicate_without_new_at
             consumer_a,
             execution,
             effects=CrashAfterCommit(),
-            lookup=_Lookup(execution),
         )
-        message = (await consumer_a.read_new())[0]
-        with pytest.raises(StaleLease):
-            await worker_a.process(message)
+        assert await worker_a.run_once() == 1
 
         with sessions() as session:
             attempts_before = session.scalar(
@@ -347,6 +329,7 @@ async def test_commit_before_ack_redelivery_is_terminal_duplicate_without_new_at
                 )
             )
             assert attempts_before == 1
+        recovery_started = time.monotonic()
         await asyncio.sleep(20.2)
         consumer_b = RedisInferenceConsumer(redis, consumer_name=str(uuid4()))
         worker_b = await _run_worker(
@@ -354,13 +337,9 @@ async def test_commit_before_ack_redelivery_is_terminal_duplicate_without_new_at
             consumer_b,
             execution,
             effects=real_effects,
-            lookup=_Lookup(execution),
         )
-        recovered = await consumer_b.claim_stale()
-        assert recovered
-        duplicate = await worker_b.process(recovered[0])
-        assert duplicate.outcome == "DUPLICATE"
-        assert duplicate.acked is True
+        assert await worker_b.run_once() == 1
+        assert time.monotonic() - recovery_started < 30
         assert await redis.xpending_range(
             STREAM_NAME, GROUP_NAME, min="-", max="+", count=10
         ) == []

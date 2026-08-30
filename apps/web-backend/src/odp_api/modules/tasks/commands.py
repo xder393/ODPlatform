@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from uuid import UUID
 
 
@@ -48,3 +49,85 @@ class PublishInferenceCommand:
     stage_durations: tuple[tuple[str, float], ...]
     correlation_id: UUID
     database_completed_at: datetime
+
+
+class DeliveryOutcome(StrEnum):
+    """Authoritative PostgreSQL disposition for one Redis delivery."""
+
+    CLAIMED = "CLAIMED"
+    PENDING = "PENDING"
+    DUPLICATE = "DUPLICATE"
+    QUARANTINED = "QUARANTINED"
+
+
+class QuarantineReason(StrEnum):
+    """Stable compatibility/integrity reasons persisted for poison deliveries."""
+
+    MALFORMED_ENVELOPE = "MALFORMED_ENVELOPE"
+    PAYLOAD_TOO_LARGE = "PAYLOAD_TOO_LARGE"
+    UNSUPPORTED_SCHEMA = "UNSUPPORTED_SCHEMA"
+    UNRESOLVED_TASK_REFERENCE = "UNRESOLVED_TASK_REFERENCE"
+    FUTURE_DISPATCH_SEQUENCE = "FUTURE_DISPATCH_SEQUENCE"
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryRequest:
+    """Bounded reference delivery checked atomically against task authority."""
+
+    stream_name: str
+    message_id: str
+    event_id: UUID
+    event_type: str
+    schema_version: str
+    raw_payload: bytes
+    organization_id: UUID
+    task_id: UUID
+    expected_dispatch_seq: int
+    quarantine_reason: QuarantineReason | None = None
+
+    def __post_init__(self) -> None:
+        if self.expected_dispatch_seq < 1:
+            raise ValueError("expected_dispatch_seq must be positive")
+        if len(self.raw_payload) > 65536:
+            raise ValueError("raw_payload exceeds the quarantine bound")
+
+
+@dataclass(frozen=True, slots=True)
+class UnscopedQuarantineCommand:
+    """A poison message whose task authority cannot safely be recovered."""
+
+    stream_name: str
+    message_id: str
+    event_id: UUID
+    event_type: str
+    schema_version: str
+    raw_payload: bytes
+    reason: QuarantineReason
+    organization_id: UUID | None = None
+
+    def __post_init__(self) -> None:
+        if len(self.raw_payload) > 65536:
+            raise ValueError("raw_payload exceeds the quarantine bound")
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryDecision:
+    """Database-committed delivery decision returned to the Worker."""
+
+    outcome: DeliveryOutcome
+    claim: LeaseClaim | None = None
+
+    def __post_init__(self) -> None:
+        if (self.outcome is DeliveryOutcome.CLAIMED) != (self.claim is not None):
+            raise ValueError("only CLAIMED decisions carry a lease claim")
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerDeliveryScope:
+    """Capability authorizing one Worker identity to quarantine unscoped bytes."""
+
+    worker_id: str
+
+    def __post_init__(self) -> None:
+        if not self.worker_id.strip():
+            raise ValueError("worker_id is required")

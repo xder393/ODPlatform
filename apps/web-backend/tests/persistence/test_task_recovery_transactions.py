@@ -17,6 +17,13 @@ from odp_api.adapters.persistence.task_models import (
     MessageQuarantineRow,
     OutboxEventRow,
 )
+from odp_api.modules.tasks.commands import (
+    DeliveryOutcome,
+    DeliveryRequest,
+    QuarantineReason,
+    UnscopedQuarantineCommand,
+    WorkerDeliveryScope,
+)
 from odp_api.modules.tasks.models import FailureKind, TaskStatus
 from odp_api.modules.tasks.recovery import SystemRecoveryScope
 from odp_api.ports.tasks import AdmissionRejected
@@ -308,6 +315,154 @@ def test_quarantine_caps_payload_blocks_tenant_task_and_only_acks_after_commit(r
             )
             == 65536
         )
+
+
+def _delivery_request(
+    tenant,
+    task,
+    *,
+    message_id="delivery-1",
+    dispatch_seq=1,
+    quarantine_reason=None,
+    event_type="vision.inference.requested.v1",
+    schema_version="1",
+    raw_payload=b"{}",
+):
+    return DeliveryRequest(
+        stream_name="odp:inference:tasks",
+        message_id=message_id,
+        event_id=uuid4(),
+        event_type=event_type,
+        schema_version=schema_version,
+        raw_payload=raw_payload,
+        organization_id=tenant,
+        task_id=task,
+        expected_dispatch_seq=dispatch_seq,
+        quarantine_reason=quarantine_reason,
+    )
+
+
+def test_worker_delivery_claim_requires_exact_dispatch_and_creates_one_attempt(repository):
+    tenant, _, task, now = _seed_task(repository)
+    decision = repository.accept_delivery(
+        _delivery_request(tenant, task),
+        "worker-a",
+        now,
+        WorkerDeliveryScope("worker-a"),
+    )
+
+    assert decision.outcome is DeliveryOutcome.CLAIMED
+    assert decision.claim is not None and decision.claim.attempt_no == 1
+    with repository._session_factory() as session:
+        assert session.query(InferenceAttemptRow).filter_by(task_id=task).count() == 1
+
+
+def test_future_dispatch_is_quarantined_without_mutating_current_ready_task(repository):
+    tenant, _, task, now = _seed_task(repository)
+    decision = repository.accept_delivery(
+        _delivery_request(tenant, task, dispatch_seq=2, message_id="future-1"),
+        "worker-a",
+        now,
+        WorkerDeliveryScope("worker-a"),
+    )
+
+    assert decision.outcome is DeliveryOutcome.QUARANTINED
+    row = _row(repository, task)
+    assert (row.status, row.dispatch_seq, row.attempt_count) == (
+        TaskStatus.READY.value,
+        1,
+        0,
+    )
+    with repository._session_factory() as session:
+        quarantine = session.scalar(
+            select(MessageQuarantineRow).where(MessageQuarantineRow.message_id == "future-1")
+        )
+        assert (quarantine.error, quarantine.task_id, quarantine.organization_id) == (
+            QuarantineReason.FUTURE_DISPATCH_SEQUENCE.value,
+            task,
+            tenant,
+        )
+
+
+def test_scoped_quarantine_persists_exact_reason_and_blocks_only_exact_dispatch(repository):
+    tenant, _, task, now = _seed_task(repository)
+    decision = repository.accept_delivery(
+        _delivery_request(
+            tenant,
+            task,
+            message_id="malformed-1",
+            quarantine_reason=QuarantineReason.MALFORMED_ENVELOPE,
+        ),
+        "worker-a",
+        now,
+        WorkerDeliveryScope("worker-a"),
+    )
+
+    assert decision.outcome is DeliveryOutcome.QUARANTINED
+    assert (_row(repository, task).status, _row(repository, task).error_code) == (
+        TaskStatus.BLOCKED_COMPATIBILITY.value,
+        QuarantineReason.MALFORMED_ENVELOPE.value,
+    )
+    with repository._session_factory() as session:
+        quarantine = session.scalar(
+            select(MessageQuarantineRow).where(MessageQuarantineRow.message_id == "malformed-1")
+        )
+        assert quarantine.error == QuarantineReason.MALFORMED_ENVELOPE.value
+
+
+def test_unknown_task_is_durably_unscoped_and_ackable_without_foreign_key(repository):
+    tenant, task, now = uuid4(), uuid4(), datetime.now(UTC)
+    decision = repository.accept_delivery(
+        _delivery_request(tenant, task, message_id="unknown-task-1"),
+        "worker-a",
+        now,
+        WorkerDeliveryScope("worker-a"),
+    )
+
+    assert decision.outcome is DeliveryOutcome.QUARANTINED
+    with repository._session_factory() as session:
+        quarantine = session.scalar(
+            select(MessageQuarantineRow).where(
+                MessageQuarantineRow.message_id == "unknown-task-1"
+            )
+        )
+        assert (quarantine.error, quarantine.task_id, quarantine.organization_id) == (
+            QuarantineReason.UNRESOLVED_TASK_REFERENCE.value,
+            None,
+            tenant,
+        )
+
+
+def test_unscoped_quarantine_bounds_all_persisted_fields_and_requires_capability(repository):
+    command = UnscopedQuarantineCommand(
+        stream_name="s" * 400,
+        message_id="m" * 400,
+        event_id=uuid4(),
+        event_type="e" * 400,
+        schema_version="v" * 80,
+        raw_payload=b"x" * 65536,
+        reason=QuarantineReason.PAYLOAD_TOO_LARGE,
+        organization_id=None,
+    )
+
+    with pytest.raises(TypeError):
+        repository.quarantine_unscoped(command, datetime.now(UTC), object())
+    result = repository.quarantine_unscoped(
+        command,
+        datetime.now(UTC),
+        WorkerDeliveryScope("worker-a"),
+    )
+
+    assert result.ack_after_commit is True
+    with repository._session_factory() as session:
+        quarantine = session.get(MessageQuarantineRow, result.quarantine_id)
+        assert (
+            len(quarantine.stream_name),
+            len(quarantine.message_id),
+            len(quarantine.event_type),
+            len(quarantine.schema_version),
+            len(quarantine.raw_payload),
+        ) == (255, 255, 255, 32, 65536)
 
 
 def test_quarantine_wrong_tenant_rolls_back_without_record(repository):

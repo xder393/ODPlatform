@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
 from uuid import uuid4
 
 import pytest
@@ -34,8 +34,11 @@ from odp_api.adapters.persistence.task_models import (
 from odp_api.db import create_engine_and_session
 from odp_api.modules.inspection.effects import InspectionEffectService
 from odp_api.modules.tasks.commands import (
+    DeliveryOutcome,
+    DeliveryRequest,
     InferenceExecutionContract,
     PublishInferenceCommand,
+    WorkerDeliveryScope,
 )
 from odp_api.modules.tasks.models import TaskStatus
 from odp_api.modules.tasks.recovery import SystemRecoveryScope
@@ -177,6 +180,72 @@ def test_postgresql_claim_serializes_workers_for_one_camera():
             ).all()
             assert sum(task.status == TaskStatus.RUNNING.value for task in tasks) == 1
             assert len(attempts) == 1
+    finally:
+        engine.dispose()
+
+
+def test_postgresql_delivery_claim_rechecks_dispatch_after_locked_redispatch_commit():
+    """A waiter must observe the dispatch generation protected by the task row lock."""
+
+    engine, sessions = create_engine_and_session(os.environ["ODP_POSTGRES_TEST_URL"])
+    try:
+        _migrate_head(os.environ["ODP_POSTGRES_TEST_URL"])
+        organization_id, _, (task_id,) = _create_ready_tasks(sessions)
+        redispatch_has_lock = Event()
+        permit_redispatch_commit = Event()
+
+        def commit_redispatch():
+            with sessions.begin() as session:
+                task = session.scalar(
+                    select(InferenceTaskRow)
+                    .where(InferenceTaskRow.task_id == task_id)
+                    .with_for_update()
+                )
+                task.dispatch_seq = 2
+                redispatch_has_lock.set()
+                assert permit_redispatch_commit.wait(timeout=5)
+
+        request = DeliveryRequest(
+            stream_name="odp:inference:tasks",
+            message_id="dispatch-race-1",
+            event_id=uuid4(),
+            event_type="vision.inference.requested.v1",
+            schema_version="1",
+            raw_payload=b"{}",
+            organization_id=organization_id,
+            task_id=task_id,
+            expected_dispatch_seq=1,
+        )
+        repository = SqlAlchemyTaskControlRepository(sessions)
+        scope = WorkerDeliveryScope("worker-race")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            redispatch = executor.submit(commit_redispatch)
+            assert redispatch_has_lock.wait(timeout=5)
+            claim = executor.submit(
+                repository.accept_delivery,
+                request,
+                "worker-race",
+                datetime.now(UTC),
+                scope,
+            )
+            permit_redispatch_commit.set()
+            redispatch.result(timeout=5)
+            decision = claim.result(timeout=5)
+
+        assert decision.outcome is DeliveryOutcome.DUPLICATE
+        assert decision.claim is None
+        with sessions() as session:
+            task = session.get(InferenceTaskRow, task_id)
+            assert (task.status, task.dispatch_seq, task.attempt_count) == (
+                TaskStatus.READY.value,
+                2,
+                0,
+            )
+            assert session.scalar(
+                select(func.count()).select_from(InferenceAttemptRow).where(
+                    InferenceAttemptRow.task_id == task_id
+                )
+            ) == 0
     finally:
         engine.dispose()
 
