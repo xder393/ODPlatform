@@ -205,3 +205,147 @@ database was discarded after one expected state-contamination failure
 case in `IN_REVIEW`. Resetting PostgreSQL and Redis and replaying the CI
 bootstrap/seed sequence produced the fresh `290 passed` result above; this was
 not a Task 2 or PostgreSQL fixture failure.
+
+## Fix round 1: delivery authority and Worker runtime (2026-08-30)
+
+Review base `bbd879e` had two Critical and six Important findings.  The
+implementation and regression tests are committed as `a03bce1`.
+
+### RED evidence
+
+The first Worker regression batch was run before the Worker and persistence
+changes:
+
+```bash
+uv run --project apps/web-backend --extra dev \
+  --with-editable packages/shared-schemas pytest \
+  apps/web-backend/tests/modules/tasks/test_inference_consumer.py -q
+```
+
+It collected 15 tests and reported `8 passed, 7 failed`.  The failures proved
+that the old Worker could claim a superseded dispatch generation, returned
+Pending for malformed/oversized messages with no recoverable tenant/task
+metadata, lost the typed quarantine reason, included Artifact loading in the
+model deadline, accepted an incomplete inference result as success, and let a
+single delivery exception terminate the batch.
+
+The PostgreSQL regression initially failed during collection with an import
+error for the not-yet-defined `DeliveryOutcome`; after the typed contract was
+introduced, its controlled row-lock race was load-bearing: dispatch 1 waits
+behind the redispatch transaction and observes committed dispatch 2 rather
+than creating an Attempt.  A separate malformed typed-result regression first
+failed by recording `RETRYABLE_INFRA` rather than `MODEL_CONFIGURATION`.
+
+Finally, the Redis structural poison regression was added before its transport
+fix and failed independently:
+
+```text
+ValueError: Redis Stream fields must contain key/value pairs
+1 failed in 0.13s
+```
+
+That exception occurred before the old response normalizer could produce a
+message for the Worker's per-message boundary, so the entry could neither be
+durably quarantined nor ACKed.
+
+### Implementation
+
+1. `DeliveryRequest.expected_dispatch_seq` is mandatory.  The new
+   `accept_delivery()` repository transaction obtains the camera anchor and
+   Task row lock, then compares dispatch generation and claims or quarantines
+   in the same PostgreSQL boundary.  A stale generation is an ACKable
+   duplicate with no Attempt; an exact generation may claim/quarantine; a
+   future generation is durably quarantined without changing Task state.
+2. `UnscopedQuarantineCommand`, `QuarantineReason`, and
+   `WorkerDeliveryScope` provide the constrained poison-message path.
+   Missing/unknown references use nullable Task fields; stream/message/event/
+   schema/error text is bounded and raw evidence is capped at 64 KiB.
+   Structurally malformed Redis field sequences with a recoverable message id
+   are normalized to bounded poison evidence so the Worker can quarantine and
+   ACK them.
+3. The old signature probing, method aliases, broad `TypeError` fallback, and
+   object-shape introspection were removed.  Database/implementation
+   `TypeError` now reaches the per-message isolation boundary and remains
+   Pending; it is not misclassified as an unknown Task or ACKed.
+4. Artifact loading and inference are explicit async typed ports.  Only the
+   inference call is inside the 10-second timeout; renewal begins before
+   Artifact loading and remains active through effect commit.  The threaded
+   composition adapters call repository/service methods in worker threads;
+   those methods create and close their own Sessions from session factories,
+   so no SQLAlchemy Session crosses a thread boundary.
+5. Success requires an `InferenceResult` with a complete
+   `InferenceExecutionContract`, valid hashes and shape/threshold fields,
+   typed detections, and finite stage durations.  Missing or malformed adapter
+   output is `MODEL_CONFIGURATION`; no `unknown` text, zero digest, or missing
+   frame hash is fabricated.
+6. The exact typed reason (`MALFORMED_ENVELOPE`, `PAYLOAD_TOO_LARGE`,
+   `UNSUPPORTED_SCHEMA`, `UNRESOLVED_TASK_REFERENCE`, or
+   `FUTURE_DISPATCH_SEQUENCE`) flows through Worker, command, repository, Task
+   error code where scoped, and quarantine row.
+7. The Worker now depends on four small explicit ports and one typed Redis
+   message.  It exposes no low-level success path; business success is written
+   only through `InspectionEffectService` via the effect port.
+8. Both real recovery tests now give Redis ownership and recovery to
+   `Worker.run_once()`.  They cover Worker A cancellation followed by Worker B
+   `XAUTOCLAIM`, and effect-commit-before-ACK redelivery as a terminal
+   duplicate.  Each recovery section has a monotonic `<30s` assertion and
+   verifies an empty PEL and exactly one Attempt/business result.
+
+### GREEN and final verification
+
+Focused deterministic suites:
+
+```text
+structural poison regression: 1 passed in 0.12s
+Worker unit suite:             17 passed in 0.23s
+Worker + persistence suite:   44 passed in 1.28s
+```
+
+The real isolated PostgreSQL/Redis gate used a disposable database and Redis
+test DB and ran `test_postgres_fencing.py` plus
+`test_redis_worker_recovery.py`: `8 passed in 45.45s`.  Six PostgreSQL tests
+include the controlled dispatch row-lock race; two Redis tests own recovery
+through `Worker.run_once()`.
+
+The Task 1/P1A envelope, Relay, effects, recovery, schema, and fencing
+selection on a separately migrated disposable database produced
+`86 passed in 2.25s`.  An earlier harness attempt intentionally remains noted:
+running the Outbox `create_all` fixture on a blank database before a fencing
+test that calls Alembic caused six `DuplicateTable: actors` failures because
+there was no Alembic version row.  Reproducing the CI order (Alembic first)
+removed all six without a code change.
+
+The final CI-shaped run used a fresh database, standalone pgvector migrations,
+Alembic head, bootstrapped/granted `odp_app`, demo/knowledge seeds, and real
+Redis:
+
+```text
+collected 305 items
+305 passed in 65.28s; skips: 0; warnings: 0
+```
+
+Post-run quality gates:
+
+```text
+expanded Ruff: All checks passed!
+uv lock --project apps/web-backend --check: Resolved 51 packages in 2ms
+git diff --check: passed
+```
+
+### Eight-finding self-review
+
+| Finding | Evidence/ruling |
+| --- | --- |
+| Atomic dispatch authority | One repository transaction and real PostgreSQL lock-race test; stale/future paths create zero Attempts. |
+| Durable unscoped poison handling | Nullable reference tests, bounded persisted fields/raw, capability rejection, structural poison quarantine + ACK. |
+| No swallowed `TypeError` | Dedicated two-message regression leaves the failing first delivery unacked, processes/ACKs the second, and creates no unscoped quarantine for the error. |
+| Async ports and deadline/renewal scope | Slow Artifact load exceeds the inference deadline yet succeeds while renewal runs; only `infer()` is timed. |
+| Complete output contract | Incomplete and malformed typed results record `MODEL_CONFIGURATION`; effect validation remains the only success boundary. |
+| Exact quarantine reason | Unit and persistence assertions cover unsupported, malformed, oversized, unknown, and future reasons end-to-end. |
+| No aliases/introspection/bypass | Source review finds no method-name probing or signature fallback; Worker uses only explicit typed ports and `InspectionEffectService` for success. |
+| Real Worker-owned recovery | Two real PG/Redis tests call `Worker.run_once()`, exercise A/B ownership transfer and commit-before-ACK redelivery, and enforce `<30s` recovery. |
+
+The two previously accepted minors remain deferred unchanged: consumer-name
+UUID/BUSYGROUP response-code hardening, and removing the unused Worker
+`MAX_ATTEMPTS` constant plus a Worker-level third-failure test.  They do not
+weaken any of the eight fixed review boundaries.
