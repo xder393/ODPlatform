@@ -205,3 +205,43 @@ ODP_REDIS_TEST_URL: redis://localhost:6379/0
 
 Thus the URL-gated PostgreSQL and Redis tests are configured to execute in CI;
 their real external-service execution remains unverified on this host.
+
+## Authoritative verification (repository-standard environment)
+
+The `.venv` full-suite result above is retained for audit history only; its
+single legacy Starlette warning is not authoritative.  The locked project
+environment was rerun with:
+
+```bash
+uv run --project apps/web-backend --extra dev \
+  --with-editable packages/shared-schemas pytest \
+  apps/web-backend/tests/modules/tasks/test_event_envelope.py \
+  apps/web-backend/tests/integration/test_outbox_relay.py -q
+```
+
+```text
+17 passed, 2 skipped in 0.34s; warnings: 0
+```
+
+```bash
+uv run --project apps/web-backend --extra dev \
+  --with-editable packages/shared-schemas pytest apps/web-backend/tests -q
+```
+
+```text
+263 passed, 13 skipped in 20.76s; warnings: 0
+```
+
+The same project environment ran expanded Ruff:
+
+```bash
+uv run --project apps/web-backend --extra dev \
+  --with-editable packages/shared-schemas ruff check \
+  packages/shared-schemas apps/web-backend/src apps/web-backend/tests
+```
+
+```text
+All checks passed!
+```
+
+`git status --short` and `git diff --check` were both clean after these runs.
