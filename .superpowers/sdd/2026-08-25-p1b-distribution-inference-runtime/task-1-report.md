@@ -1,0 +1,133 @@
+# P1B Task 1 report: versioned envelopes and generic Outbox Relay
+
+## Implementation
+
+Task 1 adds a JSON-only, versioned `EventEnvelope` to the shared schemas
+package.  Envelope timestamps are normalized to UTC and serialized as compact,
+deterministic RFC3339 JSON.  The inference event is validated as a
+reference-only message containing exactly `task_id` and `dispatch_seq`; its
+payload cannot carry an object key or other task data.  JSON primitives are
+strictly typed so bytes and process-local objects cannot be coerced onto the
+transport.
+
+The backend now has an `OutboxPublisherPort`, an allowlisted Redis Streams
+publisher, and an `OutboxRelay`.  The allowlist maps stable event types to
+`odp:inference:tasks` and `odp:inspection:alerts`; no destination names are
+used by the process layer.  Redis receives one canonical JSON `envelope`
+field through untrimmed `XADD`; the publisher does not send `MAXLEN`.  Alert
+payloads are revalidated against and reserialized through the P1A
+`InspectionAlertCreated` contract, retaining numeric schema version `1` and
+rejecting tenant mismatches or extra transport fields.
+
+The relay claims a bounded batch with an expiring lease, commits that claim,
+publishes outside the claim transaction, and marks publication through a
+second guarded transaction.  Publish errors increment attempts and apply
+capped exponential backoff without deleting the Outbox row.  A mark failure
+is allowed to escape so a Redis-success/DB-failure crash window is replayed
+after lease expiry.  Inference task authority is loaded with a tenant-matched
+SQLAlchemy join; a missing task remains durable and becomes a retryable
+construction failure.
+
+P1A did not expose a repository for these Outbox operations, so the smallest
+supporting adapter was added at
+`apps/web-backend/src/odp_api/adapters/persistence/outbox.py`.  Claims are
+cross-tenant only in the system-scoped relay selection; every state mutation
+matches `organization_id`, claim owner, unexpired lease, and unpublished
+state.  Production time decisions use database time; tests inject a clock.
+
+## Files
+
+- Modified `packages/shared-schemas/src/odp_schemas/events.py`.
+- Added `apps/web-backend/src/odp_api/ports/events.py`.
+- Added `apps/web-backend/src/odp_api/adapters/events/__init__.py` and
+  `redis_streams.py`.
+- Added `apps/web-backend/src/odp_api/processes/__init__.py` and
+  `outbox_relay.py`.
+- Added `apps/web-backend/src/odp_api/adapters/persistence/outbox.py` and
+  exported it from `adapters/persistence/__init__.py`.
+- Added `apps/web-backend/tests/modules/tasks/test_event_envelope.py`.
+- Added `apps/web-backend/tests/integration/test_outbox_relay.py`.
+
+## TDD evidence
+
+The initial envelope test run was genuinely red at collection because the
+new adapter import did not exist:
+
+```text
+ModuleNotFoundError: No module named 'odp_api.adapters.events'
+```
+
+The first Relay test run was likewise red at collection before its process
+package existed:
+
+```text
+ModuleNotFoundError: No module named 'odp_api.processes'
+```
+
+After the minimal classes existed, behavior-first tests were made stricter
+and failed before the corresponding guards were added:
+
+```text
+Failed: DID NOT RAISE <class 'pydantic_core._pydantic_core.ValidationError'>
+Failed: DID NOT RAISE <class 'ValueError'>
+```
+
+The first is the inference payload/object-key case; the second is the P1A
+alert payload contract case.  The final focused GREEN command is:
+
+```bash
+.venv/bin/python -m pytest \
+  apps/web-backend/tests/modules/tasks/test_event_envelope.py \
+  apps/web-backend/tests/integration/test_outbox_relay.py -q
+```
+
+```text
+collected 19 items
+17 passed, 2 skipped in 0.29s
+```
+
+The two skips are the explicit PostgreSQL competing-claim and real Redis
+retention tests; `ODP_POSTGRES_TEST_URL` and `ODP_REDIS_TEST_URL` are absent
+in this environment.
+
+## Verification at checkpoint
+
+```bash
+.venv/bin/ruff check \
+  packages/shared-schemas/src/odp_schemas/events.py \
+  apps/web-backend/src/odp_api/ports/events.py \
+  apps/web-backend/src/odp_api/adapters/events \
+  apps/web-backend/src/odp_api/adapters/persistence/__init__.py \
+  apps/web-backend/src/odp_api/adapters/persistence/outbox.py \
+  apps/web-backend/src/odp_api/processes \
+  apps/web-backend/tests/modules/tasks/test_event_envelope.py \
+  apps/web-backend/tests/integration/test_outbox_relay.py
+```
+
+```text
+All checks passed!
+```
+
+`git diff --check` passed with no output.  `uv lock --check` resolved all 28
+packages successfully; no dependency or lockfile was changed.
+
+Earlier in this worktree, before the final strict JSON/mapping polish, the
+P1A regression selection was `52 passed` and the full backend suite was
+`261 passed, 12 skipped`; those broad suites must be rerun after this
+checkpoint before claiming final completion.
+
+## Self-review and remaining concerns
+
+- No Outbox row is deleted on publish or serialization failure; retry state is
+  durable and capped backoff is based on the prior attempt count.
+- Tenant IDs are included in the authoritative task join and all completion
+  predicates.  Lease expiry and `SKIP LOCKED` are evaluated with database
+  time in production, so stale workers cannot mark reclaimed rows.
+- The Redis adapter emits only a string canonical envelope field, with no
+  binary/object values and no `MAXLEN`; retention remains a separate concern.
+- Publish-success/mark-failure duplicates are intentional and covered by the
+  focused crash-window test.  The guarded mark can safely return false for a
+  competing or stale claim.
+- No real PostgreSQL or Redis integration was available locally.  CI should
+  run the two URL-gated tests, then rerun the full backend and P1A regression
+  suites against the committed tree.

@@ -6,3 +6,6 @@ view consistent during the P1B adapter migration.
 """
 
 from . import task_models as task_models
+from .outbox import SqlAlchemyOutboxRepository
+
+__all__ = ["SqlAlchemyOutboxRepository", "task_models"]
