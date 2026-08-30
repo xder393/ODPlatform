@@ -93,18 +93,21 @@ def test_two_first_compatibility_replays_append_one_canonical_audit_chain():
                 uuid4(),
             )
             task_ids.append(task_id)
+            session.add(
+                InspectionSessionRow(
+                    session_id=stream_session_id,
+                    organization_id=organization_id,
+                    camera_id=camera_id,
+                    line_id=uuid4(),
+                    source_type="TEST",
+                    sanitized_uri="rtsp://test.invalid/camera",
+                    status="RUNNING",
+                    idempotency_key=str(stream_session_id),
+                )
+            )
+            session.flush()
             session.add_all(
                 [
-                    InspectionSessionRow(
-                        session_id=stream_session_id,
-                        organization_id=organization_id,
-                        camera_id=camera_id,
-                        line_id=uuid4(),
-                        source_type="TEST",
-                        sanitized_uri="rtsp://test.invalid/camera",
-                        status="RUNNING",
-                        idempotency_key=str(stream_session_id),
-                    ),
                     CameraInferenceStateRow(
                         organization_id=organization_id,
                         camera_id=camera_id,

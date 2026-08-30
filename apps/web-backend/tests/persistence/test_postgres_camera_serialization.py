@@ -3,7 +3,8 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Condition
+from time import monotonic
 from uuid import uuid4
 
 import pytest
@@ -76,19 +77,41 @@ def test_postgresql_camera_admission_serializes_eviction_and_keeps_two_ready_tas
         second_task = repository.complete_upload(second.reservation_id, organization_id, "frames/2.jpg", 10, now)
 
         barrier = Barrier(2)
+        upload_finished = Condition()
+        completed_uploads = 0
 
         def admit(frame_sequence: int):
+            nonlocal completed_uploads
             barrier.wait()
-            reservation = repository.reserve(
-                _request(organization_id, camera_id, session_id, frame_sequence), now
-            )
-            return repository.complete_upload(
-                reservation.reservation_id,
-                organization_id,
-                f"frames/{frame_sequence}.jpg",
-                10,
-                now,
-            )
+            deadline = monotonic() + 5
+            while True:
+                try:
+                    reservation = repository.reserve(
+                        _request(organization_id, camera_id, session_id, frame_sequence), now
+                    )
+                except AdmissionRejected as error:
+                    if error.reason != "ADMISSION_IN_PROGRESS":
+                        raise
+                    with upload_finished:
+                        while completed_uploads == 0:
+                            remaining = deadline - monotonic()
+                            if remaining <= 0 or not upload_finished.wait(timeout=remaining):
+                                raise TimeoutError(
+                                    "camera admission did not become available"
+                                ) from error
+                    continue
+
+                task = repository.complete_upload(
+                    reservation.reservation_id,
+                    organization_id,
+                    f"frames/{frame_sequence}.jpg",
+                    10,
+                    now,
+                )
+                with upload_finished:
+                    completed_uploads += 1
+                    upload_finished.notify_all()
+                return task
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             tasks = list(executor.map(admit, (3, 4)))

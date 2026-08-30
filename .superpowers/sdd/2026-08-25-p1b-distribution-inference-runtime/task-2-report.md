@@ -149,3 +149,59 @@ normalization. No production duplication/refactor was warranted.
 
 Task 2 remains `DONE_WITH_CONCERNS` until the pre-existing PostgreSQL fixture
 warnings are resolved or explicitly accepted by the parent integration gate.
+
+## PostgreSQL fixture correction and final verification (2026-08-30)
+
+The controller required the seven PostgreSQL failures to be reproduced and
+resolved because PostgreSQL is now provisioned in CI. On the clean checkpoint
+before these corrections, the exact command collected eight tests and
+reported `7 failed, 1 passed in 1.49s`:
+
+| Failure | Root cause | Minimal correction |
+| --- | --- | --- |
+| Camera admission race | The second concurrent `reserve()` legitimately returned the port's `ADMISSION_IN_PROGRESS` rejection while the first upload reservation was active; the test assumed both calls would return immediately. | Retry only that documented rejection after a `Condition` notification from the successful competing `complete_upload()`, with a five-second monotonic deadline. All other errors propagate; the two-READY/capacity and eviction assertions remain unchanged. |
+| Case compatibility replay | `InspectionSessionRow` and child artifact/task rows were added together despite intentionally absent ORM relationships, so the Alembic-head FK could flush a child first. | Flush each parent `InspectionSessionRow` before adding its children. |
+| Five fencing tests | The shared `_create_ready_tasks` fixture had the same parent/child flush ordering defect. | Flush the parent before adding camera state, artifacts, and tasks. |
+| Expired-fence publish assertion after the FK fix | `_command()` supplied `"a" * 64`, while the fixture's authoritative sequence-1 artifact hash is `f"{1:064x}"`; publish therefore stopped at a hash conflict before exercising stale-fence rejection. | Use the sequence-1 artifact hash in `_command()`. |
+
+The three corrected P1A files are only test fixtures/contracts:
+
+- `apps/web-backend/tests/persistence/test_postgres_camera_serialization.py`
+- `apps/web-backend/tests/persistence/test_postgres_case_deduplication.py`
+- `apps/web-backend/tests/persistence/test_postgres_fencing.py`
+
+The intermediate TDD runs were `6 passed, 1 failed` after the parent flushes
+(the remaining failure was the intentional hash mismatch), then `5 passed`
+for fencing after the hash correction. The complete corrected PG set passed
+`8 passed in 0.62s`; the camera test also passed in five consecutive runs.
+
+The final CI-shaped verification used a fresh disposable PostgreSQL database,
+Alembic `0008_numeric_outbox_schema_version (head)`, the bootstrapped/granted
+`odp_app` runtime role, and Redis 7:
+
+| Verification | Result |
+| --- | --- |
+| Task 2 unit + real Redis/PostgreSQL recovery | `10 passed in 41.14s` |
+| Task 1/P1A envelope, relay, fencing, effects, recovery regressions | `94 passed in 2.78s` |
+| Full `apps/web-backend/tests` | `290 passed in 62.14s` |
+| Expanded Ruff (`apps/web-backend/src`, `apps/web-backend/tests`, `packages/shared-schemas/src`) | `All checks passed!` |
+| `uv lock --check` | `Resolved 28 packages in 2ms` |
+| `git diff --check` | passed |
+
+The no-service safety check collected 18 URL-gated/unit tests and reported
+`8 passed, 10 skipped in 0.43s`: the ten skips are the two Redis/PostgreSQL
+Task 2 integration tests plus the eight PostgreSQL fixture tests, all with
+explicit environment-based skip reasons. With the CI-shaped services, the
+full suite had zero skips and zero warnings. The 1,040-line Worker was
+reviewed again: it contains no pytest/unittest imports, fake state machine,
+or test-only machinery; its size remains attributable to typed adapter
+normalization, bounded parsing/quarantine, lease renewal/fencing, failure
+classification, and Redis response handling. No production refactor was
+warranted. Task 2 is now `DONE` pending parent integration.
+
+For completeness, an immediate repeat without resetting the seeded disposable
+database was discarded after one expected state-contamination failure
+(`289 passed, 1 failed`): the preceding seed-backed case test left its demo
+case in `IN_REVIEW`. Resetting PostgreSQL and Redis and replaying the CI
+bootstrap/seed sequence produced the fresh `290 passed` result above; this was
+not a Task 2 or PostgreSQL fixture failure.

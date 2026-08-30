@@ -74,6 +74,7 @@ def _create_ready_tasks(sessions, *, task_count=1):
                 updated_at=now,
             )
         )
+        session.flush()
         session.add(
             CameraInferenceStateRow(
                 organization_id=organization_id,
@@ -135,7 +136,7 @@ def _command(claim):
         "classes",
     )
     return PublishInferenceCommand(
-        claim, contract, "a" * 64, (), (), uuid4(), datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+        claim, contract, f"{1:064x}", (), (), uuid4(), datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
     )
 
 
