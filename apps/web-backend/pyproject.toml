@@ -31,10 +31,11 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/odp_api"]
 
-[tool.ruff.lint]
-# FastAPI evaluates dependency and query markers at import time by design.
-ignore = ["B008"]
-
 [tool.ruff.lint.per-file-ignores]
 # Tests intentionally extend sys.path before importing the application package.
 "tests/**/*.py" = ["E402"]
+# FastAPI evaluates dependency and query markers at import time by design.
+"src/odp_api/modules/ai_orchestration/router.py" = ["B008"]
+"src/odp_api/modules/cases/router.py" = ["B008"]
+"src/odp_api/modules/identity/service.py" = ["B008"]
+"src/odp_api/modules/notifications/router.py" = ["B008"]

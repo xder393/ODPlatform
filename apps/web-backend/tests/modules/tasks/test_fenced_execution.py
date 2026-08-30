@@ -18,11 +18,11 @@ from odp_api.adapters.persistence.task_models import (
     PublishedInferenceResultRow,
 )
 from odp_api.db import create_engine_and_session
+from odp_api.modules.inspection.effects import InspectionEffectService
 from odp_api.modules.tasks.commands import (
     InferenceExecutionContract,
     PublishInferenceCommand,
 )
-from odp_api.modules.inspection.effects import InspectionEffectService
 from odp_api.modules.tasks.models import FailureKind, TaskStatus
 from odp_api.ports.tasks import StaleLease, TaskExecutionPort
 
@@ -144,7 +144,7 @@ def test_record_failure_persists_failure_kind_on_task_and_attempt(
 
 
 def test_expired_publish_success_is_stale_and_has_no_result(tmp_path):
-    engine, sessions, repo, org, task_id, claim, now = _running_repo(tmp_path)
+    engine, sessions, _repo, org, task_id, claim, now = _running_repo(tmp_path)
     with sessions.begin() as s:
         s.get(InferenceTaskRow, task_id).lease_expires_at = now - timedelta(seconds=1)
     try:
@@ -168,7 +168,7 @@ def test_expired_publish_success_is_stale_and_has_no_result(tmp_path):
 
 def test_wrong_tenant_owner_or_token_finalize_fails_closed(tmp_path):
     from dataclasses import replace
-    engine, sessions, repo, org, task_id, claim, now = _running_repo(tmp_path)
+    engine, sessions, _repo, org, task_id, claim, now = _running_repo(tmp_path)
     for bad in (replace(claim, organization_id=uuid4()), replace(claim, lease_owner='other'), replace(claim, fence_token=claim.fence_token + 1)):
         try:
             InspectionEffectService(SqlAlchemyInspectionEffects(sessions)).publish(
@@ -282,7 +282,7 @@ def test_expired_other_task_releases_camera_and_claims_ready_target(tmp_path):
     (("fence_token", 999), ("worker_id", "impostor"), ("attempt_no", 999)),
 )
 def test_finalize_rejects_attempt_that_does_not_match_lease_identity(tmp_path, attribute, value):
-    engine, sessions, repo, org, task_id, claim, now = _running_repo(tmp_path)
+    engine, sessions, _repo, org, task_id, claim, now = _running_repo(tmp_path)
     with sessions.begin() as session:
         setattr(session.get(InferenceAttemptRow, claim.attempt_id), attribute, value)
 

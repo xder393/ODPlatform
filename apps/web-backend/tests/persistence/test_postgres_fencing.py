@@ -18,6 +18,7 @@ from alembic import command
 WEB_BACKEND_SRC = Path(__file__).parents[2] / "src"
 sys.path[:0] = [str(WEB_BACKEND_SRC)]
 
+from odp_api.adapters.persistence.inspection_effects import SqlAlchemyInspectionEffects
 from odp_api.adapters.persistence.task_control import (
     SqlAlchemyTaskControlRepository,
 )
@@ -31,6 +32,7 @@ from odp_api.adapters.persistence.task_models import (
     PublishedInferenceResultRow,
 )
 from odp_api.db import create_engine_and_session
+from odp_api.modules.inspection.effects import InspectionEffectService
 from odp_api.modules.tasks.commands import (
     InferenceExecutionContract,
     PublishInferenceCommand,
@@ -220,9 +222,6 @@ def test_postgresql_expired_fence_cannot_publish_or_change_business_state():
             )
 
         with pytest.raises(StaleLease):
-            from odp_api.adapters.persistence.inspection_effects import SqlAlchemyInspectionEffects
-            from odp_api.modules.inspection.effects import InspectionEffectService
-
             InspectionEffectService(SqlAlchemyInspectionEffects(sessions)).publish(
                 _command(claim)
             )
