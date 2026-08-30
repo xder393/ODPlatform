@@ -111,10 +111,7 @@ All checks passed!
 `git diff --check` passed with no output.  `uv lock --check` resolved all 28
 packages successfully; no dependency or lockfile was changed.
 
-Earlier in this worktree, before the final strict JSON/mapping polish, the
-P1A regression selection was `52 passed` and the full backend suite was
-`261 passed, 12 skipped`; those broad suites must be rerun after this
-checkpoint before claiming final completion.
+Earlier checkpoint counts were superseded by the final verification below.
 
 ## Self-review and remaining concerns
 
@@ -128,6 +125,83 @@ checkpoint before claiming final completion.
 - Publish-success/mark-failure duplicates are intentional and covered by the
   focused crash-window test.  The guarded mark can safely return false for a
   competing or stale claim.
-- No real PostgreSQL or Redis integration was available locally.  CI should
-  run the two URL-gated tests, then rerun the full backend and P1A regression
-  suites against the committed tree.
+- No real PostgreSQL or Redis integration was available locally.  CI now
+  provisions both URL-gated services and should execute them against the
+  committed tree.
+
+## Final verification
+
+All commands below were run after the implementation checkpoint commit
+`e2899d1`.
+
+Focused Task 1 suites:
+
+```bash
+.venv/bin/python -m pytest \
+  apps/web-backend/tests/modules/tasks/test_event_envelope.py \
+  apps/web-backend/tests/integration/test_outbox_relay.py -q
+```
+
+```text
+collected 19 items
+17 passed, 2 skipped in 0.31s
+```
+
+The skips are `test_postgresql_competing_relays_claim_each_outbox_once` and
+`test_real_redis_publisher_keeps_stream_history_untrimmed`, because the local
+environment has neither explicit test URL.
+
+P1A regressions:
+
+```bash
+.venv/bin/python -m pytest \
+  apps/web-backend/tests/modules/inspection/test_effects.py \
+  apps/web-backend/tests/persistence/test_task_recovery_transactions.py \
+  apps/web-backend/tests/persistence/test_p1_task_schema.py -q
+```
+
+```text
+collected 52 items
+52 passed in 1.78s
+```
+
+Full backend suite:
+
+```bash
+.venv/bin/python -m pytest apps/web-backend/tests -q
+```
+
+```text
+collected 276 items
+263 passed, 13 skipped, 1 warning in 20.31s
+```
+
+The one warning is the existing Starlette deprecation warning for importing
+`httpx` through `starlette.testclient`.  The 13 skips include the two Task 1
+URL-gated tests and the existing PostgreSQL/database-role integration skips.
+
+Expanded lint and repository checks:
+
+```bash
+.venv/bin/ruff check packages/shared-schemas apps/web-backend/src apps/web-backend/tests
+uv lock --check
+git diff --check
+```
+
+Ruff reported `All checks passed!`; `uv lock --check` reported `Resolved 28
+packages`; `git diff --check` passed with no output.
+
+CI service coverage was inspected in `.github/workflows/ci.yml`.  The initial
+inspection found PostgreSQL configured but no Redis service or
+`ODP_REDIS_TEST_URL`; this was fixed in the follow-up commit by adding a
+healthy `redis:7-alpine` service on port 6379 and
+`ODP_REDIS_TEST_URL=redis://localhost:6379/0`.  YAML parsing then confirmed:
+
+```text
+backend-web services: postgres, redis
+ODP_POSTGRES_TEST_URL: postgresql+psycopg://odp:odp@localhost:5432/odp
+ODP_REDIS_TEST_URL: redis://localhost:6379/0
+```
+
+Thus the URL-gated PostgreSQL and Redis tests are configured to execute in CI;
+their real external-service execution remains unverified on this host.
