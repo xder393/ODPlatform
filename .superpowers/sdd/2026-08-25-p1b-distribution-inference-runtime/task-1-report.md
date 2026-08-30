@@ -245,3 +245,66 @@ All checks passed!
 ```
 
 `git status --short` and `git diff --check` were both clean after these runs.
+
+## Fix Round 1 evidence
+
+Review findings were addressed with strict TDD.  Each regression was added
+and run before its production fix:
+
+1. PostgreSQL lock scoping RED:
+
+```text
+AssertionError: assert 'FOR UPDATE OF outbox_events SKIP LOCKED' in
+'... LIMIT %(param_1)s FOR UPDATE SKIP LOCKED'
+1 failed in 0.25s
+```
+
+The actual repository claim statement now compiles with
+`FOR UPDATE OF outbox_events SKIP LOCKED`, so PostgreSQL will not attempt to
+lock the nullable side of its authority `LEFT OUTER JOIN`.
+
+2. Envelope-size RED (publisher and Relay durability regressions):
+
+```text
+Failed: DID NOT RAISE ValueError
+assert 0 == 1  # Relay result.failed
+2 failed in 0.24s
+```
+
+The Redis adapter now rejects UTF-8 canonical envelopes larger than 64 KiB
+before `XADD`; the Relay catches that publish failure, increments attempts,
+sets backoff, and leaves the Outbox row unpublished and durable.  No
+`MAXLEN` option was introduced.
+
+3. Alert-normalization RED:
+
+```text
+assert False  # emitted confidence was True, not float 1.0
+1 failed in 0.12s
+```
+
+The publisher now reserializes the validated P1A alert model into the
+outbound envelope, while still rejecting extra payload keys and tenant
+mismatches.
+
+Post-fix focused GREEN run:
+
+```bash
+uv run --project apps/web-backend --extra dev \
+  --with-editable packages/shared-schemas pytest \
+  apps/web-backend/tests/modules/tasks/test_event_envelope.py \
+  apps/web-backend/tests/integration/test_outbox_relay.py -q
+```
+
+```text
+collected 23 items
+21 passed, 2 skipped in 0.36s; warnings: 0
+```
+
+The P1A regression selection remained `52 passed in 1.70s`.  The full
+locked-project backend verification collected 280 items and finished with
+`267 passed, 13 skipped in 20.63s; warnings: 0`.  Locked expanded Ruff
+reported `All checks passed!`; `uv lock --check` reported `Resolved 28
+packages`; and `git diff --check` passed.  The two Task 1 skips remain the
+URL-gated PostgreSQL and Redis tests; both services and URLs are configured
+in CI as documented above, but no external services are available locally.

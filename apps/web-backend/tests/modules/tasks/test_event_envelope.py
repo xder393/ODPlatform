@@ -1,3 +1,4 @@
+import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -191,6 +192,28 @@ def test_publisher_routes_both_allowlisted_events_without_maxlen():
     assert all(isinstance(fields["envelope"], str) for _stream, fields in redis.calls)
 
 
+def test_publisher_rejects_oversized_envelope_before_xadd():
+    redis = FakeRedis()
+    publisher = RedisOutboxPublisher(redis)
+    envelope = EventEnvelope(
+        event_id=uuid4(),
+        event_type="vision.inference.requested.v1",
+        schema_version=1,
+        occurred_at=datetime(2026, 8, 25, 12, tzinfo=UTC),
+        correlation_id=uuid4(),
+        organization_id=uuid4(),
+        aggregate_id=uuid4(),
+        traceparent="x" * (64 * 1024),
+        payload={"task_id": str(uuid4()), "dispatch_seq": 1},
+    )
+
+    assert len(envelope.canonical_json().encode("utf-8")) > 64 * 1024
+    with pytest.raises(ValueError, match="64 KiB"):
+        publisher.publish(envelope)
+
+    assert redis.calls == []
+
+
 def test_publisher_rejects_unknown_event_type_before_redis_call():
     redis = FakeRedis()
     publisher = RedisOutboxPublisher(redis)
@@ -224,3 +247,28 @@ def test_publisher_rejects_alert_payload_outside_the_p1a_contract():
         publisher.publish(envelope)
 
     assert redis.calls == []
+
+
+def test_publisher_emits_validated_alert_payload_as_canonical_json():
+    redis = FakeRedis()
+    publisher = RedisOutboxPublisher(redis)
+    payload = {
+        "alert_id": str(uuid4()),
+        "organization_id": str(uuid4()),
+        "case_id": str(uuid4()),
+        "event_id": str(uuid4()),
+        "camera_id": str(uuid4()),
+        "line_id": str(uuid4()),
+        "defect_type": "scratch",
+        "severity": "HIGH",
+        "confidence": True,
+        "occurred_at": "2026-08-25T12:00:00Z",
+        "business_cursor": "1",
+    }
+    envelope = _envelope("inspection.alert.created.v1", **payload)
+
+    publisher.publish(envelope)
+
+    emitted = json.loads(redis.calls[0][1]["envelope"])
+    assert emitted["payload"]["confidence"] == 1.0
+    assert isinstance(emitted["payload"]["confidence"], float)

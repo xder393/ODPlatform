@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import sessionmaker
 
 BACKEND_SRC = Path(__file__).parents[2] / "src"
@@ -136,6 +137,53 @@ class OutagePublisher:
         raise OSError("Redis unavailable")
 
 
+class RecordingRedis:
+    def __init__(self):
+        self.calls = []
+
+    def xadd(self, stream, fields):
+        self.calls.append((stream, fields))
+        return "1-0"
+
+
+class _EmptyResult:
+    def all(self):
+        return []
+
+
+class _CapturingSession:
+    def __init__(self, statements):
+        self._statements = statements
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
+    def execute(self, statement):
+        self._statements.append(statement)
+        return _EmptyResult()
+
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
+
+
+def test_postgresql_claim_statement_locks_only_outbox_rows():
+    statements = []
+    repository = SqlAlchemyOutboxRepository(
+        lambda: _CapturingSession(statements), clock=lambda _session: NOW
+    )
+
+    repository.claim_ready(1, NOW, "relay-test", timedelta(seconds=1))
+
+    compiled = str(statements[0].compile(dialect=postgresql.dialect()))
+    assert "FOR UPDATE OF outbox_events SKIP LOCKED" in compiled
+
+
 def test_relay_republishes_when_redis_succeeded_before_db_mark():
     repository = FakeOutboxRepository()
     publisher = RecordingPublisher()
@@ -180,6 +228,32 @@ def test_relay_backoff_keeps_outbox_row_after_redis_outage():
     assert stored.available_at == NOW + timedelta(seconds=2)
     assert stored.published_at is None
     assert relay.run_batch(10, NOW + timedelta(seconds=1)).claimed == 0
+
+
+def test_relay_keeps_oversized_envelope_durable_and_backed_off():
+    repository = FakeOutboxRepository()
+    event = repository.insert_ready(event_type="test.event.v1")
+    repository.events[event.outbox_id].event = replace(
+        event, payload={"body": "x" * (64 * 1024)}
+    )
+    redis = RecordingRedis()
+    publisher = RedisOutboxPublisher(redis, {"test.event.v1": "odp:test:events"})
+    relay = OutboxRelay(
+        repository,
+        publisher,
+        relay_id="relay-test",
+        backoff_base=timedelta(seconds=2),
+        backoff_cap=timedelta(seconds=10),
+    )
+
+    result = relay.run_batch(10, NOW)
+    stored = repository.events[event.outbox_id]
+
+    assert result.failed == 1
+    assert redis.calls == []
+    assert stored.published_at is None
+    assert stored.publish_attempts == 1
+    assert stored.available_at == NOW + timedelta(seconds=2)
 
 
 def test_relay_claim_is_bounded_by_configured_batch_size():

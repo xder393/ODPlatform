@@ -73,7 +73,7 @@ class SqlAlchemyOutboxRepository(OutboxRepositoryPort):
                         OutboxEventRow.created_at,
                         OutboxEventRow.outbox_id,
                     )
-                    .with_for_update(skip_locked=True)
+                    .with_for_update(of=OutboxEventRow, skip_locked=True)
                     .limit(limit)
                 ).all()
 
