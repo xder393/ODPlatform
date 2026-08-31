@@ -349,3 +349,96 @@ The two previously accepted minors remain deferred unchanged: consumer-name
 UUID/BUSYGROUP response-code hardening, and removing the unused Worker
 `MAX_ATTEMPTS` constant plus a Worker-level third-failure test.  They do not
 weaken any of the eight fixed review boundaries.
+
+## Fix round 1 continuation: quarantine and typed-output hardening (2026-08-31)
+
+This continuation started from `4043775` with the previously requested
+uncommitted TDD changes preserved.  Implementation and regression tests are
+committed as `cda533a` (`fix: close inference delivery quarantine gaps`).  The
+report/ledger update is intentionally separate from that implementation
+commit.
+
+### RED evidence
+
+Each new boundary was exercised before its production fix:
+
+| Boundary | Load-bearing RED | Minimal GREEN change |
+| --- | --- | --- |
+| Future dispatch authority | The future-sequence transaction test observed a quarantine row with the task UUID instead of `NULL`. | Future references now use the durable unscoped quarantine path; the task and Attempts remain unchanged. |
+| Forged malformed/oversized references | Two tests embedded a real organization/task/sequence in invalid raw bytes; the old regex recovery blocked the READY task. | Only a validated, complete versioned envelope can carry task authority. Malformed and oversized bytes are always unscoped and ACKable after commit. |
+| PostgreSQL NUL poison | A valid unsupported envelope containing JSON `\u0000` failed with `psycopg.DataError: PostgreSQL text fields cannot contain NUL`, leaving the delivery Pending. | All persisted quarantine text is bounded and canonicalized (`NUL → U+FFFD`); `error` is now `VARCHAR(2048)` through Alembic revision `0009`. |
+| Sticky quarantine | Re-delivering a future message after advancing the task dispatch generation returned `CLAIMED`, which would create an Attempt. | `(stream_name, message_id)` is checked before authority evaluation and inserted with a dialect-specific conflict-safe operation; the first quarantine row and payload remain authoritative. Unknown-task replay is covered too. |
+| Detection completeness | Three malformed detections (non-JSON text, invalid box, negative class id) were accepted as success; the earlier REDs also covered missing labels and NaN. | A strict immutable `Detection` normalization boundary validates all Task 6 fields plus `defect_type`/`severity`, rejects unknown/non-JSON/NaN/invalid values as `MODEL_CONFIGURATION`, and only then builds the effect payload. |
+
+The Redis structural-poison test also remains load-bearing: non-JSON mapping
+values previously raised in the Redis client before per-message isolation;
+the RED was converted into a bounded quarantine-and-ACK path.
+
+### Completed behavior
+
+- `accept_delivery()` now performs the durable quarantine idempotency lookup
+  before tenant/task lookup and compares `expected_dispatch_seq` inside the
+  same authority transaction.  Stale references ACK as duplicates, exact
+  references claim/quarantine atomically, and future references are unscoped
+  integrity quarantine with no Task or Attempt mutation.
+- Scoped `UNSUPPORTED_SCHEMA` is retained only for a completely validated
+  envelope with complete authoritative references; `MALFORMED_ENVELOPE` and
+  `PAYLOAD_TOO_LARGE` cannot scope by regex observations.  Unknown/future
+  messages use nullable task references and bounded raw evidence.
+- Quarantine text uses one deterministic PostgreSQL-safe bounded helper, and
+  the new migration keeps the error column bounded at 2048 characters.  The
+  conflict-safe insert prevents concurrent duplicate deliveries from replacing
+  the original reason or raw bytes.
+- Worker output is normalized to the frozen typed Detection contract before
+  `InspectionEffectService.publish()`.  Invalid output cannot create an
+  effect or a successful Attempt; the existing success boundary remains the
+  effect service and no low-level success API was added.
+
+### GREEN verification
+
+The post-implementation focused command (including the real recovery gate)
+collected 61 tests and passed:
+
+```text
+tests/modules/tasks/test_inference_consumer.py
+tests/persistence/test_task_recovery_transactions.py
+tests/integration/test_redis_worker_recovery.py
+61 passed in 46.11s
+```
+
+The PostgreSQL fencing/quarantine suite passed `8 passed in 0.61s` before the
+implementation commit, and the real Worker-owned recovery suite passed
+`2 passed in 45.17s` before the commit.  Both recovery tests call
+`Worker.run_once()`, exercise cancellation/reclaim and commit-before-ACK
+redelivery, enforce the `<30s` recovery bound, and assert one Attempt/result/
+case plus an empty PEL.  The selected Task 1/P1A regressions passed
+`100 passed in 9.96s`.
+
+The first post-commit full run against the long-lived disposable services
+collected 322 tests and exposed one seeded-state contamination
+(`test_postgresql_case_transition_locks_case_and_audit_head_then_commits_once`;
+the demo case was already `IN_REVIEW`).  This was not waived: the isolated
+PG database and Redis DB were reset in place, then bootstrap, standalone
+migrations, Alembic head, runtime grants, business seed, and knowledge seed
+were replayed in the CI order.  The fresh run then produced:
+
+```text
+322 passed in 67.58s (0:01:07)
+```
+
+There were zero skips and zero warnings in that CI-shaped run.  The same
+fresh service state's focused Task 2 rerun produced `61 passed in 46.11s`.
+
+Quality gates from the current HEAD:
+
+```text
+uv lock --project apps/web-backend --check: Resolved 51 packages in 18ms
+ruff check apps/web-backend/src apps/web-backend/tests packages/shared-schemas/src: All checks passed!
+git diff --check: passed
+```
+
+The implementation commit changes no production adapter composition outside
+the injected artifact/inference ports, introduces no pytest/unittest imports
+or test-only state machine in the 1,040-line Worker, and does not reintroduce
+a low-level success path.  The two previously accepted minors remain deferred
+as documented above.  No Task 2 verification work remains in this checkpoint.
