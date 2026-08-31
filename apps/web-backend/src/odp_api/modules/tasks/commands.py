@@ -39,6 +39,38 @@ class InferenceExecutionContract:
 
 
 @dataclass(frozen=True, slots=True)
+class Detection:
+    """Immutable model detection normalized at the Worker boundary.
+
+    The first five fields are the Task 6 vision contract.  Defect type and
+    severity are required here because the current inspection effect needs
+    them to create a business event; the Worker rejects an object missing
+    either field as model configuration failure.
+    """
+
+    class_id: int
+    class_name: str
+    confidence: float
+    xyxy: tuple[float, float, float, float]
+    spatial_zone: str
+    defect_type: str | None = None
+    severity: str | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        """Return only JSON-compatible values for the effect persistence port."""
+
+        return {
+            "class_id": self.class_id,
+            "class_name": self.class_name,
+            "confidence": self.confidence,
+            "xyxy": list(self.xyxy),
+            "spatial_zone": self.spatial_zone,
+            "defect_type": self.defect_type,
+            "severity": self.severity,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class PublishInferenceCommand:
     """Fenced inference output handed to the inspection effect boundary."""
 

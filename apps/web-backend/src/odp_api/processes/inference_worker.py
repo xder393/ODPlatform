@@ -21,6 +21,7 @@ from odp_api.modules.tasks.commands import (
     DeliveryDecision,
     DeliveryOutcome,
     DeliveryRequest,
+    Detection,
     InferenceExecutionContract,
     LeaseClaim,
     PublishInferenceCommand,
@@ -70,7 +71,7 @@ class InferenceResult:
 
     execution_contract: InferenceExecutionContract
     frame_sha256: str
-    detections: tuple[dict[str, object], ...]
+    detections: tuple[Detection, ...]
     stage_durations: tuple[tuple[str, float], ...]
 
 
@@ -290,6 +291,12 @@ class InferenceWorker:
                 bounded_payload,
                 metadata,
                 QuarantineReason.UNSUPPORTED_SCHEMA,
+                scoped=(
+                    metadata.organization_id is not None
+                    and metadata.task_id is not None
+                    and metadata.dispatch_seq is not None
+                    and metadata.dispatch_seq > 0
+                ),
             )
 
         if (
@@ -352,20 +359,25 @@ class InferenceWorker:
         raw_payload: bytes,
         metadata: _EnvelopeMetadata,
         reason: QuarantineReason,
+        *,
+        scoped: bool = False,
     ) -> WorkerProcessResult:
-        if (
-            metadata.organization_id is not None
-            and metadata.task_id is not None
-            and metadata.dispatch_seq is not None
-            and metadata.dispatch_seq > 0
-        ):
-            request = _delivery_request(message, raw_payload, metadata, reason)
-            decision = await self._control.accept_delivery(request, self._now())
+        if scoped:
+            # This branch is reached only after EventEnvelope validation and
+            # complete reference validation.  The repository still performs
+            # the sequence comparison and task transition atomically.
+            decision = await self._control.accept_delivery(
+                _delivery_request(message, raw_payload, metadata, reason),
+                self._now(),
+            )
             if decision.outcome is DeliveryOutcome.PENDING:
                 return WorkerProcessResult("PENDING", False)
             if decision.outcome is DeliveryOutcome.CLAIMED:
                 raise RuntimeError("quarantine delivery unexpectedly acquired a lease")
         else:
+            # Until EventEnvelope validation succeeds, extracted identifiers
+            # are observation only.  Malformed and oversized bytes can never
+            # select a task-scoped state transition.
             result = await self._control.quarantine_unscoped(
                 UnscopedQuarantineCommand(
                     stream_name=message.stream,
@@ -394,14 +406,14 @@ class InferenceWorker:
             self._inference.infer(artifact, renewal.claim),
             self.inference_timeout_seconds,
         )
-        _validate_result(result, artifact)
+        detections = _validate_result(result, artifact)
         _raise_renewal_issue(renewal)
         await self._effects.publish(
             PublishInferenceCommand(
                 claim=renewal.claim,
                 execution_contract=result.execution_contract,
                 frame_sha256=result.frame_sha256,
-                detections=result.detections,
+                detections=tuple(detection.as_dict() for detection in detections),
                 stage_durations=result.stage_durations,
                 correlation_id=envelope.correlation_id,
                 database_completed_at=self._now(),
@@ -607,7 +619,9 @@ def _validate_artifact(artifact: LoadedArtifact) -> None:
         raise InvalidInputError("artifact SHA-256 does not match content")
 
 
-def _validate_result(result: InferenceResult, artifact: LoadedArtifact) -> None:
+def _validate_result(
+    result: InferenceResult, artifact: LoadedArtifact
+) -> tuple[Detection, ...]:
     if not isinstance(result, InferenceResult):
         raise ModelConfigurationError("inference adapter must return InferenceResult")
     contract = result.execution_contract
@@ -626,6 +640,7 @@ def _validate_result(result: InferenceResult, artifact: LoadedArtifact) -> None:
         not isinstance(value, str)
         or not value.strip()
         or value.strip().lower() == "unknown"
+        or "\x00" in value
         for value in required_text
     ):
         raise ModelConfigurationError("inference execution contract is incomplete")
@@ -640,10 +655,12 @@ def _validate_result(result: InferenceResult, artifact: LoadedArtifact) -> None:
         )
     ):
         raise ModelConfigurationError("actual input shape is invalid")
+    if not isinstance(contract.nms_in_model, bool):
+        raise ModelConfigurationError("inference nms_in_model flag is invalid")
     if any(
         not isinstance(value, (int, float))
         or isinstance(value, bool)
-        or not math.isfinite(value)
+        or not _is_finite_number(value)
         or not 0 <= value <= 1
         for value in (contract.confidence_threshold, contract.iou_threshold)
     ):
@@ -652,10 +669,9 @@ def _validate_result(result: InferenceResult, artifact: LoadedArtifact) -> None:
         raise ModelConfigurationError("inference frame SHA-256 is invalid")
     if result.frame_sha256.lower() != artifact.sha256.lower():
         raise InvalidInputError("inference frame SHA-256 does not match artifact")
-    if not isinstance(result.detections, tuple) or any(
-        not isinstance(item, dict) for item in result.detections
-    ):
-        raise ModelConfigurationError("inference detections must be a tuple of mappings")
+    if not isinstance(result.detections, tuple):
+        raise ModelConfigurationError("inference detections must be a tuple")
+    detections = tuple(_normalize_detection(item) for item in result.detections)
     if not isinstance(result.stage_durations, tuple):
         raise ModelConfigurationError("stage durations must be a tuple")
     for item in result.stage_durations:
@@ -665,18 +681,110 @@ def _validate_result(result: InferenceResult, artifact: LoadedArtifact) -> None:
         if (
             not isinstance(stage, str)
             or not stage.strip()
+            or "\x00" in stage
+            or len(stage) > 255
             or not isinstance(duration, (int, float))
             or isinstance(duration, bool)
-            or not math.isfinite(duration)
+            or not _is_finite_number(duration)
             or duration < 0
         ):
             raise ModelConfigurationError("stage duration is invalid")
+    return detections
+
+
+_DETECTION_FIELDS = frozenset(
+    {
+        "class_id",
+        "class_name",
+        "confidence",
+        "xyxy",
+        "spatial_zone",
+        "defect_type",
+        "severity",
+    }
+)
+
+
+def _normalize_detection(value: object) -> Detection:
+    if isinstance(value, Detection):
+        values: dict[str, object] = {
+            "class_id": value.class_id,
+            "class_name": value.class_name,
+            "confidence": value.confidence,
+            "xyxy": value.xyxy,
+            "spatial_zone": value.spatial_zone,
+            "defect_type": value.defect_type,
+            "severity": value.severity,
+        }
+    elif isinstance(value, dict):
+        if set(value) != _DETECTION_FIELDS:
+            raise ModelConfigurationError("inference detection fields are incomplete")
+        values = value
+    else:
+        raise ModelConfigurationError("inference detection is not a typed mapping")
+
+    class_id = values["class_id"]
+    if not isinstance(class_id, int) or isinstance(class_id, bool) or class_id < 0:
+        raise ModelConfigurationError("inference detection class_id is invalid")
+
+    class_name = values["class_name"]
+    confidence = values["confidence"]
+    spatial_zone = values["spatial_zone"]
+    defect_type = values["defect_type"]
+    severity = values["severity"]
+    if any(
+        not isinstance(text_value, str)
+        or not text_value.strip()
+        or "\x00" in text_value
+        or len(text_value) > 255
+        for text_value in (class_name, spatial_zone, defect_type, severity)
+    ):
+        raise ModelConfigurationError("inference detection text is invalid")
+    if (
+        not isinstance(confidence, (int, float))
+        or isinstance(confidence, bool)
+        or not _is_finite_number(confidence)
+        or not 0 <= confidence <= 1
+    ):
+        raise ModelConfigurationError("inference detection confidence is invalid")
+
+    box = values["xyxy"]
+    if not isinstance(box, (tuple, list)) or len(box) != 4:
+        raise ModelConfigurationError("inference detection bounding box is invalid")
+    if any(
+        not isinstance(coordinate, (int, float))
+        or isinstance(coordinate, bool)
+        or not _is_finite_number(coordinate)
+        for coordinate in box
+    ):
+        raise ModelConfigurationError("inference detection bounding box is invalid")
+    x1, y1, x2, y2 = (float(coordinate) for coordinate in box)
+    if x1 < 0 or y1 < 0 or x2 < x1 or y2 < y1:
+        raise ModelConfigurationError("inference detection bounding box is invalid")
+    return Detection(
+        class_id=class_id,
+        class_name=class_name,
+        confidence=float(confidence),
+        xyxy=(x1, y1, x2, y2),
+        spatial_zone=spatial_zone,
+        defect_type=defect_type,
+        severity=severity,
+    )
 
 
 def _is_sha256(value: object) -> bool:
     return isinstance(value, str) and len(value) == 64 and all(
         character in "0123456789abcdefABCDEF" for character in value
     )
+
+
+def _is_finite_number(value: object) -> bool:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, ValueError):
+        return False
 
 
 def _classify_failure(error: Exception) -> FailureKind | None:
@@ -708,6 +816,7 @@ __all__ = [
     "SUPPORTED_EVENT_TYPE",
     "SUPPORTED_SCHEMA_VERSION",
     "ArtifactLoaderPort",
+    "Detection",
     "InferencePort",
     "InferenceResult",
     "InferenceWorker",

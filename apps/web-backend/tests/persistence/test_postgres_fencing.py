@@ -28,6 +28,7 @@ from odp_api.adapters.persistence.task_models import (
     InferenceAttemptRow,
     InferenceTaskRow,
     InspectionSessionRow,
+    MessageQuarantineRow,
     OutboxEventRow,
     PublishedInferenceResultRow,
 )
@@ -38,6 +39,8 @@ from odp_api.modules.tasks.commands import (
     DeliveryRequest,
     InferenceExecutionContract,
     PublishInferenceCommand,
+    QuarantineReason,
+    UnscopedQuarantineCommand,
     WorkerDeliveryScope,
 )
 from odp_api.modules.tasks.models import TaskStatus
@@ -250,6 +253,55 @@ def test_postgresql_delivery_claim_rechecks_dispatch_after_locked_redispatch_com
         engine.dispose()
 
 
+def test_postgresql_future_delivery_is_unscoped_and_sticky_after_generation_moves():
+    engine, sessions = create_engine_and_session(os.environ["ODP_POSTGRES_TEST_URL"])
+    try:
+        _migrate_head(os.environ["ODP_POSTGRES_TEST_URL"])
+        organization_id, _, (task_id,) = _create_ready_tasks(sessions)
+        request = DeliveryRequest(
+            stream_name="odp:inference:tasks",
+            message_id=f"future-sticky-{uuid4()}",
+            event_id=uuid4(),
+            event_type="vision.inference.requested.v1",
+            schema_version="1",
+            raw_payload=b"{}",
+            organization_id=organization_id,
+            task_id=task_id,
+            expected_dispatch_seq=2,
+        )
+        repository = SqlAlchemyTaskControlRepository(sessions)
+        scope = WorkerDeliveryScope("worker-future")
+
+        first = repository.accept_delivery(request, "worker-future", datetime.now(UTC), scope)
+        assert first.outcome is DeliveryOutcome.QUARANTINED
+
+        with sessions.begin() as session:
+            session.execute(
+                update(InferenceTaskRow)
+                .where(InferenceTaskRow.task_id == task_id)
+                .values(dispatch_seq=2)
+            )
+
+        second = repository.accept_delivery(request, "worker-future", datetime.now(UTC), scope)
+        assert second.outcome is DeliveryOutcome.QUARANTINED
+        with sessions() as session:
+            task = session.get(InferenceTaskRow, task_id)
+            quarantine = session.scalar(
+                select(MessageQuarantineRow).where(
+                    MessageQuarantineRow.message_id == request.message_id
+                )
+            )
+            assert task is not None and task.attempt_count == 0 and task.status == TaskStatus.READY.value
+            assert quarantine is not None
+            assert (quarantine.error, quarantine.task_id, quarantine.raw_payload) == (
+                "FUTURE_DISPATCH_SEQUENCE",
+                None,
+                b"{}",
+            )
+    finally:
+        engine.dispose()
+
+
 def test_postgresql_renewal_keeps_fence_token_and_rejects_wrong_ownership():
     engine, sessions = create_engine_and_session(os.environ["ODP_POSTGRES_TEST_URL"])
     try:
@@ -427,5 +479,40 @@ def test_postgresql_due_retry_scheduler_contends_without_exceeding_camera_capaci
             assert len(outboxes) == 1
             state = session.get(CameraInferenceStateRow, (organization_id, camera_id))
             assert state.ready_count == 2
+    finally:
+        engine.dispose()
+
+
+def test_postgresql_quarantine_canonicalizes_nul_text_and_is_ackable():
+    engine, sessions = create_engine_and_session(os.environ["ODP_POSTGRES_TEST_URL"])
+    try:
+        _migrate_head(os.environ["ODP_POSTGRES_TEST_URL"])
+        repository = SqlAlchemyTaskControlRepository(sessions)
+        message_id = f"nul-{uuid4()}"
+        command = UnscopedQuarantineCommand(
+            stream_name="odp:inference:tasks\x00poison",
+            message_id=message_id,
+            event_id=uuid4(),
+            event_type="unsupported\x00event",
+            schema_version="9\x00",
+            raw_payload=b'{"event_type":"unsupported\\u0000event"}',
+            reason=QuarantineReason.UNSUPPORTED_SCHEMA,
+        )
+
+        result = repository.quarantine_unscoped(
+            command,
+            datetime.now(UTC),
+            WorkerDeliveryScope("worker-nul"),
+        )
+
+        assert result.ack_after_commit is True
+        with sessions() as session:
+            row = session.get(MessageQuarantineRow, result.quarantine_id)
+            assert row is not None
+            assert "\x00" not in row.stream_name
+            assert "\x00" not in row.message_id
+            assert "\x00" not in row.event_type
+            assert "\x00" not in row.schema_version
+            assert "\x00" not in row.error
     finally:
         engine.dispose()

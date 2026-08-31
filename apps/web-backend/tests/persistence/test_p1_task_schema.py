@@ -55,6 +55,12 @@ def test_p1_control_plane_schema_has_required_constraints(tmp_path):
             for column in inspector.get_columns("message_quarantine")
             if column["name"] == "event_id"
         ) is False
+        quarantine_error = next(
+            column
+            for column in inspector.get_columns("message_quarantine")
+            if column["name"] == "error"
+        )
+        assert getattr(quarantine_error["type"], "length", None) == 2048
         assert next(
             column["nullable"]
             for column in inspector.get_columns("inspection_sessions")

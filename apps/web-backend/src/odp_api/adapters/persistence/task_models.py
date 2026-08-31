@@ -347,7 +347,7 @@ class MessageQuarantineRow(Base):
     event_type: Mapped[str] = mapped_column(String(255), nullable=False)
     schema_version: Mapped[str] = mapped_column(String(32), nullable=False)
     raw_payload: Mapped[bytes] = mapped_column(LargeBinary(length=65536), nullable=False)
-    error: Mapped[str] = mapped_column(Text, nullable=False)
+    error: Mapped[str] = mapped_column(String(2048), nullable=False)
     task_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("inference_tasks.task_id"), index=True
     )

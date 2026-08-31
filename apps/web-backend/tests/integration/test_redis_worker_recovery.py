@@ -42,6 +42,7 @@ from odp_api.modules.tasks.consumer import (
 )
 from odp_api.modules.tasks.models import TaskStatus
 from odp_api.processes.inference_worker import (
+    Detection,
     InferenceResult,
     InferenceWorker,
     LoadedArtifact,
@@ -94,12 +95,15 @@ class _Inference:
             ),
             frame_sha256=artifact.sha256,
             detections=(
-                {
-                    "defect_type": "scratch",
-                    "spatial_zone": "GLOBAL",
-                    "severity": "HIGH",
-                    "confidence": 0.9,
-                },
+                Detection(
+                    class_id=1,
+                    class_name="scratch",
+                    confidence=0.9,
+                    xyxy=(0.0, 0.0, 1.0, 1.0),
+                    spatial_zone="GLOBAL",
+                    defect_type="scratch",
+                    severity="HIGH",
+                ),
             ),
             stage_durations=(("model", 0.001),),
         )

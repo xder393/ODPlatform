@@ -87,9 +87,19 @@ class RedisInferenceMessage:
         if isinstance(value, str):
             return value.encode("utf-8", errors="surrogatepass")
         if isinstance(value, Mapping):
-            return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
-                "utf-8"
-            )
+            try:
+                return json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            except (TypeError, ValueError, OverflowError, UnicodeError):
+                # Keep one malformed Redis entry recoverable.  The Worker
+                # will classify this bounded representation as poison and
+                # commit its unscoped quarantine before XACK.
+                return _bounded_malformed_fields(value)
         return str(value).encode("utf-8", errors="replace")
 
 

@@ -368,6 +368,22 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
         with self._session_factory() as session:
             try:
                 current = self._db_now(session)
+                existing_quarantine = session.scalar(
+                    select(MessageQuarantineRow)
+                    .where(
+                        MessageQuarantineRow.stream_name
+                        == _bounded_text(request.stream_name, 255),
+                        MessageQuarantineRow.message_id
+                        == _bounded_text(request.message_id, 255),
+                    )
+                    .with_for_update()
+                )
+                if existing_quarantine is not None:
+                    # A durable quarantine is the authority for this Redis
+                    # identity.  Do not reinterpret it when task metadata or
+                    # dispatch state changes after a failed XACK.
+                    session.commit()
+                    return DeliveryDecision(DeliveryOutcome.QUARANTINED)
                 candidate = session.scalar(
                     select(InferenceTaskRow).where(
                         InferenceTaskRow.task_id == request.task_id,
@@ -433,7 +449,11 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                         raw_payload=request.raw_payload,
                         reason=QuarantineReason.FUTURE_DISPATCH_SEQUENCE,
                         organization_id=request.organization_id,
-                        task_id=task.task_id,
+                        # A future reference is an integrity failure, not a
+                        # task-scoped compatibility decision.  Keep the
+                        # tenant as an observation, but never attach the
+                        # untrusted generation to a task row.
+                        task_id=None,
                         now=current,
                     )
                     session.commit()
@@ -778,34 +798,59 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
         task_id: UUID | None,
         now: datetime,
     ) -> MessageQuarantineRow:
-        existing = session.scalar(
+        values = {
+            "quarantine_id": uuid4(),
+            "stream_name": _bounded_text(stream_name, 255),
+            "message_id": _bounded_text(message_id, 255),
+            "event_id": event_id,
+            "event_type": _bounded_text(event_type, 255),
+            "schema_version": _bounded_text(schema_version, 32),
+            "raw_payload": raw_payload[:MAX_QUARANTINE_PAYLOAD_BYTES],
+            "error": _bounded_text(reason.value, 2048),
+            "task_id": task_id,
+            "organization_id": organization_id,
+            "status": "QUARANTINED",
+            "quarantined_at": now,
+            "replayed_at": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+        dialect = session.get_bind().dialect.name
+        if dialect == "postgresql":
+            session.execute(
+                postgresql_insert(MessageQuarantineRow)
+                .values(**values)
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        MessageQuarantineRow.stream_name,
+                        MessageQuarantineRow.message_id,
+                    ]
+                )
+            )
+        elif dialect == "sqlite":
+            session.execute(
+                sqlite_insert(MessageQuarantineRow)
+                .values(**values)
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        MessageQuarantineRow.stream_name,
+                        MessageQuarantineRow.message_id,
+                    ]
+                )
+            )
+        else:
+            session.add(MessageQuarantineRow(**values))
+        session.flush()
+        row = session.scalar(
             select(MessageQuarantineRow)
             .where(
-                MessageQuarantineRow.stream_name == _bounded_text(stream_name, 255),
-                MessageQuarantineRow.message_id == _bounded_text(message_id, 255),
+                MessageQuarantineRow.stream_name == values["stream_name"],
+                MessageQuarantineRow.message_id == values["message_id"],
             )
             .with_for_update()
         )
-        if existing is not None:
-            return existing
-        row = MessageQuarantineRow(
-            quarantine_id=uuid4(),
-            stream_name=_bounded_text(stream_name, 255),
-            message_id=_bounded_text(message_id, 255),
-            event_id=event_id,
-            event_type=_bounded_text(event_type, 255),
-            schema_version=_bounded_text(schema_version, 32),
-            raw_payload=raw_payload[:MAX_QUARANTINE_PAYLOAD_BYTES],
-            error=_bounded_text(reason.value, 2048),
-            task_id=task_id,
-            organization_id=organization_id,
-            status="QUARANTINED",
-            quarantined_at=now,
-            replayed_at=None,
-            created_at=now,
-            updated_at=now,
-        )
-        session.add(row)
+        if row is None:
+            raise RuntimeError("quarantine row could not be persisted")
         return row
 
     @staticmethod
@@ -1098,11 +1143,13 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
         with self._session_factory() as session:
             try:
                 current = self._db_now(session)
+                safe_stream = _bounded_text(stream, 255)
+                safe_message_id = _bounded_text(message_id, 255)
                 existing = session.scalar(
                     select(MessageQuarantineRow)
                     .where(
-                        MessageQuarantineRow.stream_name == stream,
-                        MessageQuarantineRow.message_id == message_id,
+                        MessageQuarantineRow.stream_name == safe_stream,
+                        MessageQuarantineRow.message_id == safe_message_id,
                     )
                 )
                 candidate = session.scalar(
@@ -1148,11 +1195,11 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                 session.add(
                     MessageQuarantineRow(
                         quarantine_id=quarantine_id,
-                        stream_name=stream,
-                        message_id=message_id,
+                        stream_name=safe_stream,
+                        message_id=safe_message_id,
                         event_id=event_id,
-                        event_type=event_type,
-                        schema_version=schema_version,
+                        event_type=_bounded_text(event_type, 255),
+                        schema_version=_bounded_text(schema_version, 32),
                         raw_payload=raw_payload[:MAX_QUARANTINE_PAYLOAD_BYTES],
                         error="UNSUPPORTED_SCHEMA",
                         task_id=task_id,
@@ -1541,7 +1588,10 @@ def _optional_utc(value: datetime | None) -> datetime | None:
 
 
 def _bounded_text(value: str, limit: int) -> str:
-    text_value = str(value)
+    # PostgreSQL text rejects U+0000 even when it arrived as a JSON escape.
+    # Canonicalize before both lookup and insert so poison bytes cannot leave
+    # a delivery transaction in a failed/Pending state.
+    text_value = str(value).replace("\x00", "\ufffd")
     return text_value[:limit]
 
 

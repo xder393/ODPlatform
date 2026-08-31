@@ -1,5 +1,6 @@
 """Real database coverage for durable recovery and compatibility control."""
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -379,8 +380,43 @@ def test_future_dispatch_is_quarantined_without_mutating_current_ready_task(repo
         )
         assert (quarantine.error, quarantine.task_id, quarantine.organization_id) == (
             QuarantineReason.FUTURE_DISPATCH_SEQUENCE.value,
-            task,
+            None,
             tenant,
+        )
+
+
+def test_future_quarantine_is_sticky_after_dispatch_generation_advances(repository):
+    tenant, _, task, now = _seed_task(repository)
+    request = _delivery_request(tenant, task, dispatch_seq=2, message_id="future-sticky-1")
+    first = repository.accept_delivery(
+        request,
+        "worker-a",
+        now,
+        WorkerDeliveryScope("worker-a"),
+    )
+    assert first.outcome is DeliveryOutcome.QUARANTINED
+
+    with repository._session_factory() as session:
+        session.get(InferenceTaskRow, task).dispatch_seq = 2
+        session.commit()
+
+    second = repository.accept_delivery(
+        replace(request, raw_payload=b"rewritten", event_id=uuid4()),
+        "worker-a",
+        now,
+        WorkerDeliveryScope("worker-a"),
+    )
+
+    assert second.outcome is DeliveryOutcome.QUARANTINED
+    assert second.claim is None
+    assert _row(repository, task).attempt_count == 0
+    with repository._session_factory() as session:
+        rows = session.query(MessageQuarantineRow).filter_by(message_id="future-sticky-1").all()
+        assert len(rows) == 1
+        assert (rows[0].error, rows[0].task_id, rows[0].raw_payload) == (
+            QuarantineReason.FUTURE_DISPATCH_SEQUENCE.value,
+            None,
+            b"{}",
         )
 
 
@@ -430,6 +466,81 @@ def test_unknown_task_is_durably_unscoped_and_ackable_without_foreign_key(reposi
             QuarantineReason.UNRESOLVED_TASK_REFERENCE.value,
             None,
             tenant,
+        )
+
+
+def test_unknown_task_quarantine_is_sticky_if_task_appears_later(repository):
+    tenant, task, now = uuid4(), uuid4(), datetime.now(UTC)
+    request = _delivery_request(tenant, task, message_id="unknown-sticky-1")
+    first = repository.accept_delivery(
+        request,
+        "worker-a",
+        now,
+        WorkerDeliveryScope("worker-a"),
+    )
+    assert first.outcome is DeliveryOutcome.QUARANTINED
+
+    camera, artifact = uuid4(), uuid4()
+    with repository._session_factory() as session:
+        session.add_all(
+            [
+                CameraInferenceStateRow(
+                    organization_id=tenant,
+                    camera_id=camera,
+                    running_task_id=None,
+                    ready_count=1,
+                    version=0,
+                    updated_at=now,
+                ),
+                FrameArtifactRow(
+                    artifact_id=artifact,
+                    organization_id=tenant,
+                    camera_id=camera,
+                    stream_session_id=uuid4(),
+                    frame_sequence=1,
+                    captured_at=now,
+                    object_key="x",
+                    sha256="a" * 64,
+                    content_length=1,
+                    state="AVAILABLE",
+                    lifecycle="PROCESSING",
+                    created_at=now,
+                    updated_at=now,
+                ),
+                InferenceTaskRow(
+                    task_id=task,
+                    organization_id=tenant,
+                    camera_id=camera,
+                    artifact_id=artifact,
+                    idempotency_key=str(task),
+                    status=TaskStatus.READY.value,
+                    dispatch_seq=1,
+                    attempt_count=0,
+                    fence_token=0,
+                    created_at=now,
+                    updated_at=now,
+                ),
+            ]
+        )
+        session.commit()
+
+    second = repository.accept_delivery(
+        request,
+        "worker-a",
+        now,
+        WorkerDeliveryScope("worker-a"),
+    )
+
+    assert second.outcome is DeliveryOutcome.QUARANTINED
+    assert second.claim is None
+    assert _row(repository, task).status == TaskStatus.READY.value
+    assert _row(repository, task).attempt_count == 0
+    with repository._session_factory() as session:
+        rows = session.query(MessageQuarantineRow).filter_by(message_id="unknown-sticky-1").all()
+        assert len(rows) == 1
+        assert (rows[0].error, rows[0].task_id) == (
+            QuarantineReason.UNRESOLVED_TASK_REFERENCE.value,
+            None,
         )
 
 

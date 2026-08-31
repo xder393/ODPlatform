@@ -27,6 +27,7 @@ from odp_api.modules.tasks.commands import (
 )
 from odp_api.modules.tasks.consumer import (
     GROUP_NAME,
+    MAX_ENVELOPE_BYTES,
     STREAM_NAME,
     RedisInferenceConsumer,
     RedisInferenceMessage,
@@ -34,6 +35,7 @@ from odp_api.modules.tasks.consumer import (
 from odp_api.modules.tasks.models import FailureKind, TaskRecord, TaskStatus
 from odp_api.modules.tasks.recovery import QuarantineResult
 from odp_api.processes.inference_worker import (
+    Detection,
     InferenceResult,
     InferenceWorker,
     LoadedArtifact,
@@ -341,8 +343,9 @@ async def test_unsupported_schema_is_quarantined_before_ack_with_bounded_payload
 
     await worker.process(RedisInferenceMessage("2-0", {"envelope": raw}, STREAM_NAME))
 
-    assert len(execution.delivery_requests) == 1
-    assert len(execution.delivery_requests[0].raw_payload) <= 64 * 1024
+    assert len(execution.unscoped) == 1
+    assert len(execution.unscoped[0][0].raw_payload) <= 64 * 1024
+    assert execution.unscoped[0][0].reason.value == "PAYLOAD_TOO_LARGE"
     assert consumer.acked == ["2-0"]
 
 
@@ -504,6 +507,58 @@ async def test_unscoped_poison_message_is_durably_quarantined_then_acked(
     assert consumer.acked == ["poison-1"]
 
 
+@pytest.mark.parametrize("oversized", [False, True])
+async def test_untrusted_metadata_cannot_scope_malformed_or_oversized_quarantine(oversized):
+    """Regex observations must never authorize a task mutation."""
+
+    organization_id, task_id = uuid4(), uuid4()
+    task = _task(task_id, organization_id)
+
+    class UnsafeScopedQuarantineExecution(FakeExecution):
+        async def accept_delivery(self, request, now):
+            decision = await super().accept_delivery(request, now)
+            if request.quarantine_reason is not None:
+                self.task = replace(
+                    self.task,
+                    status=TaskStatus.BLOCKED_COMPATIBILITY,
+                )
+            return decision
+
+    execution = UnsafeScopedQuarantineExecution(None, task=task)
+    consumer = RecordingAckConsumer()
+    prefix = (
+        '{"event_id":"'
+        + str(uuid4())
+        + '","event_type":"vision.inference.requested.v1",'
+        + '"organization_id":"'
+        + str(organization_id)
+        + '","payload":{"task_id":"'
+        + str(task_id)
+        + '","dispatch_seq":1}'
+    ).encode()
+    raw = prefix + (b"x" * (MAX_ENVELOPE_BYTES - len(prefix) + 1) if oversized else b"")
+    worker = _worker(
+        task,
+        effects=RecordingEffects(),
+        execution=execution,
+        consumer=consumer,
+    )
+
+    result = await worker.process(
+        RedisInferenceMessage("forged-scope-1", {"envelope": raw}, STREAM_NAME)
+    )
+
+    assert result.outcome == "QUARANTINED"
+    assert task.status == TaskStatus.READY
+    assert execution.task.status == TaskStatus.READY
+    assert execution.unscoped[0][0].reason.value in {
+        "MALFORMED_ENVELOPE",
+        "PAYLOAD_TOO_LARGE",
+    }
+    assert execution.unscoped[0][0].organization_id == organization_id
+    assert consumer.acked == ["forged-scope-1"]
+
+
 async def test_quarantine_persists_the_exact_reason_end_to_end():
     organization_id, task_id = uuid4(), uuid4()
     task = _task(task_id, organization_id)
@@ -524,6 +579,40 @@ async def test_quarantine_persists_the_exact_reason_end_to_end():
     assert result.outcome == "QUARANTINED"
     assert execution.delivery_requests[0].quarantine_reason.value == "UNSUPPORTED_SCHEMA"
     assert consumer.acked == ["reason-1"]
+
+
+async def test_valid_unsupported_envelope_uses_scoped_quarantine_authority():
+    organization_id, task_id = uuid4(), uuid4()
+    task = _task(task_id, organization_id)
+
+    class ScopedQuarantineExecution(FakeExecution):
+        async def accept_delivery(self, request, now):
+            decision = await super().accept_delivery(request, now)
+            if request.quarantine_reason is not None:
+                self.task = replace(
+                    self.task,
+                    status=TaskStatus.BLOCKED_COMPATIBILITY,
+                )
+            return decision
+
+    execution = ScopedQuarantineExecution(None, task=task)
+    consumer = RecordingAckConsumer()
+    worker = _worker(
+        task,
+        effects=RecordingEffects(),
+        execution=execution,
+        consumer=consumer,
+    )
+
+    result = await worker.process(
+        _message(_envelope(task_id, organization_id, schema_version=9), "scoped-1")
+    )
+
+    assert result.outcome == "QUARANTINED"
+    assert execution.unscoped == []
+    assert len(execution.delivery_requests) == 1
+    assert execution.task.status == TaskStatus.BLOCKED_COMPATIBILITY
+    assert consumer.acked == ["scoped-1"]
 
 
 async def test_artifact_loading_is_outside_the_model_inference_timeout():
@@ -612,6 +701,160 @@ async def test_malformed_typed_inference_contract_is_model_configuration_failure
     assert consumer.acked == ["1-0"]
 
 
+@pytest.mark.parametrize(
+    "detection",
+    [
+        {
+            "class_id": 1,
+            "class_name": "scratch",
+            "defect_type": "scratch",
+            "spatial_zone": "GLOBAL",
+            "severity": "HIGH",
+            "confidence": 1.1,
+            "xyxy": (0.0, 0.0, 1.0, 1.0),
+        },
+        {
+            "class_id": 1,
+            "class_name": "scratch",
+            "defect_type": "scratch",
+            "spatial_zone": "GLOBAL",
+            "confidence": 0.9,
+            "xyxy": (0.0, 0.0, 1.0, 1.0),
+        },
+        {
+            "class_id": 1,
+            "class_name": object(),
+            "defect_type": "scratch",
+            "spatial_zone": "GLOBAL",
+            "severity": "HIGH",
+            "confidence": 0.9,
+            "xyxy": (0.0, 0.0, 1.0, 1.0),
+        },
+        {
+            "class_id": 1,
+            "class_name": "scratch",
+            "defect_type": "scratch",
+            "spatial_zone": "GLOBAL",
+            "severity": "HIGH",
+            "confidence": float("nan"),
+            "xyxy": (0.0, 0.0, 1.0, 1.0),
+        },
+        {
+            "class_id": 1,
+            "class_name": "scratch",
+            "defect_type": "scratch",
+            "spatial_zone": "GLOBAL",
+            "severity": "HIGH",
+            "confidence": 0.9,
+            "xyxy": (1.0, 1.0, 0.0, 0.0),
+        },
+        {
+            "class_id": -1,
+            "class_name": "scratch",
+            "defect_type": "scratch",
+            "spatial_zone": "GLOBAL",
+            "severity": "HIGH",
+            "confidence": 0.9,
+            "xyxy": (0.0, 0.0, 1.0, 1.0),
+        },
+        {
+            "class_id": 1,
+            "class_name": "scratch",
+            "defect_type": "scratch",
+            "spatial_zone": "GLOBAL",
+            "severity": "HIGH",
+            "confidence": 0.9,
+            "xyxy": {"x1": 0.0},
+        },
+        {
+            "class_id": 1,
+            "class_name": "scratch",
+            "defect_type": "scratch",
+            "spatial_zone": "GLOBAL",
+            "severity": "HIGH",
+            "confidence": 0.9,
+            "xyxy": (0.0, 0.0, 1.0, 1.0),
+            "unexpected": "must be rejected",
+        },
+    ],
+)
+async def test_invalid_detection_is_model_configuration_failure(detection):
+    organization_id, task_id = uuid4(), uuid4()
+    task = _task(task_id, organization_id)
+
+    class InvalidDetectionInference:
+        async def infer(self, artifact, claim):
+            return InferenceResult(
+                execution_contract=CONTRACT,
+                frame_sha256=artifact.sha256,
+                detections=(detection,),
+                stage_durations=(("model", 0.1),),
+            )
+
+    execution = FakeExecution(_claim(task), task=task)
+    effects = RecordingEffects()
+    worker = _worker(
+        task,
+        effects=effects,
+        execution=execution,
+        inference=InvalidDetectionInference(),
+    )
+
+    result = await worker.process(_message(_envelope(task_id, organization_id)))
+
+    assert result.outcome == "FAILED"
+    assert execution.failure_calls[0][1] == FailureKind.MODEL_CONFIGURATION
+    assert effects.published == []
+
+
+async def test_valid_detection_is_normalized_before_effect_persistence():
+    organization_id, task_id = uuid4(), uuid4()
+    task = _task(task_id, organization_id)
+
+    class TypedInference:
+        async def infer(self, artifact, claim):
+            return InferenceResult(
+                execution_contract=CONTRACT,
+                frame_sha256=artifact.sha256,
+                detections=(
+                    Detection(
+                        class_id=1,
+                        class_name="scratch",
+                        confidence=0.9,
+                        xyxy=(0.0, 0.0, 1.0, 1.0),
+                        spatial_zone="GLOBAL",
+                        defect_type="scratch",
+                        severity="HIGH",
+                    ),
+                ),
+                stage_durations=(("model", 0.1),),
+            )
+
+    execution = FakeExecution(_claim(task), task=task)
+    effects = RecordingEffects()
+    worker = _worker(
+        task,
+        effects=effects,
+        execution=execution,
+        inference=TypedInference(),
+    )
+
+    result = await worker.process(_message(_envelope(task_id, organization_id)))
+
+    assert result.outcome == "SUCCEEDED"
+    assert effects.published[0].detections == (
+        {
+            "class_id": 1,
+            "class_name": "scratch",
+            "confidence": 0.9,
+            "xyxy": [0.0, 0.0, 1.0, 1.0],
+            "spatial_zone": "GLOBAL",
+            "defect_type": "scratch",
+            "severity": "HIGH",
+        },
+    )
+
+
 async def test_run_once_isolates_one_delivery_exception_and_processes_the_next():
     organization_id, task_id = uuid4(), uuid4()
     task = _task(task_id, organization_id)
@@ -677,3 +920,29 @@ async def test_structurally_invalid_redis_fields_become_quarantinable_delivery()
     assert processed == 1
     assert execution.unscoped[0][0].reason.value == "MALFORMED_ENVELOPE"
     assert redis.ack_calls == [(STREAM_NAME, GROUP_NAME, "bad-fields-1")]
+
+
+async def test_non_json_redis_mapping_becomes_quarantinable_delivery():
+    redis = RecordingRedis(
+        read_result=[
+            (STREAM_NAME, [("bad-value-1", {"envelope": object()})])
+        ],
+        claim_result=["0-0", [], []],
+    )
+    consumer = RedisInferenceConsumer(redis, consumer_name=str(uuid4()))
+    execution = FakeExecution(None)
+    worker = InferenceWorker(
+        consumer,
+        execution,
+        RecordingEffects(),
+        FakeArtifactLoader(),
+        FakeInference(),
+        worker_id="worker-a",
+        clock=lambda: NOW,
+    )
+
+    processed = await worker.run_once()
+
+    assert processed == 1
+    assert execution.unscoped[0][0].reason.value == "MALFORMED_ENVELOPE"
+    assert redis.ack_calls == [(STREAM_NAME, GROUP_NAME, "bad-value-1")]
