@@ -8,7 +8,7 @@ import hashlib
 import logging
 import math
 import re
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
@@ -46,6 +46,11 @@ RECOVERY_INTERVAL_SECONDS = 2
 SUPPORTED_EVENT_TYPE = "vision.inference.requested.v1"
 SUPPORTED_SCHEMA_VERSION = 1
 LOGGER = logging.getLogger(__name__)
+Clock = Callable[[], datetime]
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 class InvalidInputError(ValueError):
@@ -230,7 +235,7 @@ class InferenceWorker:
         inference: InferencePort,
         *,
         worker_id: str | None = None,
-        clock: object | None = None,
+        clock: Clock | None = None,
         renewal_interval_seconds: float = RENEW_INTERVAL_SECONDS,
         inference_timeout_seconds: float = INFERENCE_TIMEOUT_SECONDS,
         recovery_interval_seconds: float = RECOVERY_INTERVAL_SECONDS,
@@ -251,10 +256,12 @@ class InferenceWorker:
             raise ValueError("inference_timeout_seconds must be positive")
         if recovery_interval_seconds <= 0:
             raise ValueError("recovery_interval_seconds must be positive")
+        if clock is not None and not callable(clock):
+            raise TypeError("clock must be a zero-argument callable")
         self.renewal_interval_seconds = renewal_interval_seconds
         self.inference_timeout_seconds = inference_timeout_seconds
         self.recovery_interval_seconds = recovery_interval_seconds
-        self._clock = clock
+        self._clock: Clock = _utc_now if clock is None else clock
         self._active_renewals: set[asyncio.Task[None]] = set()
 
     async def process(self, message: RedisInferenceMessage) -> WorkerProcessResult:
@@ -497,13 +504,7 @@ class InferenceWorker:
             state.lost.set()
 
     def _now(self) -> datetime:
-        value = self._clock
-        if value is None:
-            return datetime.now(UTC)
-        if callable(value):
-            value = value()
-        elif hasattr(value, "now"):
-            value = value.now()
+        value = self._clock()
         if not isinstance(value, datetime):
             raise TypeError("clock must return datetime")
         return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
@@ -628,20 +629,21 @@ def _validate_result(
     if not isinstance(contract, InferenceExecutionContract):
         raise ModelConfigurationError("inference execution contract is missing")
     required_text = (
-        contract.model_release,
-        contract.onnxruntime_version,
-        contract.execution_provider,
-        contract.preprocessing_version,
-        contract.postprocessing_version,
-        contract.nms_mode,
-        contract.class_map_version,
+        (contract.model_release, 255),
+        (contract.onnxruntime_version, 64),
+        (contract.execution_provider, 128),
+        (contract.preprocessing_version, 128),
+        (contract.postprocessing_version, 128),
+        (contract.nms_mode, 64),
+        (contract.class_map_version, 128),
     )
     if any(
         not isinstance(value, str)
         or not value.strip()
         or value.strip().lower() == "unknown"
         or "\x00" in value
-        for value in required_text
+        or len(value) > limit
+        for value, limit in required_text
     ):
         raise ModelConfigurationError("inference execution contract is incomplete")
     if not _is_sha256(contract.model_sha256):
@@ -759,7 +761,7 @@ def _normalize_detection(value: object) -> Detection:
     ):
         raise ModelConfigurationError("inference detection bounding box is invalid")
     x1, y1, x2, y2 = (float(coordinate) for coordinate in box)
-    if x1 < 0 or y1 < 0 or x2 < x1 or y2 < y1:
+    if x1 < 0 or y1 < 0 or x2 <= x1 or y2 <= y1:
         raise ModelConfigurationError("inference detection bounding box is invalid")
     return Detection(
         class_id=class_id,

@@ -15,7 +15,18 @@ depends_on = None
 
 
 def upgrade() -> None:
-    if op.get_bind().dialect.name == "sqlite":
+    dialect_name = op.get_bind().dialect.name
+    if dialect_name == "postgresql":
+        # Existing deployments may contain legacy diagnostic text longer than
+        # the new bounded contract.  Normalize it before PostgreSQL enforces
+        # VARCHAR(2048), rather than making upgrade depend on an app invariant.
+        op.execute("UPDATE message_quarantine SET error = LEFT(error, 2048)")
+    else:
+        # SQLite does not enforce VARCHAR lengths, so make the same data
+        # transformation explicit before its batch table rebuild.
+        op.execute("UPDATE message_quarantine SET error = SUBSTR(error, 1, 2048)")
+
+    if dialect_name == "sqlite":
         with op.batch_alter_table("message_quarantine") as batch:
             batch.alter_column(
                 "error",

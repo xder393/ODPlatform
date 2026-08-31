@@ -265,18 +265,39 @@ class RecordingAckConsumer:
         return None
 
 
-def _worker(task, *, effects, execution=None, consumer=None, loader=None, inference=None):
+def _worker(
+    task,
+    *,
+    effects,
+    execution=None,
+    consumer=None,
+    loader=None,
+    inference=None,
+    clock=lambda: NOW,
+):
     return InferenceWorker(
         consumer or RecordingAckConsumer(),
         execution or FakeExecution(_claim(task), task=task),
         effects,
         loader or FakeArtifactLoader(),
         inference or FakeInference(),
-        clock=lambda: NOW,
+        clock=clock,
         worker_id="worker-a",
         renewal_interval_seconds=0.01,
         inference_timeout_seconds=0.1,
     )
+
+
+def test_worker_clock_rejects_objects_instead_of_probing_a_now_method():
+    organization_id, task_id = uuid4(), uuid4()
+    task = _task(task_id, organization_id)
+
+    class AmbiguousClock:
+        def now(self):
+            raise AssertionError("Worker must not probe a .now method")
+
+    with pytest.raises(TypeError, match="callable"):
+        _worker(task, effects=RecordingEffects(), clock=AmbiguousClock())
 
 
 async def test_worker_acks_only_after_effect_commit():
@@ -702,6 +723,57 @@ async def test_malformed_typed_inference_contract_is_model_configuration_failure
 
 
 @pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("model_release", "x" * 256),
+        ("onnxruntime_version", "x" * 65),
+        ("execution_provider", "x" * 129),
+        ("preprocessing_version", "x" * 129),
+        ("postprocessing_version", "x" * 129),
+        ("nms_mode", "x" * 65),
+        ("class_map_version", "x" * 129),
+        ("model_release", "model\x00release"),
+        ("onnxruntime_version", "runtime\x00version"),
+        ("execution_provider", "provider\x00name"),
+        ("preprocessing_version", "pre\x00processing"),
+        ("postprocessing_version", "post\x00processing"),
+        ("nms_mode", "nms\x00mode"),
+        ("class_map_version", "class\x00map"),
+        ("nms_in_model", "false"),
+        ("nms_in_model", 1),
+    ],
+)
+async def test_invalid_execution_contract_is_model_configuration_failure(field, value):
+    organization_id, task_id = uuid4(), uuid4()
+    task = _task(task_id, organization_id)
+    invalid_contract = replace(CONTRACT, **{field: value})
+
+    class InvalidContractInference:
+        async def infer(self, artifact, claim):
+            return InferenceResult(
+                execution_contract=invalid_contract,
+                frame_sha256=artifact.sha256,
+                detections=(),
+                stage_durations=(("model", 0.1),),
+            )
+
+    execution = FakeExecution(_claim(task), task=task)
+    effects = RecordingEffects()
+    worker = _worker(
+        task,
+        effects=effects,
+        execution=execution,
+        inference=InvalidContractInference(),
+    )
+
+    result = await worker.process(_message(_envelope(task_id, organization_id)))
+
+    assert result.outcome == "FAILED"
+    assert execution.failure_calls[0][1] == FailureKind.MODEL_CONFIGURATION
+    assert effects.published == []
+
+
+@pytest.mark.parametrize(
     "detection",
     [
         {
@@ -747,6 +819,24 @@ async def test_malformed_typed_inference_contract_is_model_configuration_failure
             "severity": "HIGH",
             "confidence": 0.9,
             "xyxy": (1.0, 1.0, 0.0, 0.0),
+        },
+        {
+            "class_id": 1,
+            "class_name": "scratch",
+            "defect_type": "scratch",
+            "spatial_zone": "GLOBAL",
+            "severity": "HIGH",
+            "confidence": 0.9,
+            "xyxy": (0.0, 0.0, 0.0, 1.0),
+        },
+        {
+            "class_id": 1,
+            "class_name": "scratch",
+            "defect_type": "scratch",
+            "spatial_zone": "GLOBAL",
+            "severity": "HIGH",
+            "confidence": 0.9,
+            "xyxy": (0.0, 0.0, 1.0, 0.0),
         },
         {
             "class_id": -1,
