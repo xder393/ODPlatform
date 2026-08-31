@@ -442,3 +442,78 @@ the injected artifact/inference ports, introduces no pytest/unittest imports
 or test-only state machine in the 1,040-line Worker, and does not reintroduce
 a low-level success path.  The two previously accepted minors remain deferred
 as documented above.  No Task 2 verification work remains in this checkpoint.
+
+## Fix round 2: migration, clock, and contract boundary hardening (2026-08-31)
+
+This round started from clean `2b687a9`, with no implementation changes made
+until each new regression had produced its expected RED.  The implementation
+and test changes are committed as `2b687a9`; this report update is a separate
+documentation commit.
+
+### RED → GREEN evidence
+
+1. **Migration safety.**  The new SQLite regression first reported
+   `1 failed, 1 skipped, 4 deselected`: after a 0008 seed containing a
+   3,000-character error, the old 0009 left the value unbounded.  The real
+   PostgreSQL regression then failed with
+   `psycopg.errors.StringDataRightTruncation` at
+   `ALTER TABLE message_quarantine ALTER COLUMN error TYPE VARCHAR(2048)`.
+   The migration now explicitly applies `SUBSTR(error, 1, 2048)` on SQLite and
+   `LEFT(error, 2048)` on PostgreSQL before narrowing the column.  The test
+   verifies the prefix, the new type, and a practical downgrade back to 0008;
+   SQLite and real PostgreSQL each passed (`1 passed`), and the complete
+   migration file passed `6 passed in 1.11s`.
+
+2. **Explicit clock port.**  A new behavior test first failed
+   `1 failed, 30 deselected` because an object exposing only `.now` was
+   silently accepted.  `InferenceWorker` now accepts only
+   `Clock = Callable[[], datetime]`, installs the explicit `_utc_now` default,
+   rejects non-callable clock objects at construction, and `_now()` invokes
+   only that callable.  The regression passed (`1 passed`); no `.now` method is
+   probed and all existing call sites remain zero-argument callables.
+
+3. **Complete execution contract and detection geometry.**  Before the fix,
+   the expanded boundary batch reported `9 failed, 17 passed, 23 deselected`
+   across 26 selected cases: seven contract strings exceeding their actual
+   `PublishedInferenceResultRow` limits and two zero-area boxes reached
+   `SUCCEEDED` instead of `MODEL_CONFIGURATION`.  The strict `nms_in_model`
+   (`"false"`/`1`) and NUL cases were already caught by the previous boundary
+   and remained green.  Contract text is now checked against the exact
+   persisted limits (255/64/128/128/128/64/128), and detection boxes require
+   strictly positive width and height.  The batch passed `26 passed`; invalid
+   output never reaches the effect port.
+
+### Final verification
+
+The complete inference consumer unit file passed `49 passed in 0.31s`.  The
+Task 2 unit, transaction, schema, real PostgreSQL fencing/quarantine, and
+real Redis/PostgreSQL Worker-loop recovery selection collected 89 tests and
+passed `89 passed in 46.33s`; the standalone real recovery file passed
+`2 passed in 45.27s`.  The Task 1/P1A envelope, relay, effects, recovery,
+schema, fencing, camera, case, and Alembic selection collected 102 tests and
+passed `102 passed in 9.83s`.
+
+For the full CI-shaped gate, the existing disposable PostgreSQL service was
+left intact and a new database `odp_task2_round2` plus unused Redis DB 1 were
+created (no destructive reset).  The database received the CI bootstrap,
+standalone migrations, Alembic head including 0009, runtime grants, business
+seed, and knowledge seed.  The fresh backend suite collected 343 tests and
+reported:
+
+```text
+343 passed in 68.08s (0:01:08)
+```
+
+The full run had zero skips and zero warnings.  The combined root-level Ruff
+gate over `apps/web-backend/src`, `apps/web-backend/tests`, and
+`packages/shared-schemas/src` reported `All checks passed!`; `uv lock
+--project apps/web-backend --check` reported `Resolved 51 packages in 1ms`;
+and `git diff --check` passed.  The final Git status is clean.
+
+The 1,040-line Worker still contains no pytest/unittest import, fake state
+machine, low-level success API, or test-only production machinery.  Its
+responsibilities remain the injected typed ports, bounded parsing/quarantine,
+lease renewal/fencing, timeout/failure classification, and Redis response
+normalization.  The two previously approved minors remain deferred:
+consumer-name UUID/BUSYGROUP response-code hardening and removal of the
+unused `MAX_ATTEMPTS` constant plus a Worker-level third-failure regression.
