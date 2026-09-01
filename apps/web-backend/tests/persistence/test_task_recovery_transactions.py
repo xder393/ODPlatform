@@ -255,6 +255,28 @@ def test_stale_ready_redispatches_once_but_fresh_ready_and_next_scan_do_not(
     assert tenant != _row(repository, fresh).organization_id
 
 
+def test_stale_ready_with_any_lease_marker_is_not_redispatched(repository, system_scope):
+    """A corrupt READY row must fail closed instead of racing its recorded owner."""
+    tenant, _, task, _ = _seed_task(
+        repository, last_dispatched_at=datetime.now(UTC) - timedelta(seconds=11)
+    )
+    with repository._session_factory() as session:
+        row = session.get(InferenceTaskRow, task)
+        row.lease_owner = "worker-still-recorded"
+        row.lease_expires_at = datetime.now(UTC) - timedelta(seconds=30)
+        session.commit()
+
+    assert repository.redispatch_stale_ready(
+        datetime.now(UTC) + timedelta(days=3650), system_scope
+    ) == 0
+    row = _row(repository, task)
+    assert (row.organization_id, row.dispatch_seq, row.lease_owner) == (
+        tenant,
+        1,
+        "worker-still-recorded",
+    )
+
+
 def test_expired_running_task_finishes_attempt_and_clears_camera_anchor(repository, system_scope):
     tenant, camera, task, now = _seed_task(repository)
     claim = repository.claim(task, tenant, "worker", now)
@@ -290,6 +312,245 @@ def test_expired_final_attempt_dead_letters_at_retry_cap(repository, system_scop
         session.commit()
     assert repository.expire_leases(now, system_scope) == 1
     assert _row(repository, task).status == TaskStatus.DEAD_LETTER.value
+
+
+def test_all_mutating_cross_tenant_recovery_sweeps_honor_explicit_batch_limits(
+    repository, system_scope
+):
+    """Dropping a LIMIT from any existing scheduler mutation must exceed one row."""
+    now = datetime.now(UTC).replace(microsecond=0)
+
+    retry_tasks = [_seed_task(repository, status=TaskStatus.RETRY_WAIT)[2] for _ in range(2)]
+    with repository._session_factory() as session:
+        for task_id in retry_tasks:
+            session.get(InferenceTaskRow, task_id).next_attempt_at = now - timedelta(seconds=1)
+        session.commit()
+    assert repository.release_due_retries(now, system_scope, limit=1) == 1
+    assert sum(_row(repository, task).status == TaskStatus.RETRY_WAIT.value for task in retry_tasks) == 1
+
+    stale_tasks = [
+        _seed_task(
+            repository,
+            last_dispatched_at=now - timedelta(seconds=11),
+        )[2]
+        for _ in range(2)
+    ]
+    assert repository.redispatch_stale_ready(now, system_scope, limit=1) == 1
+    assert sorted(_row(repository, task).dispatch_seq for task in stale_tasks) == [1, 2]
+
+    expiring = [_seed_task(repository) for _ in range(2)]
+    for tenant, _, task, _ in expiring:
+        assert repository.claim(task, tenant, f"worker-{task}", now) is not None
+    with repository._session_factory() as session:
+        for _, _, task, _ in expiring:
+            session.get(InferenceTaskRow, task).lease_expires_at = now - timedelta(seconds=1)
+        session.commit()
+    assert repository.expire_leases(now, system_scope, limit=1) == 1
+    assert sum(_row(repository, task).status == TaskStatus.RUNNING.value for _, _, task, _ in expiring) == 1
+
+
+def test_all_mutating_recovery_sweeps_reject_nonpositive_batch_limits(
+    repository, system_scope
+):
+    now = datetime.now(UTC)
+    operations = (
+        repository.release_due_retries,
+        repository.redispatch_stale_ready,
+        repository.expire_leases,
+        repository.release_expired_outbox_claims,
+        repository.expire_stale_artifact_reservations,
+    )
+    for operation in operations:
+        with pytest.raises(ValueError, match="positive"):
+            operation(now, system_scope, limit=0)
+
+
+def test_expired_outbox_claim_repair_is_bounded_and_only_clears_unpublished_claims(
+    repository, system_scope
+):
+    """Published, live, or rows beyond the batch must not be changed."""
+    seeded = [_seed_task(repository) for _ in range(4)]
+    now = datetime.now(UTC).replace(microsecond=0)
+    task_ids = [item[2] for item in seeded]
+    with repository._session_factory() as session:
+        rows = [
+            session.scalar(select(OutboxEventRow).where(OutboxEventRow.task_id == task_id))
+            for task_id in task_ids
+        ]
+        for row in rows:
+            row.claim_owner = "relay-a"
+            row.claim_expires_at = now - timedelta(seconds=1)
+        rows[2].published_at = now - timedelta(seconds=2)
+        rows[3].claim_expires_at = now + timedelta(seconds=10)
+        session.commit()
+
+    caller_clock_far_future = now + timedelta(days=3650)
+    assert (
+        repository.release_expired_outbox_claims(
+            caller_clock_far_future, system_scope, limit=1
+        )
+        == 1
+    )
+
+    with repository._session_factory() as session:
+        rows = [
+            session.scalar(select(OutboxEventRow).where(OutboxEventRow.task_id == task_id))
+            for task_id in task_ids
+        ]
+        released = [row for row in rows[:2] if row.claim_owner is None]
+        assert len(released) == 1
+        assert released[0].claim_expires_at is None
+        assert (released[0].published_at, released[0].publish_attempts) == (None, 0)
+        still_claimed = [row for row in rows[:2] if row.claim_owner is not None]
+        assert len(still_claimed) == 1
+        assert still_claimed[0].claim_expires_at is not None
+        assert rows[2].claim_owner == "relay-a"
+        assert rows[2].claim_expires_at is not None
+        assert rows[2].published_at is not None
+        assert rows[3].claim_owner == "relay-a"
+        assert rows[3].claim_expires_at is not None
+
+
+def test_recovery_counts_quarantine_without_replaying_or_deleting(repository, system_scope):
+    """Quarantine is an observation metric, never a scheduler mutation."""
+    tenant, _, task, now = _seed_task(repository)
+    repository.quarantine_message(
+        "odp:inference:tasks", "quarantine-count-1", uuid4(), "v9", "9", b"bad", task, tenant, now
+    )
+    with repository._session_factory() as session:
+        before = session.scalar(select(MessageQuarantineRow))
+        task_before = session.get(InferenceTaskRow, task)
+        outbox_before = session.scalar(
+            select(OutboxEventRow).where(OutboxEventRow.task_id == task)
+        )
+        before_snapshot = (
+            before.quarantine_id,
+            before.status,
+            before.replayed_at,
+            before.raw_payload,
+        )
+        task_snapshot = (
+            task_before.status,
+            task_before.dispatch_seq,
+            task_before.error_code,
+        )
+        outbox_snapshot = (
+            outbox_before.outbox_id,
+            outbox_before.published_at,
+            outbox_before.claim_owner,
+            outbox_before.publish_attempts,
+        )
+
+    assert repository.count_quarantined_messages(now, system_scope) == 1
+
+    with repository._session_factory() as session:
+        row = session.scalar(select(MessageQuarantineRow))
+        task_after = session.get(InferenceTaskRow, task)
+        outbox_after = session.scalar(
+            select(OutboxEventRow).where(OutboxEventRow.task_id == task)
+        )
+        assert row is not None
+        assert (row.quarantine_id, row.status, row.replayed_at, row.raw_payload) == before_snapshot
+        assert (
+            task_after.status,
+            task_after.dispatch_seq,
+            task_after.error_code,
+        ) == task_snapshot
+        assert (
+            outbox_after.outbox_id,
+            outbox_after.published_at,
+            outbox_after.claim_owner,
+            outbox_after.publish_attempts,
+        ) == outbox_snapshot
+
+
+def test_stale_artifact_reservation_repair_is_camera_first_and_preserves_available(
+    repository, system_scope
+):
+    """Only PENDING artifact state may be failed while expired anchors are cleared."""
+    first = _seed_task(repository)
+    second = _seed_task(repository)
+    third = _seed_task(repository)
+    live = _seed_task(repository)
+    now = datetime.now(UTC).replace(microsecond=0)
+    artifact_ids = []
+    with repository._session_factory() as session:
+        for tenant, camera, task, _ in (first, second, third, live):
+            task_row = session.get(InferenceTaskRow, task)
+            artifact = session.get(FrameArtifactRow, task_row.artifact_id)
+            artifact_ids.append(artifact.artifact_id)
+            state = session.get(CameraInferenceStateRow, (tenant, camera))
+            state.reservation_id = artifact.artifact_id
+            state.reservation_expires_at = now - timedelta(seconds=1)
+        session.get(FrameArtifactRow, artifact_ids[0]).state = "PENDING"
+        pending_evidence = session.get(FrameArtifactRow, artifact_ids[1])
+        pending_evidence.state = "PENDING"
+        pending_evidence.lifecycle = "EVIDENCE"
+        session.get(FrameArtifactRow, artifact_ids[2]).lifecycle = "EVIDENCE"
+        live_state = session.get(CameraInferenceStateRow, (live[0], live[1]))
+        live_state.reservation_expires_at = now + timedelta(hours=1)
+        session.commit()
+
+    assert (
+        repository.expire_stale_artifact_reservations(
+            now + timedelta(days=3650), system_scope, limit=10
+        )
+        == 3
+    )
+
+    with repository._session_factory() as session:
+        pending = session.get(FrameArtifactRow, artifact_ids[0])
+        pending_evidence = session.get(FrameArtifactRow, artifact_ids[1])
+        available = session.get(FrameArtifactRow, artifact_ids[2])
+        assert (pending.state, pending.error_code) == (
+            "FAILED",
+            "ADMISSION_RESERVATION_EXPIRED",
+        )
+        assert (
+            pending_evidence.state,
+            pending_evidence.lifecycle,
+            pending_evidence.error_code,
+        ) == ("PENDING", "EVIDENCE", None)
+        assert (available.state, available.lifecycle, available.error_code) == (
+            "AVAILABLE",
+            "EVIDENCE",
+            None,
+        )
+        for tenant, camera, _, _ in (first, second, third):
+            state = session.get(CameraInferenceStateRow, (tenant, camera))
+            assert (state.reservation_id, state.reservation_expires_at) == (None, None)
+        live_state = session.get(CameraInferenceStateRow, (live[0], live[1]))
+        assert (
+            live_state.reservation_id,
+            _utc(live_state.reservation_expires_at),
+        ) == (artifact_ids[3], now + timedelta(hours=1))
+
+
+def test_artifact_reservation_repair_honors_batch_limit(repository, system_scope):
+    """Removing the artifact LIMIT must clear both expired camera anchors."""
+    seeded = (_seed_task(repository), _seed_task(repository))
+    now = datetime.now(UTC).replace(microsecond=0)
+    with repository._session_factory() as session:
+        for index, (tenant, camera, task, _) in enumerate(seeded, start=1):
+            artifact_id = session.get(InferenceTaskRow, task).artifact_id
+            artifact = session.get(FrameArtifactRow, artifact_id)
+            artifact.state = "PENDING"
+            state = session.get(CameraInferenceStateRow, (tenant, camera))
+            state.reservation_id = artifact_id
+            state.reservation_expires_at = now - timedelta(seconds=3 - index)
+        session.commit()
+
+    assert repository.expire_stale_artifact_reservations(
+        now, system_scope, limit=1
+    ) == 1
+
+    with repository._session_factory() as session:
+        states = [
+            session.get(CameraInferenceStateRow, (tenant, camera))
+            for tenant, camera, _, _ in seeded
+        ]
+        assert sum(state.reservation_id is None for state in states) == 1
+        assert sum(state.reservation_id is not None for state in states) == 1
 
 
 def test_quarantine_caps_payload_blocks_tenant_task_and_only_acks_after_commit(repository):
@@ -659,6 +920,12 @@ def test_recovery_repository_rejects_missing_or_invalid_system_scope(repository)
         repository.redispatch_stale_ready(now, object())
     with pytest.raises(TypeError):
         repository.expire_leases(now, object())
+    with pytest.raises(TypeError):
+        repository.release_expired_outbox_claims(now, object())
+    with pytest.raises(TypeError):
+        repository.count_quarantined_messages(now, object())
+    with pytest.raises(TypeError):
+        repository.expire_stale_artifact_reservations(now, object())
     assert _row(repository, task).organization_id == tenant
 
 

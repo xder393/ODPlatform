@@ -62,6 +62,7 @@ INFERENCE_REQUEST_EVENT = "vision.inference.requested.v1"
 EVENT_SCHEMA_VERSION = 1
 REDISPATCH_AFTER_SECONDS = 10
 MAX_QUARANTINE_PAYLOAD_BYTES = 65536
+RECOVERY_BATCH_SIZE = 100
 
 
 class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
@@ -974,9 +975,16 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
             state.updated_at = current
             session.commit()
 
-    def release_due_retries(self, now: datetime, scope: SystemRecoveryScope) -> int:
+    def release_due_retries(
+        self,
+        now: datetime,
+        scope: SystemRecoveryScope,
+        *,
+        limit: int = RECOVERY_BATCH_SIZE,
+    ) -> int:
         """Turn due retry waits into a fresh durable dispatch using database time."""
         self._require_system_recovery_scope(scope)
+        self._require_positive_recovery_limit(limit)
         with self._session_factory() as session:
             try:
                 current = self._db_now(session)
@@ -987,6 +995,8 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                         InferenceTaskRow.next_attempt_at <= current,
                     )
                     .with_only_columns(InferenceTaskRow.task_id)
+                    .order_by(InferenceTaskRow.next_attempt_at, InferenceTaskRow.task_id)
+                    .limit(limit)
                 ).all()
                 released = 0
                 for task_id in candidate_ids:
@@ -1027,19 +1037,34 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                 session.rollback()
                 raise
 
-    def redispatch_stale_ready(self, now: datetime, scope: SystemRecoveryScope) -> int:
+    def redispatch_stale_ready(
+        self,
+        now: datetime,
+        scope: SystemRecoveryScope,
+        *,
+        limit: int = RECOVERY_BATCH_SIZE,
+    ) -> int:
         """Perform the explicit system-only cross-tenant stale-ready scan."""
         self._require_system_recovery_scope(scope)
+        self._require_positive_recovery_limit(limit)
         with self._session_factory() as session:
             try:
                 current = self._db_now(session)
                 query = select(InferenceTaskRow).where(
                     InferenceTaskRow.status == TaskStatus.READY.value,
+                    InferenceTaskRow.lease_owner.is_(None),
+                    InferenceTaskRow.lease_expires_at.is_(None),
                     InferenceTaskRow.last_dispatched_at.is_not(None),
                     InferenceTaskRow.last_dispatched_at
                     <= current - timedelta(seconds=REDISPATCH_AFTER_SECONDS),
                 )
-                rows = session.scalars(query.with_for_update(skip_locked=True)).all()
+                rows = session.scalars(
+                    query.order_by(
+                        InferenceTaskRow.last_dispatched_at, InferenceTaskRow.task_id
+                    )
+                    .limit(limit)
+                    .with_for_update(skip_locked=True)
+                ).all()
                 for task in rows:
                     self._add_dispatch_outbox(session, task, current)
                 session.commit()
@@ -1048,8 +1073,15 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                 session.rollback()
                 raise
 
-    def expire_leases(self, now: datetime, scope: SystemRecoveryScope) -> int:
+    def expire_leases(
+        self,
+        now: datetime,
+        scope: SystemRecoveryScope,
+        *,
+        limit: int = RECOVERY_BATCH_SIZE,
+    ) -> int:
         self._require_system_recovery_scope(scope)
+        self._require_positive_recovery_limit(limit)
         with self._session_factory() as session:
             try:
                 current = self._db_now(session)
@@ -1067,6 +1099,10 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                         InferenceTaskRow.status == TaskStatus.RUNNING.value,
                         InferenceTaskRow.lease_expires_at <= current,
                     )
+                    .order_by(
+                        InferenceTaskRow.lease_expires_at, InferenceTaskRow.task_id
+                    )
+                    .limit(limit)
                     .with_for_update(of=CameraInferenceStateRow, skip_locked=True)
                 ).all()
                 expired = 0
@@ -1124,6 +1160,88 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                     expired += 1
                 session.commit()
                 return expired
+            except BaseException:
+                session.rollback()
+                raise
+
+    def release_expired_outbox_claims(
+        self,
+        now: datetime,
+        scope: SystemRecoveryScope,
+        *,
+        limit: int = RECOVERY_BATCH_SIZE,
+    ) -> int:
+        """Clear only expired claims on durable, still-unpublished Outbox rows."""
+        self._require_system_recovery_scope(scope)
+        self._require_positive_recovery_limit(limit)
+        with self._session_factory() as session:
+            try:
+                current = self._db_now(session)
+                rows = session.scalars(
+                    select(OutboxEventRow)
+                    .where(
+                        OutboxEventRow.published_at.is_(None),
+                        OutboxEventRow.claim_owner.is_not(None),
+                        OutboxEventRow.claim_expires_at.is_not(None),
+                        OutboxEventRow.claim_expires_at <= current,
+                    )
+                    .order_by(OutboxEventRow.claim_expires_at, OutboxEventRow.outbox_id)
+                    .limit(limit)
+                    .with_for_update(skip_locked=True)
+                ).all()
+                for row in rows:
+                    row.claim_owner = None
+                    row.claim_expires_at = None
+                    row.updated_at = current
+                session.commit()
+                return len(rows)
+            except BaseException:
+                session.rollback()
+                raise
+
+    def count_quarantined_messages(
+        self, now: datetime, scope: SystemRecoveryScope
+    ) -> int:
+        """Count compatibility records without replaying or deleting them."""
+        self._require_system_recovery_scope(scope)
+        with self._session_factory() as session:
+            return int(
+                session.scalar(select(func.count(MessageQuarantineRow.quarantine_id)))
+                or 0
+            )
+
+    def expire_stale_artifact_reservations(
+        self,
+        now: datetime,
+        scope: SystemRecoveryScope,
+        *,
+        limit: int = RECOVERY_BATCH_SIZE,
+    ) -> int:
+        """Lock camera anchors first and repair only elapsed upload reservations."""
+        self._require_system_recovery_scope(scope)
+        self._require_positive_recovery_limit(limit)
+        with self._session_factory() as session:
+            try:
+                current = self._db_now(session)
+                states = session.scalars(
+                    select(CameraInferenceStateRow)
+                    .where(
+                        CameraInferenceStateRow.reservation_id.is_not(None),
+                        CameraInferenceStateRow.reservation_expires_at.is_not(None),
+                        CameraInferenceStateRow.reservation_expires_at <= current,
+                    )
+                    .order_by(
+                        CameraInferenceStateRow.reservation_expires_at,
+                        CameraInferenceStateRow.organization_id,
+                        CameraInferenceStateRow.camera_id,
+                    )
+                    .limit(limit)
+                    .with_for_update(skip_locked=True)
+                ).all()
+                for state in states:
+                    self._expire_reservation(session, state, current)
+                session.commit()
+                return len(states)
             except BaseException:
                 session.rollback()
                 raise
@@ -1329,6 +1447,11 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
             raise TypeError("recovery scheduler requires a SystemRecoveryScope")
 
     @staticmethod
+    def _require_positive_recovery_limit(limit: int) -> None:
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise ValueError("recovery batch limit must be positive")
+
+    @staticmethod
     def _append_replay_audit(session: Session, command: AuditCommand) -> None:
         SqlAlchemyAuditSessionRepository(session).append_under_head_lock(
             command,
@@ -1503,7 +1626,11 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                 )
                 .with_for_update()
             )
-            if artifact is not None and artifact.state == ArtifactState.PENDING.value:
+            if (
+                artifact is not None
+                and artifact.state == ArtifactState.PENDING.value
+                and artifact.lifecycle != ArtifactLifecycle.EVIDENCE.value
+            ):
                 artifact.state = ArtifactState.FAILED.value
                 artifact.error_code = "ADMISSION_RESERVATION_EXPIRED"
                 artifact.error_detail = "upload reservation expired before completion"
