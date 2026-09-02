@@ -123,9 +123,9 @@ no-service rerun collected the same 376 tests and produced
 
 ## Limitations and deferred items
 
-- Service tests remain explicitly URL-gated for ordinary local runs; CI/Task 7
-  must continue provisioning PostgreSQL 16 and Redis 7 URLs. Their real service
-  semantics were exercised in this checkpoint.
+- PostgreSQL 16 and Redis 7 service semantics were exercised with dedicated
+  test-owned resources in the final gate recorded below. Compose wiring and
+  deployed credential provisioning remain Task 7 responsibilities.
 - Compose wiring and persistence/source of deployed Gateway expiry leases are
   intentionally deferred to Task 7; Task 3 supplies the typed registry and
   destructive-operation boundary only.
@@ -231,3 +231,76 @@ optional minor improvement to retain/report already successful Gateway-group
 destructions when a later cleanup operation raises remains deferred; it does not
 weaken the expiry authority or trim-safety boundaries delivered here. Task 4,
 push, merge, and Compose integration remain outside this checkpoint.
+
+## Follow-up fix round: cancellation drain and recovery-scan indexes
+
+This uncommitted follow-up addresses the additional review findings without
+changing the frozen Task 3 ownership boundaries.
+
+### Exact RED evidence captured before production changes
+
+- The scheduler barrier regression, run with
+  `PYTHONPATH=apps/web-backend/src:packages/shared-schemas/src .venv/bin/pytest apps/web-backend/tests/modules/tasks/test_recovery.py -q`,
+  collected nine tests and produced `1 failed, 8 passed in 2.29s`. The
+  failure was `assert task.done() is False`: the outer task was already
+  cancelled while the lock-owning worker was still blocked.
+- The schema/migration index regressions collected three tests and produced
+  `2 failed, 1 skipped`. Both local failures showed the expected partial
+  indexes were absent; the PostgreSQL plan test was skipped because
+  `ODP_POSTGRES_TEST_URL` was not set.
+- The exact Gateway annotation regression collected one test and failed because
+  `get_type_hints(...)["capability"]` was `ExpiredGatewayGroup | object`, not
+  exactly `ExpiredGatewayGroup`.
+
+### Follow-up GREEN implementation
+
+- `RecoveryScheduler.run_once_async()` now uses a non-Task executor Future and
+  repeatedly shields/drains it after cancellation, so cancel-all-Tasks cannot
+  make the outer coroutine finish before the advisory-lock-owning sweep's
+  `finally` block. The stable barrier also asserts that the only new asyncio
+  Task is the outer task and cleans up on assertion failure.
+- Revision `0010_recovery_query_indexes` and `InferenceTaskRow` metadata add
+  status-scoped partial indexes for due retry ordering and READY
+  organization/camera probes. `release_due_retries()` uses a bounded correlated
+  second-row `EXISTS`/`OFFSET 1` predicate before its fair limit while retaining
+  camera-first locking and the authoritative `_sync_ready_count()` recheck.
+- `RedisRetentionAdapter.destroy_group()` now exposes the exact
+  `ExpiredGatewayGroup` annotation while retaining runtime rejection of raw or
+  live capabilities. The PostgreSQL fixture marks cleanup authority before
+  `CREATE DATABASE` and uses `DROP DATABASE IF EXISTS` in `finally`.
+
+The affected local selection produced `70 passed, 7 skipped in 1.55s`; the full
+backend suite produced `362 passed, 28 skipped, 1 warning in 23.43s`. The
+warning is the existing Starlette/httpx deprecation. Ruff, compileall,
+`uv lock --check`, and `git diff --check` passed. The new PostgreSQL plan test
+loads 100,000 rows with two READY rows, runs `ANALYZE`, leaves the planner at
+default settings, and asserts both partial-index names plus no `Seq Scan` in
+the JSON plan.
+
+## Final configured service gate for the follow-up
+
+The controller reran the service gates with the correct isolation and runtime
+configuration after two intermediate environment-misconfigured attempts. Those
+intermediate attempts are not code failures and are excluded from the final
+counts.
+
+- Dedicated Redis 7 retention regression: `2 passed`.
+- Fresh isolated PostgreSQL 16 `test_postgres_recovery_scheduler.py`:
+  `7 passed in 2.47s`. This includes the 100,000-row/2-READY/default-planner
+  plan regression, which selected both status-scoped partial indexes and had
+  no `Seq Scan`.
+- Correctly isolated CI-shaped full backend gate: `390 passed, 1 warning in
+  71.45s`, zero skips. It used an owner test database, a runtime app-role
+  database URL, and Redis 7. The sole warning remains the existing
+  Starlette/httpx deprecation.
+
+Current-diff self-review confirms that the executor Future is not a
+discoverable asyncio Task, repeated cancellation drains the lock-owning sweep
+before re-raising cancellation, the retry scan is bounded before its fair
+limit, and the final camera-first lock plus authoritative `_sync_ready_count()`
+recheck remains intact. Migration `0010`, ORM metadata, upgrade/downgrade
+coverage, schema predicates, the exact Gateway capability annotation, and the
+CREATE DATABASE cleanup-authority guard are all covered by tests. The optional
+minor improvement to retain/report already successful Gateway destructions
+after a later cleanup error remains deferred; the error is still isolated and
+visible to the retention process.
