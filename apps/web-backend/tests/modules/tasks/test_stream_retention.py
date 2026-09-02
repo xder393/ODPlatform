@@ -34,6 +34,21 @@ def test_safe_trim_planner_uses_smallest_pending_before_delivery_progress_and_fl
     ) == "70-0"
 
 
+def test_safe_trim_planner_rejects_pending_beyond_observed_delivery_progress():
+    """A rewound group must retain history below its still-Pending delivery."""
+    from odp_api.modules.tasks.retention import GroupProgress, SafeTrimPlanner
+
+    groups = (
+        GroupProgress(
+            "rewound-group",
+            last_delivered_id="1000-0",
+            smallest_pending_id="2000-0",
+        ),
+    )
+
+    assert SafeTrimPlanner.safe_min_id(groups, "2500-0") is None
+
+
 @pytest.mark.parametrize(
     "groups,floor",
     [
@@ -335,6 +350,53 @@ async def test_gateway_cleanup_adapter_refuses_non_alert_stream_and_empty_instan
         await adapter.destroy_group("odp:inspection:alerts", "odp-alert-gateway:")
 
     assert not [call for call in client.calls if call[:2] == ("XGROUP", "DESTROY")]
+
+
+@pytest.mark.anyio
+async def test_gateway_registry_issues_typed_expired_capabilities_only():
+    """Raw names and live leases must never be usable as destructive authority."""
+    from odp_api.modules.tasks.retention import (
+        GatewayGroupExpiryRegistry,
+        GatewayGroupLease,
+        RedisRetentionAdapter,
+    )
+
+    expired = GatewayGroupLease(
+        "odp-alert-gateway:expired-capability",
+        expires_at=NOW - timedelta(seconds=1),
+    )
+    live = GatewayGroupLease(
+        "odp-alert-gateway:live-capability",
+        expires_at=NOW + timedelta(seconds=1),
+    )
+    registry = GatewayGroupExpiryRegistry((expired, live))
+    capabilities = registry.expired_groups(NOW)
+    assert len(capabilities) == 1
+    assert capabilities[0].group_name == expired.group_name
+
+    client = RecordingRedis(
+        groups=[{"name": expired.group_name, "last-delivered-id": "10-0"}],
+        pending={},
+    )
+    adapter = RedisRetentionAdapter(client)
+
+    with pytest.raises(TypeError, match="expired Gateway capability"):
+        await adapter.destroy_group("odp:inspection:alerts", expired.group_name)
+    with pytest.raises(TypeError, match="expired Gateway capability"):
+        await adapter.destroy_group("odp:inspection:alerts", live)
+    assert not [call for call in client.calls if call[:2] == ("XGROUP", "DESTROY")]
+
+    assert await adapter.destroy_group(
+        "odp:inspection:alerts", capabilities[0]
+    ) is True
+    assert client.calls == [
+        (
+            "XGROUP",
+            "DESTROY",
+            "odp:inspection:alerts",
+            expired.group_name,
+        )
+    ]
 
 
 @pytest.mark.anyio

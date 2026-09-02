@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, aliased, sessionmaker
 
 from odp_api.adapters.persistence.repositories import SqlAlchemyAuditSessionRepository
 from odp_api.adapters.persistence.task_models import (
@@ -988,11 +988,24 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
         with self._session_factory() as session:
             try:
                 current = self._db_now(session)
+                ready_task = aliased(InferenceTaskRow)
+                ready_count = (
+                    select(func.count(ready_task.task_id))
+                    .where(
+                        ready_task.organization_id
+                        == InferenceTaskRow.organization_id,
+                        ready_task.camera_id == InferenceTaskRow.camera_id,
+                        ready_task.status == TaskStatus.READY.value,
+                    )
+                    .correlate(InferenceTaskRow)
+                    .scalar_subquery()
+                )
                 candidate_ids = session.scalars(
                     select(InferenceTaskRow)
                     .where(
                         InferenceTaskRow.status == TaskStatus.RETRY_WAIT.value,
                         InferenceTaskRow.next_attempt_at <= current,
+                        ready_count < 2,
                     )
                     .with_only_columns(InferenceTaskRow.task_id)
                     .order_by(InferenceTaskRow.next_attempt_at, InferenceTaskRow.task_id)
@@ -1093,6 +1106,10 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                         & (
                             InferenceTaskRow.organization_id
                             == CameraInferenceStateRow.organization_id
+                        )
+                        & (
+                            InferenceTaskRow.camera_id
+                            == CameraInferenceStateRow.camera_id
                         ),
                     )
                     .where(
@@ -1114,6 +1131,7 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                         .where(
                             InferenceTaskRow.task_id == state.running_task_id,
                             InferenceTaskRow.organization_id == state.organization_id,
+                            InferenceTaskRow.camera_id == state.camera_id,
                             InferenceTaskRow.status == TaskStatus.RUNNING.value,
                         )
                         .with_for_update()

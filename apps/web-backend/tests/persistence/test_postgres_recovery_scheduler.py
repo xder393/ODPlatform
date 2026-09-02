@@ -1,23 +1,72 @@
 """Real PostgreSQL session advisory-lock coverage for the recovery scheduler."""
 
+import asyncio
 import os
-from datetime import UTC, datetime
+import re
+import threading
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select, text
+from alembic.config import Config
+from sqlalchemy import create_engine, select, text
+from sqlalchemy.engine import make_url
 
-from odp_api.adapters.persistence.models import Base
+from alembic import command
 from odp_api.adapters.persistence.task_control import SqlAlchemyTaskControlRepository
-from odp_api.adapters.persistence.task_models import OutboxEventRow
+from odp_api.adapters.persistence.task_models import (
+    CameraInferenceStateRow,
+    FrameArtifactRow,
+    InferenceTaskRow,
+    InspectionSessionRow,
+    OutboxEventRow,
+)
 from odp_api.db import create_engine_and_session
+from odp_api.modules.tasks.models import TaskStatus
 from odp_api.modules.tasks.recovery import RecoveryService, SystemRecoveryScope
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("ODP_POSTGRES_TEST_URL"),
     reason="requires the dedicated ODP_POSTGRES_TEST_URL CI database",
 )
+
+
+@pytest.fixture
+def postgres_recovery_url():
+    """Create one migrated database per test and remove it after all pools close."""
+    shared_url = make_url(os.environ["ODP_POSTGRES_TEST_URL"])
+    database_name = f"odp_task3_recovery_{uuid4().hex}"
+    if re.fullmatch(r"[a-z0-9_]+", database_name) is None:
+        raise AssertionError("generated PostgreSQL test database name is unsafe")
+    admin_engine = create_engine(
+        shared_url.set(database="postgres"), isolation_level="AUTOCOMMIT"
+    )
+    isolated_url = shared_url.set(database=database_name).render_as_string(
+        hide_password=False
+    )
+    with admin_engine.connect() as connection:
+        connection.exec_driver_sql(f'CREATE DATABASE "{database_name}"')
+
+    try:
+        config = Config(str(Path(__file__).parents[2] / "alembic.ini"))
+        config.set_main_option("sqlalchemy.url", isolated_url.replace("%", "%%"))
+        command.upgrade(config, "head")
+        yield isolated_url
+    finally:
+        try:
+            with admin_engine.connect() as connection:
+                connection.execute(
+                    text(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                        "WHERE datname = :database_name AND pid <> pg_backend_pid()"
+                    ),
+                    {"database_name": database_name},
+                )
+                connection.exec_driver_sql(f'DROP DATABASE "{database_name}"')
+        finally:
+            admin_engine.dispose()
 
 
 def _recording_repository(calls, *, error=None):
@@ -40,7 +89,9 @@ def _recording_repository(calls, *, error=None):
     )
 
 
-def test_two_postgresql_schedulers_exclude_loser_without_mutation():
+def test_two_postgresql_schedulers_exclude_loser_without_mutation(
+    postgres_recovery_url,
+):
     """A session lock held elsewhere must make the complete second sweep a no-op."""
     from odp_api.processes.recovery_scheduler import (
         RECOVERY_ADVISORY_LOCK_KEY,
@@ -48,8 +99,8 @@ def test_two_postgresql_schedulers_exclude_loser_without_mutation():
         RecoveryScheduler,
     )
 
-    holder_engine, _ = create_engine_and_session(os.environ["ODP_POSTGRES_TEST_URL"])
-    contender_engine, _ = create_engine_and_session(os.environ["ODP_POSTGRES_TEST_URL"])
+    holder_engine, _ = create_engine_and_session(postgres_recovery_url)
+    contender_engine, _ = create_engine_and_session(postgres_recovery_url)
     held_lock = PostgreSqlAdvisoryLock(holder_engine, key=RECOVERY_ADVISORY_LOCK_KEY)
     contender_lock = PostgreSqlAdvisoryLock(
         contender_engine, key=RECOVERY_ADVISORY_LOCK_KEY
@@ -77,7 +128,9 @@ def test_two_postgresql_schedulers_exclude_loser_without_mutation():
         holder_engine.dispose()
 
 
-def test_postgresql_scheduler_error_releases_session_lock_for_next_scheduler():
+def test_postgresql_scheduler_error_releases_session_lock_for_next_scheduler(
+    postgres_recovery_url,
+):
     """An exception in any transaction must not strand the session-level lock."""
     from odp_api.processes.recovery_scheduler import (
         RECOVERY_ADVISORY_LOCK_KEY,
@@ -85,10 +138,8 @@ def test_postgresql_scheduler_error_releases_session_lock_for_next_scheduler():
         RecoveryScheduler,
     )
 
-    first_engine, _ = create_engine_and_session(os.environ["ODP_POSTGRES_TEST_URL"])
-    verifier_engine, _ = create_engine_and_session(
-        os.environ["ODP_POSTGRES_TEST_URL"]
-    )
+    first_engine, _ = create_engine_and_session(postgres_recovery_url)
+    verifier_engine, _ = create_engine_and_session(postgres_recovery_url)
     first = RecoveryScheduler(
         RecoveryService(
             _recording_repository([], error=RuntimeError("injected sweep failure")),
@@ -113,7 +164,9 @@ def test_postgresql_scheduler_error_releases_session_lock_for_next_scheduler():
         first_engine.dispose()
 
 
-def test_postgresql_lock_blocks_real_outbox_repair_then_winner_clears_claim():
+def test_postgresql_lock_blocks_real_outbox_repair_then_winner_clears_claim(
+    postgres_recovery_url,
+):
     """Leadership must guard persisted mutations, not only a fake call list."""
     from odp_api.processes.recovery_scheduler import (
         RECOVERY_ADVISORY_LOCK_KEY,
@@ -121,11 +174,10 @@ def test_postgresql_lock_blocks_real_outbox_repair_then_winner_clears_claim():
         RecoveryScheduler,
     )
 
-    holder_engine, _ = create_engine_and_session(os.environ["ODP_POSTGRES_TEST_URL"])
+    holder_engine, _ = create_engine_and_session(postgres_recovery_url)
     scheduler_engine, scheduler_sessions = create_engine_and_session(
-        os.environ["ODP_POSTGRES_TEST_URL"]
+        postgres_recovery_url
     )
-    Base.metadata.create_all(scheduler_engine)
     now = datetime.now(UTC).replace(microsecond=0)
     outbox_id = uuid4()
     with scheduler_sessions.begin() as session:
@@ -196,3 +248,218 @@ def test_postgresql_lock_blocks_real_outbox_repair_then_winner_clears_claim():
                 session.delete(row)
         scheduler_engine.dispose()
         holder_engine.dispose()
+
+
+def test_postgresql_expired_lease_ignores_mismatched_camera_anchor(
+    postgres_recovery_url,
+):
+    """A duplicate wrong-camera anchor must not mutate another camera's Task."""
+    engine, sessions = create_engine_and_session(postgres_recovery_url)
+    now = datetime.now(UTC).replace(microsecond=0)
+    organization_id = uuid4()
+    correct_camera_id = uuid4()
+    wrong_camera_id = uuid4()
+    session_id = uuid4()
+    artifact_id = uuid4()
+    task_id = uuid4()
+    with sessions.begin() as session:
+        session.add(
+            InspectionSessionRow(
+                session_id=session_id,
+                organization_id=organization_id,
+                camera_id=correct_camera_id,
+                line_id=uuid4(),
+                source_type="TEST",
+                sanitized_uri="rtsp://test.invalid/recovery-anchor",
+                status="RUNNING",
+                idempotency_key=str(uuid4()),
+                started_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.flush()
+        session.add(
+            FrameArtifactRow(
+                artifact_id=artifact_id,
+                organization_id=organization_id,
+                camera_id=correct_camera_id,
+                stream_session_id=session_id,
+                frame_sequence=1,
+                captured_at=now,
+                object_key="recovery-anchor/frame.jpg",
+                sha256="a" * 64,
+                content_length=1,
+                state="AVAILABLE",
+                lifecycle="PROCESSING",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.flush()
+        session.add(
+            InferenceTaskRow(
+                task_id=task_id,
+                organization_id=organization_id,
+                camera_id=correct_camera_id,
+                artifact_id=artifact_id,
+                idempotency_key=str(uuid4()),
+                status=TaskStatus.RUNNING.value,
+                dispatch_seq=1,
+                attempt_count=1,
+                lease_owner="worker-a",
+                fence_token=1,
+                lease_expires_at=now - timedelta(seconds=1),
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.flush()
+        session.add_all(
+            [
+                CameraInferenceStateRow(
+                    organization_id=organization_id,
+                    camera_id=correct_camera_id,
+                    running_task_id=task_id,
+                    ready_count=0,
+                    version=0,
+                    updated_at=now,
+                ),
+                CameraInferenceStateRow(
+                    organization_id=organization_id,
+                    camera_id=wrong_camera_id,
+                    running_task_id=task_id,
+                    ready_count=0,
+                    version=0,
+                    updated_at=now,
+                ),
+            ]
+        )
+
+    blocker = sessions()
+    blocker.begin()
+    blocker.scalar(
+        select(CameraInferenceStateRow)
+        .where(
+            CameraInferenceStateRow.organization_id == organization_id,
+            CameraInferenceStateRow.camera_id == correct_camera_id,
+        )
+        .with_for_update()
+    )
+    repository = SqlAlchemyTaskControlRepository(sessions)
+    scope = SystemRecoveryScope("wrong-camera-anchor")
+    try:
+        assert repository.expire_leases(now, scope) == 0
+        with sessions() as session:
+            task = session.get(InferenceTaskRow, task_id)
+            wrong = session.get(
+                CameraInferenceStateRow, (organization_id, wrong_camera_id)
+            )
+            assert task.status == TaskStatus.RUNNING.value
+            assert wrong.running_task_id == task_id
+
+        blocker.rollback()
+        assert repository.expire_leases(now, scope) == 1
+        with sessions() as session:
+            task = session.get(InferenceTaskRow, task_id)
+            correct = session.get(
+                CameraInferenceStateRow, (organization_id, correct_camera_id)
+            )
+            wrong = session.get(
+                CameraInferenceStateRow, (organization_id, wrong_camera_id)
+            )
+            assert task.status == TaskStatus.RETRY_WAIT.value
+            assert correct.running_task_id is None
+            assert wrong.running_task_id == task_id
+    finally:
+        blocker.rollback()
+        blocker.close()
+        engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_postgresql_inflight_scheduler_lock_survives_repeated_cancellation(
+    postgres_recovery_url,
+):
+    """A blocked sweep excludes a peer until its worker releases the real lock."""
+    from odp_api.processes.recovery_scheduler import (
+        RECOVERY_ADVISORY_LOCK_KEY,
+        PostgreSqlAdvisoryLock,
+        RecoveryScheduler,
+    )
+
+    first_engine, _ = create_engine_and_session(postgres_recovery_url)
+    second_engine, _ = create_engine_and_session(postgres_recovery_url)
+    third_engine, _ = create_engine_and_session(postgres_recovery_url)
+    entered = threading.Event()
+    permit_finish = threading.Event()
+    loser_calls = []
+
+    def blocking_operation(now, scope):
+        entered.set()
+        assert permit_finish.wait(timeout=3)
+        return 0
+
+    first_repo = SimpleNamespace(
+        release_due_retries=blocking_operation,
+        redispatch_stale_ready=lambda now, scope: 0,
+        expire_leases=lambda now, scope: 0,
+        release_expired_outbox_claims=lambda now, scope: 0,
+        count_quarantined_messages=lambda now, scope: 0,
+        expire_stale_artifact_reservations=lambda now, scope: 0,
+    )
+    first = RecoveryScheduler(
+        RecoveryService(first_repo, SystemRecoveryScope("postgres-inflight-first")),
+        PostgreSqlAdvisoryLock(first_engine, key=RECOVERY_ADVISORY_LOCK_KEY),
+        clock=lambda: datetime.now(UTC),
+    )
+    second = RecoveryScheduler(
+        RecoveryService(
+            _recording_repository(loser_calls),
+            SystemRecoveryScope("postgres-inflight-loser"),
+        ),
+        PostgreSqlAdvisoryLock(second_engine, key=RECOVERY_ADVISORY_LOCK_KEY),
+        clock=lambda: datetime.now(UTC),
+    )
+    task = asyncio.create_task(first.run_once_async())
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        loser = await asyncio.to_thread(second.run_once)
+        assert loser.skipped_locked is True
+        assert loser_calls == []
+
+        task.cancel()
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert task.done() is False
+
+        permit_finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        third = PostgreSqlAdvisoryLock(
+            third_engine, key=RECOVERY_ADVISORY_LOCK_KEY
+        ).try_acquire()
+        assert third is not None
+        third.release()
+    finally:
+        permit_finish.set()
+        if not task.done():
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        third_engine.dispose()
+        second_engine.dispose()
+        first_engine.dispose()
+
+
+def test_postgresql_recovery_tests_use_a_fresh_migrated_database(
+    postgres_recovery_url,
+):
+    """The recovery module must never create unversioned tables in the shared URL."""
+    assert postgres_recovery_url != os.environ["ODP_POSTGRES_TEST_URL"]
+    engine, _ = create_engine_and_session(postgres_recovery_url)
+    try:
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT version_num FROM alembic_version"))
+    finally:
+        engine.dispose()

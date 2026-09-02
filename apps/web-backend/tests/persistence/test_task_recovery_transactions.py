@@ -207,6 +207,128 @@ def test_due_retry_stays_waiting_when_camera_ready_capacity_is_full(repository, 
         assert session.query(OutboxEventRow).filter_by(task_id=task, dispatch_seq=2).count() == 0
 
 
+def test_due_retry_scan_skips_capacity_blocked_prefix_before_applying_limit(
+    repository, system_scope
+):
+    """Blocked early rows must not starve a later eligible camera forever."""
+    now = datetime.now(UTC).replace(microsecond=0)
+    blocked = [_seed_task(repository, status=TaskStatus.RETRY_WAIT) for _ in range(2)]
+    eligible = _seed_task(repository, status=TaskStatus.RETRY_WAIT)
+    with repository._session_factory() as session:
+        for index, (tenant, camera, task, _) in enumerate(blocked, start=3):
+            session.get(InferenceTaskRow, task).next_attempt_at = now - timedelta(
+                seconds=index
+            )
+            for ready_sequence in (1, 2):
+                artifact_id, ready_task_id = uuid4(), uuid4()
+                session.add_all(
+                    [
+                        FrameArtifactRow(
+                            artifact_id=artifact_id,
+                            organization_id=tenant,
+                            camera_id=camera,
+                            stream_session_id=uuid4(),
+                            frame_sequence=100 * index + ready_sequence,
+                            captured_at=now,
+                            object_key=f"blocked/{index}/{ready_sequence}.jpg",
+                            sha256=f"{100 * index + ready_sequence:064x}",
+                            content_length=1,
+                            state="AVAILABLE",
+                            lifecycle="PROCESSING",
+                            created_at=now,
+                            updated_at=now,
+                        ),
+                        InferenceTaskRow(
+                            task_id=ready_task_id,
+                            organization_id=tenant,
+                            camera_id=camera,
+                            artifact_id=artifact_id,
+                            idempotency_key=str(ready_task_id),
+                            status=TaskStatus.READY.value,
+                            dispatch_seq=1,
+                            attempt_count=0,
+                            fence_token=0,
+                            created_at=now,
+                            updated_at=now,
+                        ),
+                    ]
+                )
+            session.get(CameraInferenceStateRow, (tenant, camera)).ready_count = 2
+        session.get(InferenceTaskRow, eligible[2]).next_attempt_at = now - timedelta(
+            seconds=1
+        )
+        session.commit()
+
+    assert repository.release_due_retries(now, system_scope, limit=2) == 1
+    assert [_row(repository, item[2]).status for item in blocked] == [
+        TaskStatus.RETRY_WAIT.value,
+        TaskStatus.RETRY_WAIT.value,
+    ]
+    released = _row(repository, eligible[2])
+    assert (released.status, released.dispatch_seq) == (TaskStatus.READY.value, 2)
+
+
+def test_due_retry_prefilter_uses_authoritative_ready_rows_not_cached_count(
+    repository, system_scope
+):
+    """A stale materialized count must neither starve nor over-admit a camera."""
+    now = datetime.now(UTC).replace(microsecond=0)
+    blocked = _seed_task(repository, status=TaskStatus.RETRY_WAIT)
+    eligible = _seed_task(repository, status=TaskStatus.RETRY_WAIT)
+    with repository._session_factory() as session:
+        session.get(InferenceTaskRow, blocked[2]).next_attempt_at = now - timedelta(
+            seconds=2
+        )
+        session.get(InferenceTaskRow, eligible[2]).next_attempt_at = now - timedelta(
+            seconds=1
+        )
+        for ready_sequence in (1, 2):
+            artifact_id, ready_task_id = uuid4(), uuid4()
+            session.add_all(
+                [
+                    FrameArtifactRow(
+                        artifact_id=artifact_id,
+                        organization_id=blocked[0],
+                        camera_id=blocked[1],
+                        stream_session_id=uuid4(),
+                        frame_sequence=500 + ready_sequence,
+                        captured_at=now,
+                        object_key=f"stale-count/{ready_sequence}.jpg",
+                        sha256=f"{500 + ready_sequence:064x}",
+                        content_length=1,
+                        state="AVAILABLE",
+                        lifecycle="PROCESSING",
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                    InferenceTaskRow(
+                        task_id=ready_task_id,
+                        organization_id=blocked[0],
+                        camera_id=blocked[1],
+                        artifact_id=artifact_id,
+                        idempotency_key=str(ready_task_id),
+                        status=TaskStatus.READY.value,
+                        dispatch_seq=1,
+                        attempt_count=0,
+                        fence_token=0,
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                ]
+            )
+        session.get(
+            CameraInferenceStateRow, (blocked[0], blocked[1])
+        ).ready_count = 0
+        session.get(
+            CameraInferenceStateRow, (eligible[0], eligible[1])
+        ).ready_count = 2
+        session.commit()
+
+    assert repository.release_due_retries(now, system_scope, limit=2) == 1
+    assert _row(repository, blocked[2]).status == TaskStatus.RETRY_WAIT.value
+    assert _row(repository, eligible[2]).status == TaskStatus.READY.value
+
+
 def test_second_retry_waits_two_seconds_and_third_failure_dead_letters(repository, system_scope):
     tenant, _, task, now = _seed_task(repository)
     first = repository.claim(task, tenant, "worker", now)

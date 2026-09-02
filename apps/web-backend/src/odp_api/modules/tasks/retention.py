@@ -78,7 +78,7 @@ class SafeTrimPlanner:
                 progress = delivered
             else:
                 pending = RedisStreamId.parse(group.smallest_pending_id)
-                if pending is None:
+                if pending is None or pending > delivered:
                     return None
                 progress = pending
             progress_ids.append(progress)
@@ -124,6 +124,22 @@ class GatewayGroupLease:
             raise ValueError("Gateway group expiry must be timezone-aware")
 
 
+@dataclass(frozen=True, slots=True)
+class ExpiredGatewayGroup:
+    """Validated authority to destroy one expired temporary Gateway group."""
+
+    group_name: str
+    expires_at: datetime
+    verified_at: datetime
+
+    def __post_init__(self) -> None:
+        GatewayGroupLease(self.group_name, self.expires_at)
+        if self.verified_at.tzinfo is None:
+            raise ValueError("Gateway expiry verification must be timezone-aware")
+        if self.expires_at.astimezone(UTC) > self.verified_at.astimezone(UTC):
+            raise ValueError("Gateway group lease is still live")
+
+
 class GatewayGroupExpiryRegistry:
     """Typed registry; Redis group existence is never treated as expiry authority."""
 
@@ -136,12 +152,16 @@ class GatewayGroupExpiryRegistry:
             raise ValueError("Gateway group registry contains duplicate groups")
         self._leases = normalized
 
-    def expired_groups(self, now: datetime) -> tuple[str, ...]:
+    def expired_groups(self, now: datetime) -> tuple[ExpiredGatewayGroup, ...]:
         if not isinstance(now, datetime) or now.tzinfo is None:
             raise ValueError("Gateway expiry clock must be timezone-aware")
         current = now.astimezone(UTC)
         return tuple(
-            lease.group_name
+            ExpiredGatewayGroup(
+                group_name=lease.group_name,
+                expires_at=lease.expires_at,
+                verified_at=current,
+            )
             for lease in self._leases
             if lease.expires_at.astimezone(UTC) <= current
         )
@@ -215,9 +235,20 @@ class RedisRetentionAdapter:
             )
         return tuple(progress)
 
-    async def destroy_group(self, stream_name: str, group_name: str) -> bool:
+    async def destroy_group(
+        self, stream_name: str, capability: ExpiredGatewayGroup | object
+    ) -> bool:
         if stream_name != ALERT_STREAM_NAME:
             raise ValueError("Gateway group cleanup is allowed only for the alert stream")
+        if isinstance(capability, str) and (
+            not capability.startswith(GATEWAY_GROUP_PREFIX)
+            or not capability[len(GATEWAY_GROUP_PREFIX) :].strip()
+            or "\x00" in capability
+        ):
+            raise ValueError("refusing to destroy a group outside the Gateway allowlist")
+        if not isinstance(capability, ExpiredGatewayGroup):
+            raise TypeError("destroy_group requires an expired Gateway capability")
+        group_name = capability.group_name
         if (
             not group_name.startswith(GATEWAY_GROUP_PREFIX)
             or not group_name[len(GATEWAY_GROUP_PREFIX) :].strip()
@@ -263,9 +294,11 @@ class StreamRetentionController:
 
         destroyed: list[str] = []
         if self.policy.gateway_groups is not None:
-            for group_name in self.policy.gateway_groups.expired_groups(now):
-                if await self._adapter.destroy_group(self.policy.stream_name, group_name):
-                    destroyed.append(group_name)
+            for capability in self.policy.gateway_groups.expired_groups(now):
+                if await self._adapter.destroy_group(
+                    self.policy.stream_name, capability
+                ):
+                    destroyed.append(capability.group_name)
 
         groups = await self._adapter.group_progress(self.policy.stream_name)
         safe_min_id = SafeTrimPlanner.safe_min_id(
@@ -381,6 +414,7 @@ __all__ = [
     "ALERT_STREAM_NAME",
     "GATEWAY_GROUP_PREFIX",
     "INFERENCE_STREAM_NAME",
+    "ExpiredGatewayGroup",
     "GatewayGroupExpiryRegistry",
     "GatewayGroupLease",
     "GroupProgress",

@@ -169,8 +169,14 @@ class RecoveryScheduler:
             # ``to_thread`` cannot stop an in-flight database sweep.  Awaiting the
             # shielded worker guarantees its finally block releases the session
             # advisory lock before cancellation leaves this process boundary.
+            # Repeated cancellation requests must not interrupt this drain.
+            while not worker.done():
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    continue
             with contextlib.suppress(Exception):
-                await worker
+                worker.result()
             raise
 
     async def run(self, stop_event: asyncio.Event | None = None) -> None:
