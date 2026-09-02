@@ -3,6 +3,7 @@
 ## Delivery
 
 - Implementation and tests: `e3713f6bee3aec36f893c0645a7e293e917cc24a`
+- Formal-review fixes and regressions: `755014a94a1dde2be5e912acc0475d76078cc842`
 - Base: `73b02d611dea24d8d6453ee7fda8d6f0f7f8a75a`
 - Scope is limited to Task 3. No Compose wiring, push, merge, or Task 4 work is included.
 
@@ -135,7 +136,98 @@ no-service rerun collected the same 376 tests and produced
 
 ## Self-review conclusion
 
-The implementation matches every frozen Task 3 ownership and data-safety
-boundary. No open Task 3 defect was found in the final line-by-line review.
-Independent code review is still required before the controller marks the task
-complete or begins Task 4.
+The implementation matches the initially frozen Task 3 ownership and
+data-safety boundaries. The formal review and its resulting fixes are recorded
+below; Task 4 must not begin from this report alone.
+
+## Formal review fix round 1
+
+Review range:
+`52597913c3e49c27715b310a9d10659721b50922..755014a94a1dde2be5e912acc0475d76078cc842`.
+Seven Important findings were accepted and fixed without rewriting the original
+Task 3 commits:
+
+1. repeated cancellation could let `run_once_async` return while its thread was
+   still using the session advisory lock;
+2. the destructive Gateway adapter accepted an untyped group name instead of
+   requiring registry-issued expiry authority;
+3. a smallest Pending ID beyond the observed last-delivered ID did not fail
+   closed;
+4. lease expiry joined and rechecked the camera admission anchor without
+   binding `camera_id`;
+5. a capacity-blocked retry prefix could consume the candidate limit and starve
+   later eligible cameras;
+6. the real PostgreSQL suite did not prove lock exclusion while scheduler A was
+   blocked inside a repository operation; and
+7. PostgreSQL recovery tests could create ORM metadata and sweep residual rows
+   on a shared test database.
+
+### Review RED evidence
+
+- Four local regressions together produced `4 failed in 2.40s`: the outer task
+  completed after a second cancellation while its worker/lock remained live;
+  Pending `2000-0` beyond last-delivered was incorrectly selected as the trim
+  watermark; the expiry registry returned a raw `str`; and a blocked prefix at
+  the scan limit prevented a later free camera's retry from being released.
+- The real Redis 7 rewind regression produced `1 failed in 0.10s`: after
+  `XGROUP SETID` rewound last-delivered below Pending, the planner returned
+  `2000-0`, trimmed one entry, and deleted the `1000-0` payload.
+- Three real PostgreSQL isolation/concurrency regressions produced
+  `2 failed, 1 error in 0.43s`: lease expiry mutated through the wrong camera
+  anchor, the repeated-cancel scheduler task completed before its advisory-lock
+  worker, and the fresh migrated database fixture was not yet available.
+- A separate materialized-count regression produced `1 failed in 0.31s`,
+  proving that `CameraInferenceState.ready_count` could not safely serve as the
+  pre-limit capacity predicate when actual READY rows disagreed.
+
+### Review GREEN implementation
+
+- Cancellation now repeatedly shields and drains the thread-backed worker,
+  re-raising cancellation only after the worker's `finally` has released the
+  PostgreSQL advisory lock.
+- Gateway cleanup now requires an `ExpiredGatewayGroup` capability validated by
+  the typed expiry registry. Raw and live values are rejected before Redis I/O.
+- Trim planning rejects `smallest_pending_id > last_delivered_id`; the real
+  Redis `XGROUP SETID` rewind case preserves the older payload.
+- Lease expiry binds organization, task, and camera on both the admission-state
+  join and locked task recheck.
+- Retry candidate selection uses a correlated count of authoritative READY task
+  rows before the bounded limit, not the materialized camera counter. The
+  existing camera-first lock and synchronized final recheck remain authoritative
+  for the mutation, including missing-state and stale-counter cases.
+- Real PostgreSQL recovery tests create a uniquely named database, upgrade it to
+  Alembic head, and terminate/drop only that database in `finally`, including
+  migration/setup failure paths. They no longer call `Base.metadata.create_all`
+  or sweep unrelated residual fixtures.
+
+### Review verification
+
+- Local affected selection: `65 passed in 1.32s`.
+- Repeated-cancel regression: `1 passed in 0.23s`.
+- Retry starvation plus stale-count regressions: `2 passed in 0.29s`.
+- Real Redis 7 retention regressions: `2 passed in 0.10s`.
+- Isolated real PostgreSQL recovery file: `6 passed in 1.51s`; a direct query
+  found zero remaining `odp_task3_recovery_%` databases afterward.
+- PostgreSQL recovery followed immediately by Alembic startup tests:
+  `12 passed in 2.14s`, proving no schema-without-version contamination.
+- The original 176-test service selection plus nine review regressions used a
+  fresh Alembic-head PostgreSQL database and empty Redis database and produced
+  `185 passed in 49.31s`, with zero skips.
+- The final CI-shaped full backend gate used fresh database
+  `odp_task3_fixgreen_full_20260902_b`, runtime-role bootstrap and grants,
+  knowledge and Alembic migrations, seed data, and empty Redis logical DB 11.
+  It collected 385 tests and produced `385 passed, 1 warning in 69.73s`, with
+  zero skips. The sole warning is the existing Starlette/httpx deprecation.
+- The no-service full backend gate produced
+  `358 passed, 27 explicitly service-gated skips in 24.07s`.
+- Full Ruff, compileall, `uv lock --check`, and diff-check gates passed. The
+  final frozen-boundary scan found no Task 3 producer-side `MAXLEN` and no
+  recovery/retention ownership of `XREADGROUP` or `XAUTOCLAIM`.
+
+### Review conclusion and remaining limitation
+
+Line-by-line self-review found no remaining Important Task 3 defect. The
+optional minor improvement to retain/report already successful Gateway-group
+destructions when a later cleanup operation raises remains deferred; it does not
+weaken the expiry authority or trim-safety boundaries delivered here. Task 4,
+push, merge, and Compose integration remain outside this checkpoint.
