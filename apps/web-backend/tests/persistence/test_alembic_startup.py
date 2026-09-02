@@ -56,6 +56,33 @@ def test_programmatic_alembic_url_has_priority_over_odp_environment(tmp_path, mo
         environment_engine.dispose()
 
 
+def test_recovery_indexes_upgrade_and_downgrade_with_alembic(tmp_path) -> None:
+    """Revision 0010 must install and remove both partial recovery indexes."""
+    database_url = f"sqlite:///{tmp_path / 'recovery-indexes.db'}"
+    config = Config(str(BACKEND_DIR / "alembic.ini"))
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(config, "head")
+    engine, _ = create_engine_and_session(database_url)
+    expected = {
+        "ix_inference_tasks_retry_wait_next_attempt_task",
+        "ix_inference_tasks_ready_organization_camera",
+    }
+    try:
+        assert expected <= {
+            item["name"] for item in inspect(engine).get_indexes("inference_tasks")
+        }
+        command.downgrade(config, "0009_bound_message_quarantine_error")
+        assert not expected & {
+            item["name"] for item in inspect(engine).get_indexes("inference_tasks")
+        }
+        command.upgrade(config, "head")
+        assert expected <= {
+            item["name"] for item in inspect(engine).get_indexes("inference_tasks")
+        }
+    finally:
+        engine.dispose()
+
+
 def test_alembic_cli_renders_postgresql_ddl_and_widens_revision_storage() -> None:
     """PostgreSQL startup SQL must use PostgreSQL types and fit long revisions."""
     result = subprocess.run(

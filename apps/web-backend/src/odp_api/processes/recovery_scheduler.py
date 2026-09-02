@@ -162,20 +162,24 @@ class RecoveryScheduler:
     async def run_once_async(self) -> RecoverySchedulerSummary:
         """Offload synchronous SQLAlchemy work and drain it before cancellation exits."""
 
-        worker = asyncio.create_task(asyncio.to_thread(self.run_once))
+        # ``run_in_executor`` returns a Future rather than a discoverable Task.
+        # Shutdown code commonly cancels every Task in the loop; keeping the
+        # executor work as a Future means that cancellation can only reach this
+        # coroutine, while the session-owning sweep continues to its ``finally``.
+        worker = asyncio.get_running_loop().run_in_executor(None, self.run_once)
         try:
             return await asyncio.shield(worker)
         except asyncio.CancelledError:
-            # ``to_thread`` cannot stop an in-flight database sweep.  Awaiting the
-            # shielded worker guarantees its finally block releases the session
-            # advisory lock before cancellation leaves this process boundary.
+            # An executor call cannot be stopped in-flight. Awaiting the shielded
+            # worker guarantees its finally block releases the session advisory
+            # lock before cancellation leaves this process boundary.
             # Repeated cancellation requests must not interrupt this drain.
             while not worker.done():
                 try:
                     await asyncio.shield(worker)
                 except asyncio.CancelledError:
                     continue
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception, asyncio.CancelledError):
                 worker.result()
             raise
 

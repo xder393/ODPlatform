@@ -399,6 +399,19 @@ async def test_gateway_registry_issues_typed_expired_capabilities_only():
     ]
 
 
+def test_gateway_cleanup_annotation_is_exactly_expired_capability():
+    """The public destructive adapter contract must expose one typed capability."""
+    from typing import get_type_hints
+
+    from odp_api.modules.tasks.retention import (
+        ExpiredGatewayGroup,
+        RedisRetentionAdapter,
+    )
+
+    annotation = get_type_hints(RedisRetentionAdapter.destroy_group)["capability"]
+    assert annotation is ExpiredGatewayGroup
+
+
 @pytest.mark.anyio
 async def test_stream_retention_process_isolates_policy_failure_and_reports_success():
     """One unavailable stream must not suppress another stream's retention summary."""

@@ -315,3 +315,66 @@ async def test_repeated_cancellation_waits_for_lock_release_before_task_finishes
     with pytest.raises(asyncio.CancelledError):
         await task
     assert await asyncio.to_thread(released.wait, 1)
+
+
+@pytest.mark.anyio
+async def test_scheduler_drain_survives_cancelling_all_asyncio_tasks():
+    """Shutdown cancellation must not cancel the lock-owning executor work."""
+    from odp_api.modules.tasks.recovery import RecoveryService, SystemRecoveryScope
+    from odp_api.processes.recovery_scheduler import RecoveryScheduler
+
+    started = threading.Event()
+    permit_finish = threading.Event()
+    released = threading.Event()
+
+    def block(now, scope):
+        started.set()
+        assert permit_finish.wait(timeout=2)
+        return 0
+
+    repo = SimpleNamespace(
+        expire_leases=block,
+        release_due_retries=lambda now, scope: 0,
+        redispatch_stale_ready=lambda now, scope: 0,
+        release_expired_outbox_claims=lambda now, scope: 0,
+        count_quarantined_messages=lambda now, scope: 0,
+        expire_stale_artifact_reservations=lambda now, scope: 0,
+    )
+    scheduler = RecoveryScheduler(
+        RecoveryService(repo, SystemRecoveryScope("cancel-all-tasks")),
+        SimpleNamespace(
+            try_acquire=lambda: SimpleNamespace(release=released.set)
+        ),
+        clock=lambda: datetime(2026, 8, 25, tzinfo=UTC),
+    )
+
+    existing_tasks = asyncio.all_tasks()
+    task = asyncio.create_task(scheduler.run_once_async())
+    try:
+        assert await asyncio.to_thread(started.wait, 1)
+        newly_created_tasks = asyncio.all_tasks() - existing_tasks
+        assert newly_created_tasks == {task}
+        checkpoint = asyncio.get_running_loop().create_future()
+
+        def cancel_scheduler_tasks_and_checkpoint():
+            for candidate in newly_created_tasks:
+                candidate.cancel()
+            loop = asyncio.get_running_loop()
+            loop.call_soon(lambda: loop.call_soon(checkpoint.set_result, None))
+
+        asyncio.get_running_loop().call_soon(cancel_scheduler_tasks_and_checkpoint)
+        await checkpoint
+        assert task.done() is False
+        assert released.is_set() is False
+
+        permit_finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert await asyncio.to_thread(released.wait, 1)
+    finally:
+        permit_finish.set()
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert await asyncio.to_thread(released.wait, 1)

@@ -236,7 +236,7 @@ class RedisRetentionAdapter:
         return tuple(progress)
 
     async def destroy_group(
-        self, stream_name: str, capability: ExpiredGatewayGroup | object
+        self, stream_name: str, capability: ExpiredGatewayGroup
     ) -> bool:
         if stream_name != ALERT_STREAM_NAME:
             raise ValueError("Gateway group cleanup is allowed only for the alert stream")

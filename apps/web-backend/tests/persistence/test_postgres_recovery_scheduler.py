@@ -46,25 +46,30 @@ def postgres_recovery_url():
     isolated_url = shared_url.set(database=database_name).render_as_string(
         hide_password=False
     )
-    with admin_engine.connect() as connection:
-        connection.exec_driver_sql(f'CREATE DATABASE "{database_name}"')
-
+    # Mark cleanup authority before CREATE: a PostgreSQL client can lose the
+    # response after the server has already created the database.
+    created = True
     try:
+        with admin_engine.connect() as connection:
+            connection.exec_driver_sql(f'CREATE DATABASE "{database_name}"')
         config = Config(str(Path(__file__).parents[2] / "alembic.ini"))
         config.set_main_option("sqlalchemy.url", isolated_url.replace("%", "%%"))
         command.upgrade(config, "head")
         yield isolated_url
     finally:
         try:
-            with admin_engine.connect() as connection:
-                connection.execute(
-                    text(
-                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                        "WHERE datname = :database_name AND pid <> pg_backend_pid()"
-                    ),
-                    {"database_name": database_name},
-                )
-                connection.exec_driver_sql(f'DROP DATABASE "{database_name}"')
+            if created:
+                with admin_engine.connect() as connection:
+                    connection.execute(
+                        text(
+                            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                            "WHERE datname = :database_name AND pid <> pg_backend_pid()"
+                        ),
+                        {"database_name": database_name},
+                    )
+                    connection.exec_driver_sql(
+                        f'DROP DATABASE IF EXISTS "{database_name}"'
+                    )
         finally:
             admin_engine.dispose()
 
@@ -461,5 +466,106 @@ def test_postgresql_recovery_tests_use_a_fresh_migrated_database(
     try:
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT version_num FROM alembic_version"))
+    finally:
+        engine.dispose()
+
+
+def test_postgresql_due_retry_plan_uses_status_scoped_recovery_indexes(
+    postgres_recovery_url,
+):
+    """The release scan must use both partial indexes, not a full COUNT scan."""
+    engine, _ = create_engine_and_session(postgres_recovery_url)
+    try:
+        with engine.begin() as connection:
+            # Keep the plan regression representative of the review's 100k-row
+            # measurement while using one immutable Artifact parent.  Two READY
+            # rows make the correlated OFFSET 1 capacity probe meaningful.
+            connection.exec_driver_sql(
+                """
+                INSERT INTO inspection_sessions (
+                    session_id, organization_id, camera_id, line_id,
+                    source_type, sanitized_uri, status, idempotency_key,
+                    started_at, created_at, updated_at
+                ) VALUES (
+                    '00000000-0000-0000-0000-000000000001',
+                    '00000000-0000-0000-0000-000000000002',
+                    '00000000-0000-0000-0000-000000000003',
+                    '00000000-0000-0000-0000-000000000004',
+                    'TEST', 'rtsp://test.invalid/plan', 'RUNNING',
+                    'plan-session', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
+                    CURRENT_TIMESTAMP
+                )
+                """
+            )
+            connection.exec_driver_sql(
+                """
+                INSERT INTO frame_artifacts (
+                    artifact_id, organization_id, camera_id, stream_session_id,
+                    frame_sequence, captured_at, object_key, sha256,
+                    content_length, state, lifecycle, created_at, updated_at
+                ) VALUES (
+                    '00000000-0000-0000-0000-000000000005',
+                    '00000000-0000-0000-0000-000000000002',
+                    '00000000-0000-0000-0000-000000000003',
+                    '00000000-0000-0000-0000-000000000001',
+                    1, CURRENT_TIMESTAMP, 'plan/frame.jpg',
+                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                    1, 'AVAILABLE', 'PROCESSING', CURRENT_TIMESTAMP,
+                    CURRENT_TIMESTAMP
+                )
+                """
+            )
+            connection.exec_driver_sql(
+                """
+                INSERT INTO inference_tasks (
+                    task_id, organization_id, camera_id, artifact_id,
+                    idempotency_key, status, dispatch_seq, attempt_count,
+                    next_attempt_at, last_dispatched_at, lease_owner,
+                    fence_token, lease_expires_at, created_at, updated_at
+                )
+                SELECT
+                    md5('plan-task-' || series)::uuid,
+                    '00000000-0000-0000-0000-000000000002',
+                    '00000000-0000-0000-0000-000000000003',
+                    '00000000-0000-0000-0000-000000000005',
+                    'plan-task-' || series,
+                    CASE WHEN series < 2 THEN 'READY' ELSE 'RETRY_WAIT' END,
+                    1, 0,
+                    CASE
+                        WHEN series < 2 THEN NULL
+                        ELSE CURRENT_TIMESTAMP - INTERVAL '1 minute'
+                    END,
+                    NULL, NULL, 0, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                FROM generate_series(0, 99999) AS generated(series)
+                """
+            )
+            connection.exec_driver_sql("ANALYZE inference_tasks")
+
+        query = """
+            SELECT task_id
+            FROM inference_tasks AS candidate
+            WHERE candidate.status = 'RETRY_WAIT'
+              AND candidate.next_attempt_at <= CURRENT_TIMESTAMP
+              AND NOT EXISTS (
+                  SELECT ready.task_id
+                  FROM inference_tasks AS ready
+                  WHERE ready.organization_id = candidate.organization_id
+                    AND ready.camera_id = candidate.camera_id
+                    AND ready.status = 'READY'
+                  LIMIT 1
+                  OFFSET 1
+              )
+            ORDER BY candidate.next_attempt_at, candidate.task_id
+            LIMIT 100
+        """
+        with engine.begin() as connection:
+            # Plan shape is the invariant; do not turn this into a timing test.
+            plan = connection.exec_driver_sql(
+                f"EXPLAIN (FORMAT JSON, COSTS OFF) {query}"
+            ).scalar_one()
+        rendered = str(plan)
+        assert "ix_inference_tasks_retry_wait_next_attempt_task" in rendered
+        assert "ix_inference_tasks_ready_organization_camera" in rendered
+        assert "Seq Scan" not in rendered
     finally:
         engine.dispose()

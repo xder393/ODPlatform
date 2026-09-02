@@ -6,6 +6,7 @@ from alembic.config import Config
 from sqlalchemy import inspect
 
 from alembic import command
+from odp_api.adapters.persistence.task_models import InferenceTaskRow
 from odp_api.db import create_engine_and_session
 
 BACKEND_DIR = Path(__file__).parents[2]
@@ -66,5 +67,50 @@ def test_p1_control_plane_schema_has_required_constraints(tmp_path):
             for column in inspector.get_columns("inspection_sessions")
             if column["name"] == "line_id"
         ) is False
+    finally:
+        engine.dispose()
+
+
+def test_inference_task_recovery_indexes_are_partial_and_cover_planner_keys(tmp_path):
+    """Recovery predicates must have status-scoped indexes with stable keys."""
+    database_url = f"sqlite:///{tmp_path / 'p1-indexes.db'}"
+    config = Config(str(BACKEND_DIR / "alembic.ini"))
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(config, "head")
+    engine, _ = create_engine_and_session(database_url)
+    expected = {
+        "ix_inference_tasks_retry_wait_next_attempt_task": (
+            ["next_attempt_at", "task_id"],
+            "status = 'RETRY_WAIT'",
+        ),
+        "ix_inference_tasks_ready_organization_camera": (
+            ["organization_id", "camera_id"],
+            "status = 'READY'",
+        ),
+    }
+    try:
+        inspector = inspect(engine)
+        indexes = {
+            item["name"]: item
+            for item in inspector.get_indexes("inference_tasks")
+        }
+        assert set(expected) <= set(indexes)
+        for name, (columns, predicate) in expected.items():
+            assert indexes[name]["column_names"] == columns
+            with engine.connect() as connection:
+                definition = connection.exec_driver_sql(
+                    "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+                    (name,),
+                ).scalar_one()
+            assert predicate in definition
+
+        metadata_indexes = {
+            index.name: index for index in InferenceTaskRow.__table__.indexes
+        }
+        assert set(expected) <= set(metadata_indexes)
+        for name, (columns, predicate) in expected.items():
+            index = metadata_indexes[name]
+            assert [column.name for column in index.columns] == columns
+            assert str(index.dialect_options["postgresql"]["where"]) == predicate
     finally:
         engine.dispose()

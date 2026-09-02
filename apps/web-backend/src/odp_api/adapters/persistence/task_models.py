@@ -19,6 +19,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     LargeBinary,
     String,
@@ -150,6 +151,20 @@ class InferenceTaskRow(Base):
     __tablename__ = "inference_tasks"
     __table_args__ = (
         UniqueConstraint("organization_id", "idempotency_key", name="uq_inference_task_tenant_key"),
+        Index(
+            "ix_inference_tasks_retry_wait_next_attempt_task",
+            "next_attempt_at",
+            "task_id",
+            postgresql_where=text("status = 'RETRY_WAIT'"),
+            sqlite_where=text("status = 'RETRY_WAIT'"),
+        ),
+        Index(
+            "ix_inference_tasks_ready_organization_camera",
+            "organization_id",
+            "camera_id",
+            postgresql_where=text("status = 'READY'"),
+            sqlite_where=text("status = 'READY'"),
+        ),
         CheckConstraint("dispatch_seq >= 1", name="ck_inference_task_dispatch_positive"),
         CheckConstraint("attempt_count >= 0", name="ck_inference_task_attempt_nonnegative"),
         CheckConstraint("fence_token >= 0", name="ck_inference_task_fence_nonnegative"),

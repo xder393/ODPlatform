@@ -989,25 +989,28 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
             try:
                 current = self._db_now(session)
                 ready_task = aliased(InferenceTaskRow)
-                ready_count = (
-                    select(func.count(ready_task.task_id))
+                ready_capacity_full = (
+                    select(ready_task.task_id)
                     .where(
                         ready_task.organization_id
                         == InferenceTaskRow.organization_id,
                         ready_task.camera_id == InferenceTaskRow.camera_id,
                         ready_task.status == TaskStatus.READY.value,
                     )
+                    # The second matching row is enough to reject the
+                    # candidate. Avoid counting the entire READY prefix.
+                    .offset(1)
+                    .limit(1)
                     .correlate(InferenceTaskRow)
-                    .scalar_subquery()
+                    .exists()
                 )
                 candidate_ids = session.scalars(
-                    select(InferenceTaskRow)
+                    select(InferenceTaskRow.task_id)
                     .where(
                         InferenceTaskRow.status == TaskStatus.RETRY_WAIT.value,
                         InferenceTaskRow.next_attempt_at <= current,
-                        ready_count < 2,
+                        ~ready_capacity_full,
                     )
-                    .with_only_columns(InferenceTaskRow.task_id)
                     .order_by(InferenceTaskRow.next_attempt_at, InferenceTaskRow.task_id)
                     .limit(limit)
                 ).all()
