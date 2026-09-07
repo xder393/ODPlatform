@@ -119,6 +119,24 @@ class FrameArtifactRow(Base):
             "content_length IS NULL OR content_length >= 0",
             name="ck_frame_artifact_content_length_nonnegative",
         ),
+        Index(
+            "ix_frame_artifacts_pending_updated",
+            "updated_at",
+            "artifact_id",
+            postgresql_where=text("state = 'PENDING'"),
+            sqlite_where=text("state = 'PENDING'"),
+        ),
+        Index(
+            "ix_frame_artifacts_retention_cleanup",
+            "retention_until",
+            "artifact_id",
+            postgresql_where=text(
+                "state = 'AVAILABLE' AND lifecycle = 'EVIDENCE' AND retention_until IS NOT NULL"
+            ),
+            sqlite_where=text(
+                "state = 'AVAILABLE' AND lifecycle = 'EVIDENCE' AND retention_until IS NOT NULL"
+            ),
+        ),
     )
 
     artifact_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)

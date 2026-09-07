@@ -25,8 +25,10 @@ from odp_api.adapters.persistence.task_models import (
 )
 from odp_api.modules.audit.models import AuditCommand, audit_log_from_command
 from odp_api.modules.inspection.effects import PublishConflict, PublishedEffect
-from odp_api.modules.tasks.models import TaskStatus
+from odp_api.modules.tasks.models import ArtifactLifecycle, TaskStatus
 from odp_api.ports.tasks import StaleLease
+
+EVIDENCE_RETENTION_DAYS = 90
 
 
 def claim_defect_episode(
@@ -348,7 +350,8 @@ class SqlAlchemyInspectionEffects:
                         evidence_artifact_id=artifact.artifact_id,
                     )
                     s.add(event)
-                    artifact.lifecycle = "EVIDENCE"
+                    artifact.lifecycle = ArtifactLifecycle.EVIDENCE.value
+                    artifact.retention_until = now + timedelta(days=EVIDENCE_RETENTION_DAYS)
                     feed = InspectionAlertFeedRow(
                         event_id=eid,
                         organization_id=c.organization_id,

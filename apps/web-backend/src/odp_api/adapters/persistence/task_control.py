@@ -11,6 +11,7 @@ from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, aliased, sessionmaker
 
+from odp_api.adapters.persistence.models import InspectionEventRow
 from odp_api.adapters.persistence.repositories import SqlAlchemyAuditSessionRepository
 from odp_api.adapters.persistence.task_models import (
     CameraInferenceStateRow,
@@ -22,6 +23,7 @@ from odp_api.adapters.persistence.task_models import (
     OutboxEventRow,
 )
 from odp_api.modules.audit.models import AuditCommand, audit_log_from_command
+from odp_api.modules.ingestion.reconciler import PendingArtifact
 from odp_api.modules.tasks.commands import (
     DeliveryDecision,
     DeliveryOutcome,
@@ -43,6 +45,7 @@ from odp_api.modules.tasks.recovery import (
     ReplayResult,
     SystemRecoveryScope,
 )
+from odp_api.ports.storage import ObjectMetadata
 from odp_api.ports.tasks import (
     AdmissionRejected,
     AdmissionRequest,
@@ -214,88 +217,9 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                 if artifact.state != ArtifactState.PENDING.value:
                     raise AdmissionRejected("ARTIFACT_NOT_PENDING")
 
-                artifact.state = ArtifactState.AVAILABLE.value
-                artifact.object_key = object_key
-                artifact.content_length = content_length
-                artifact.updated_at = current_time
-
-                task = session.scalar(
-                    select(InferenceTaskRow).where(
-                        InferenceTaskRow.organization_id == state.organization_id,
-                        InferenceTaskRow.camera_id == state.camera_id,
-                        InferenceTaskRow.artifact_id == artifact.artifact_id,
-                    )
+                result = self._promote_pending_locked(
+                    session, state, artifact, object_key, content_length, current_time
                 )
-                if task is None:
-                    task = InferenceTaskRow(
-                        task_id=uuid4(),
-                        organization_id=state.organization_id,
-                        camera_id=state.camera_id,
-                        artifact_id=artifact.artifact_id,
-                        idempotency_key=_task_idempotency_key(artifact),
-                        status=TaskStatus.READY.value,
-                        dispatch_seq=1,
-                        attempt_count=0,
-                        next_attempt_at=None,
-                        last_dispatched_at=None,
-                        lease_owner=None,
-                        fence_token=0,
-                        lease_expires_at=None,
-                        error_code=None,
-                        error_detail=None,
-                        created_at=current_time,
-                        updated_at=current_time,
-                    )
-                    session.add(task)
-                    session.flush()
-                elif task.status != TaskStatus.READY.value:
-                    raise AdmissionRejected("TASK_ALREADY_FINALIZED")
-
-                outbox = session.scalar(
-                    select(OutboxEventRow)
-                    .where(
-                        OutboxEventRow.organization_id == state.organization_id,
-                        OutboxEventRow.task_id == task.task_id,
-                        OutboxEventRow.dispatch_seq == 1,
-                        OutboxEventRow.event_type == INFERENCE_REQUEST_EVENT,
-                    )
-                    .with_for_update()
-                )
-                if outbox is None:
-                    session.add(
-                        OutboxEventRow(
-                            outbox_id=uuid4(),
-                            organization_id=state.organization_id,
-                            aggregate_type="inference_task",
-                            aggregate_id=task.task_id,
-                            task_id=task.task_id,
-                            dispatch_seq=1,
-                            event_type=INFERENCE_REQUEST_EVENT,
-                            schema_version=EVENT_SCHEMA_VERSION,
-                            payload={
-                                "task_id": str(task.task_id),
-                                "dispatch_seq": 1,
-                            },
-                            available_at=current_time,
-                            claim_owner=None,
-                            claim_expires_at=None,
-                            publish_attempts=0,
-                            published_at=None,
-                            last_error=None,
-                            created_at=current_time,
-                            updated_at=current_time,
-                        )
-                    )
-
-                state.reservation_id = None
-                state.reservation_expires_at = None
-                state.last_admitted_at = current_time
-                state.version += 1
-                state.updated_at = current_time
-                state.ready_count = self._sync_ready_count(session, state)
-                if state.ready_count > 2:
-                    raise AdmissionRejected("READY_WINDOW_FULL")
-                result = _task_record(task)
                 session.commit()
                 return result
             except BaseException:
@@ -343,6 +267,292 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
             except BaseException:
                 session.rollback()
                 raise
+
+    def pending_artifacts(self, now: datetime, limit: int) -> list[PendingArtifact]:
+        """List orphan candidates without granting them promotion authority."""
+
+        self._require_positive_recovery_limit(limit)
+        with self._session_factory() as session:
+            rows = session.scalars(
+                select(FrameArtifactRow)
+                .join(
+                    CameraInferenceStateRow,
+                    (CameraInferenceStateRow.organization_id == FrameArtifactRow.organization_id)
+                    & (CameraInferenceStateRow.camera_id == FrameArtifactRow.camera_id)
+                    & (CameraInferenceStateRow.reservation_id == FrameArtifactRow.artifact_id),
+                )
+                .where(
+                    FrameArtifactRow.state == ArtifactState.PENDING.value,
+                    FrameArtifactRow.updated_at <= now,
+                )
+                .order_by(FrameArtifactRow.updated_at, FrameArtifactRow.artifact_id)
+                .limit(limit)
+            ).all()
+            return [_pending_artifact(row) for row in rows]
+
+    def reconcile_pending_artifact(
+        self,
+        candidate: PendingArtifact,
+        metadata: ObjectMetadata | None,
+        now: datetime,
+    ) -> bool:
+        """Promote only a still-live reservation with matching object metadata."""
+
+        with self._session_factory() as session:
+            try:
+                current = self._db_now(session)
+                state = self._lock_camera_state_for_reservation(
+                    session, candidate.organization_id, candidate.artifact_id
+                )
+                if state is None:
+                    session.commit()
+                    return False
+                if state.reservation_expires_at is None or _as_utc(state.reservation_expires_at) <= current:
+                    self._expire_reservation(session, state, current)
+                    session.commit()
+                    return False
+                artifact = session.scalar(
+                    select(FrameArtifactRow)
+                    .where(
+                        FrameArtifactRow.artifact_id == candidate.artifact_id,
+                        FrameArtifactRow.organization_id == state.organization_id,
+                        FrameArtifactRow.camera_id == state.camera_id,
+                    )
+                    .with_for_update()
+                )
+                if artifact is None or artifact.state != ArtifactState.PENDING.value:
+                    session.commit()
+                    return False
+                if not _metadata_matches(candidate, metadata):
+                    self._fail_pending_locked(
+                        session, state, artifact, "OBJECT_MISSING" if metadata is None else "OBJECT_INTEGRITY_MISMATCH", current
+                    )
+                    session.commit()
+                    return False
+                self._promote_pending_locked(
+                    session,
+                    state,
+                    artifact,
+                    candidate.object_key,
+                    metadata.content_length,
+                    current,
+                )
+                session.commit()
+                return True
+            except BaseException:
+                session.rollback()
+                raise
+
+    def cleanup_candidates(self, now: datetime, limit: int) -> list[PendingArtifact]:
+        """Return expired AVAILABLE artifacts, annotated with evidence references."""
+
+        self._require_positive_recovery_limit(limit)
+        with self._session_factory() as session:
+            rows = session.scalars(
+                select(FrameArtifactRow)
+                .where(
+                    FrameArtifactRow.state == ArtifactState.AVAILABLE.value,
+                    FrameArtifactRow.lifecycle == ArtifactLifecycle.EVIDENCE.value,
+                    FrameArtifactRow.retention_until.is_not(None),
+                    FrameArtifactRow.retention_until <= now,
+                    FrameArtifactRow.object_key.is_not(None),
+                )
+                .order_by(FrameArtifactRow.retention_until, FrameArtifactRow.artifact_id)
+                .limit(limit)
+            ).all()
+            result: list[PendingArtifact] = []
+            for row in rows:
+                referenced = session.scalar(
+                    select(InspectionEventRow.event_id)
+                    .where(
+                        InspectionEventRow.organization_id == row.organization_id,
+                        InspectionEventRow.evidence_artifact_id == row.artifact_id,
+                    )
+                    .limit(1)
+                ) is not None
+                result.append(_pending_artifact(row, referenced=referenced))
+            return result
+
+    def mark_artifact_deleted(self, candidate: PendingArtifact, now: datetime) -> bool:
+        """Mark a retention candidate deleted after locking and rechecking references."""
+
+        with self._session_factory() as session:
+            try:
+                current = self._db_now(session)
+                snapshot = session.scalar(
+                    select(FrameArtifactRow).where(
+                        FrameArtifactRow.artifact_id == candidate.artifact_id,
+                        FrameArtifactRow.organization_id == candidate.organization_id,
+                    )
+                )
+                if snapshot is None:
+                    session.commit()
+                    return False
+                state = session.scalar(
+                    select(CameraInferenceStateRow)
+                    .where(
+                        CameraInferenceStateRow.organization_id == snapshot.organization_id,
+                        CameraInferenceStateRow.camera_id == snapshot.camera_id,
+                    )
+                    .with_for_update()
+                )
+                if state is None:
+                    session.commit()
+                    return False
+                artifact = session.scalar(
+                    select(FrameArtifactRow)
+                    .where(
+                        FrameArtifactRow.artifact_id == candidate.artifact_id,
+                        FrameArtifactRow.organization_id == state.organization_id,
+                        FrameArtifactRow.camera_id == state.camera_id,
+                    )
+                    .with_for_update()
+                )
+                if artifact is None or artifact.state != ArtifactState.AVAILABLE.value:
+                    session.commit()
+                    return False
+                if artifact.retention_until is None or _as_utc(artifact.retention_until) > current:
+                    session.commit()
+                    return False
+                if session.scalar(
+                    select(InspectionEventRow.event_id)
+                    .where(
+                        InspectionEventRow.organization_id == artifact.organization_id,
+                        InspectionEventRow.evidence_artifact_id == artifact.artifact_id,
+                    )
+                    .limit(1)
+                ) is not None:
+                    session.commit()
+                    return False
+                live_task = session.scalar(
+                    select(InferenceTaskRow.task_id)
+                    .where(
+                        InferenceTaskRow.organization_id == artifact.organization_id,
+                        InferenceTaskRow.camera_id == artifact.camera_id,
+                        InferenceTaskRow.artifact_id == artifact.artifact_id,
+                        InferenceTaskRow.status.in_(
+                            [
+                                TaskStatus.READY.value,
+                                TaskStatus.RUNNING.value,
+                                TaskStatus.RETRY_WAIT.value,
+                            ]
+                        ),
+                    )
+                    .limit(1)
+                )
+                if live_task is not None:
+                    session.commit()
+                    return False
+                artifact.state = ArtifactState.DELETED.value
+                artifact.updated_at = current
+                session.commit()
+                return True
+            except BaseException:
+                session.rollback()
+                raise
+
+    @staticmethod
+    def _fail_pending_locked(
+        session: Session,
+        state: CameraInferenceStateRow,
+        artifact: FrameArtifactRow,
+        error_code: str,
+        now: datetime,
+    ) -> None:
+        artifact.state = ArtifactState.FAILED.value
+        artifact.error_code = error_code
+        artifact.error_detail = error_code
+        artifact.updated_at = now
+        state.reservation_id = None
+        state.reservation_expires_at = None
+        state.version += 1
+        state.updated_at = now
+
+    @staticmethod
+    def _promote_pending_locked(
+        session: Session,
+        state: CameraInferenceStateRow,
+        artifact: FrameArtifactRow,
+        object_key: str,
+        content_length: int,
+        now: datetime,
+    ) -> TaskRecord:
+        artifact.state = ArtifactState.AVAILABLE.value
+        artifact.object_key = object_key
+        artifact.content_length = content_length
+        artifact.updated_at = now
+        task = session.scalar(
+            select(InferenceTaskRow).where(
+                InferenceTaskRow.organization_id == state.organization_id,
+                InferenceTaskRow.camera_id == state.camera_id,
+                InferenceTaskRow.artifact_id == artifact.artifact_id,
+            )
+        )
+        if task is None:
+            task = InferenceTaskRow(
+                task_id=uuid4(),
+                organization_id=state.organization_id,
+                camera_id=state.camera_id,
+                artifact_id=artifact.artifact_id,
+                idempotency_key=_task_idempotency_key(artifact),
+                status=TaskStatus.READY.value,
+                dispatch_seq=1,
+                attempt_count=0,
+                next_attempt_at=None,
+                last_dispatched_at=None,
+                lease_owner=None,
+                fence_token=0,
+                lease_expires_at=None,
+                error_code=None,
+                error_detail=None,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(task)
+            session.flush()
+        elif task.status != TaskStatus.READY.value:
+            raise AdmissionRejected("TASK_ALREADY_FINALIZED")
+        outbox = session.scalar(
+            select(OutboxEventRow)
+            .where(
+                OutboxEventRow.organization_id == state.organization_id,
+                OutboxEventRow.task_id == task.task_id,
+                OutboxEventRow.dispatch_seq == 1,
+                OutboxEventRow.event_type == INFERENCE_REQUEST_EVENT,
+            )
+            .with_for_update()
+        )
+        if outbox is None:
+            session.add(
+                OutboxEventRow(
+                    outbox_id=uuid4(),
+                    organization_id=state.organization_id,
+                    aggregate_type="inference_task",
+                    aggregate_id=task.task_id,
+                    task_id=task.task_id,
+                    dispatch_seq=1,
+                    event_type=INFERENCE_REQUEST_EVENT,
+                    schema_version=EVENT_SCHEMA_VERSION,
+                    payload={"task_id": str(task.task_id), "dispatch_seq": 1},
+                    available_at=now,
+                    claim_owner=None,
+                    claim_expires_at=None,
+                    publish_attempts=0,
+                    published_at=None,
+                    last_error=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        state.reservation_id = None
+        state.reservation_expires_at = None
+        state.last_admitted_at = now
+        state.version += 1
+        state.updated_at = now
+        state.ready_count = SqlAlchemyTaskControlRepository._sync_ready_count(session, state)
+        if state.ready_count > 2:
+            raise AdmissionRejected("READY_WINDOW_FULL")
+        return _task_record(task)
 
     def get_task(self, task_id: UUID, organization_id: UUID) -> TaskRecord | None:
         """Read a task only inside its tenant scope."""
@@ -1692,6 +1902,35 @@ def _task_idempotency_key(artifact: FrameArtifactRow) -> str:
             TASK_TYPE,
         )
     )
+
+
+def _artifact_object_key(organization_id: UUID, artifact_id: UUID) -> str:
+    return f"organizations/{organization_id}/artifacts/{artifact_id}"
+
+
+def _pending_artifact(
+    row: FrameArtifactRow, *, referenced: bool = False
+) -> PendingArtifact:
+    return PendingArtifact(
+        artifact_id=row.artifact_id,
+        organization_id=row.organization_id,
+        object_key=row.object_key or _artifact_object_key(row.organization_id, row.artifact_id),
+        sha256=row.sha256,
+        content_length=row.content_length,
+        referenced=referenced,
+        retention_until=_as_utc(row.retention_until) if row.retention_until is not None else None,
+    )
+
+
+def _metadata_matches(candidate: PendingArtifact, metadata: ObjectMetadata | None) -> bool:
+    if metadata is None or metadata.object_key != candidate.object_key:
+        return False
+    if metadata.content_length < 0 or (
+        candidate.content_length is not None
+        and metadata.content_length != candidate.content_length
+    ):
+        return False
+    return metadata.sha256 is not None and metadata.sha256.lower() == candidate.sha256.lower()
 
 
 def _task_record(row: InferenceTaskRow) -> TaskRecord:

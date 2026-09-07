@@ -114,3 +114,25 @@ def test_inference_task_recovery_indexes_are_partial_and_cover_planner_keys(tmp_
             assert str(index.dialect_options["postgresql"]["where"]) == predicate
     finally:
         engine.dispose()
+
+
+def test_artifact_recovery_indexes_bound_pending_and_retention_scans(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'artifact-indexes.db'}"
+    config = Config(str(BACKEND_DIR / "alembic.ini"))
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(config, "head")
+    engine, _ = create_engine_and_session(database_url)
+    try:
+        indexes = {
+            item["name"]: item for item in inspect(engine).get_indexes("frame_artifacts")
+        }
+        assert indexes["ix_frame_artifacts_pending_updated"]["column_names"] == [
+            "updated_at",
+            "artifact_id",
+        ]
+        assert indexes["ix_frame_artifacts_retention_cleanup"]["column_names"] == [
+            "retention_until",
+            "artifact_id",
+        ]
+    finally:
+        engine.dispose()

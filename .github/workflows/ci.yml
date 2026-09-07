@@ -56,8 +56,27 @@ jobs:
       ODP_POSTGRES_TEST_URL: postgresql+psycopg://odp:odp@localhost:5432/odp
       ODP_POSTGRES_APP_TEST_URL: postgresql+psycopg://odp_app:odp_app_dev@localhost:5432/odp
       ODP_REDIS_TEST_URL: redis://localhost:6379/0
+      ODP_MINIO_TEST_ENDPOINT: 127.0.0.1:29000
+      ODP_MINIO_TEST_ACCESS_KEY: odp_task4
+      ODP_MINIO_TEST_SECRET_KEY: odp-task4-local-test-only
     steps:
       - uses: actions/checkout@v4
+
+      - name: Start isolated MinIO test service
+        run: |
+          docker run -d --name odp-minio-test \
+            -p 127.0.0.1:29000:9000 \
+            -e MINIO_ROOT_USER="$ODP_MINIO_TEST_ACCESS_KEY" \
+            -e MINIO_ROOT_PASSWORD="$ODP_MINIO_TEST_SECRET_KEY" \
+            minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e server /data
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:29000/minio/health/ready; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs odp-minio-test
+          exit 1
 
       - uses: actions/setup-python@v5
         with:
@@ -96,6 +115,12 @@ jobs:
 
       - name: Run tests
         run: pytest apps/web-backend/tests -q
+
+      - name: Collect MinIO diagnostics and stop test service
+        if: always()
+        run: |
+          docker logs odp-minio-test || true
+          docker rm -f odp-minio-test || true
 
   # Web 前端：单元测试 + 类型检查/构建 + E2E 规格类型检查
   frontend-web:

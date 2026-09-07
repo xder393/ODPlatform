@@ -138,7 +138,7 @@ def runtime(tmp_path):
 
 
 def _service(sessions, *, hook=None):
-    return InspectionEffectService(SqlAlchemyInspectionEffects(sessions))
+    return InspectionEffectService(SqlAlchemyInspectionEffects(sessions, clock=hook))
 
 
 def test_no_defect_publishes_result_and_closes_fenced_execution_without_business_effects(runtime):
@@ -159,12 +159,17 @@ def test_no_defect_publishes_result_and_closes_fenced_execution_without_business
 def test_defect_creates_event_case_evidence_alert_outbox_and_audit_in_one_effect(runtime):
     now = datetime(2026, 8, 25, 12, tzinfo=UTC)
     org, _camera, artifact, _task, claim = _running(runtime, now)
-    effect = _service(runtime).publish(
+    effect = _service(runtime, hook=lambda _session: now).publish(
         _command(claim, now, ({"defect_type": "scratch", "confidence": 0.91, "spatial_zone": "A"},))
     )
     assert effect.event_id and effect.case_id and effect.alert_outbox_id
     with runtime() as session:
-        assert session.get(FrameArtifactRow, artifact).lifecycle == "EVIDENCE"
+        evidence = session.get(FrameArtifactRow, artifact)
+        assert evidence.lifecycle == "EVIDENCE"
+        retention_until = evidence.retention_until
+        if retention_until.tzinfo is None:
+            retention_until = retention_until.replace(tzinfo=UTC)
+        assert retention_until == now + timedelta(days=90)
         assert session.get(InspectionEventRow, effect.event_id).case_id == effect.case_id
         assert session.get(AlertRow, effect.event_id) is not None
         assert session.scalar(select(func.count()).select_from(InspectionAlertFeedRow)) == 1
