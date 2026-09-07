@@ -261,12 +261,21 @@ async def test_cancelling_async_sweep_still_releases_lock_after_worker_unwinds()
     )
 
     task = asyncio.create_task(scheduler.run_once_async())
-    assert await asyncio.to_thread(started.wait, 1)
-    task.cancel()
-    permit_finish.set()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert await asyncio.to_thread(released.wait, 1)
+    try:
+        assert await asyncio.to_thread(started.wait, 1)
+        task.cancel()
+        permit_finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert await asyncio.to_thread(released.wait, 1)
+    finally:
+        permit_finish.set()
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        scheduler.close()
+        assert await asyncio.to_thread(released.wait, 1)
 
 
 @pytest.mark.anyio
@@ -301,20 +310,29 @@ async def test_repeated_cancellation_waits_for_lock_release_before_task_finishes
     )
 
     task = asyncio.create_task(scheduler.run_once_async())
-    assert await asyncio.to_thread(started.wait, 1)
-    task.cancel()
-    # Let the first CancelledError reach run_once_async's drain path before
-    # issuing another cancellation request against that in-flight drain.
-    await asyncio.sleep(0.05)
-    task.cancel()
-    await asyncio.sleep(0.05)
+    try:
+        assert await asyncio.to_thread(started.wait, 1)
+        task.cancel()
+        # Let the first CancelledError reach run_once_async's drain path before
+        # issuing another cancellation request against that in-flight drain.
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.sleep(0.05)
 
-    assert task.done() is False
-    assert released.is_set() is False
-    permit_finish.set()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert await asyncio.to_thread(released.wait, 1)
+        assert task.done() is False
+        assert released.is_set() is False
+        permit_finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert await asyncio.to_thread(released.wait, 1)
+    finally:
+        permit_finish.set()
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        scheduler.close()
+        assert await asyncio.to_thread(released.wait, 1)
 
 
 @pytest.mark.anyio
@@ -377,4 +395,138 @@ async def test_scheduler_drain_survives_cancelling_all_asyncio_tasks():
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
+        scheduler.close()
+        assert await asyncio.to_thread(released.wait, 1)
+
+
+@pytest.mark.anyio
+async def test_directly_cancelled_executor_wrapper_drains_underlying_sweep(monkeypatch):
+    """Cancelling the asyncio wrapper must not make the lock-owning sweep appear done."""
+    from odp_api.modules.tasks.recovery import RecoveryService, SystemRecoveryScope
+    from odp_api.processes import recovery_scheduler as scheduler_module
+
+    started = threading.Event()
+    permit_finish = threading.Event()
+    released = threading.Event()
+    wrapped_futures = []
+
+    def block(now, scope):
+        started.set()
+        if not permit_finish.wait(timeout=2):
+            raise AssertionError("test sweep was not released")
+        return 0
+
+    repo = SimpleNamespace(
+        expire_leases=block,
+        release_due_retries=lambda now, scope: 0,
+        redispatch_stale_ready=lambda now, scope: 0,
+        release_expired_outbox_claims=lambda now, scope: 0,
+        count_quarantined_messages=lambda now, scope: 0,
+        expire_stale_artifact_reservations=lambda now, scope: 0,
+    )
+    scheduler = scheduler_module.RecoveryScheduler(
+        RecoveryService(repo, SystemRecoveryScope("direct-wrapper-cancel")),
+        SimpleNamespace(
+            try_acquire=lambda: SimpleNamespace(release=released.set)
+        ),
+        clock=lambda: datetime(2026, 8, 25, tzinfo=UTC),
+    )
+
+    original_wrap_future = scheduler_module.asyncio.wrap_future
+
+    def capture_wrap_future(worker):
+        wrapper = original_wrap_future(worker)
+        wrapped_futures.append(wrapper)
+        return wrapper
+
+    monkeypatch.setattr(scheduler_module.asyncio, "wrap_future", capture_wrap_future)
+    task = asyncio.create_task(scheduler.run_once_async())
+    checkpoint = asyncio.get_running_loop().create_future()
+    try:
+        assert await asyncio.to_thread(started.wait, 1)
+        assert len(wrapped_futures) == 1
+        wrapper = wrapped_futures[0]
+        assert isinstance(wrapper, asyncio.Future)
+        wrapper.cancel()
+
+        asyncio.get_running_loop().call_soon(
+            lambda: asyncio.get_running_loop().call_soon(
+                checkpoint.set_result, None
+            )
+        )
+        await checkpoint
+        assert wrapper.done() is True
+        assert task.done() is False
+        assert released.is_set() is False
+
+        permit_finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert await asyncio.to_thread(released.wait, 1)
+    finally:
+        permit_finish.set()
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        scheduler.close()
+        assert await asyncio.to_thread(released.wait, 1)
+
+
+@pytest.mark.anyio
+async def test_outer_cancellation_preserves_cancelled_error_when_worker_fails():
+    """A worker failure during cancellation drain must not mask outer cancellation."""
+    from odp_api.modules.tasks.recovery import RecoveryService, SystemRecoveryScope
+    from odp_api.processes.recovery_scheduler import RecoveryScheduler
+
+    started = threading.Event()
+    permit_finish = threading.Event()
+    released = threading.Event()
+
+    def fail_after_release(now, scope):
+        started.set()
+        if not permit_finish.wait(timeout=2):
+            raise AssertionError("test sweep was not released")
+        raise RuntimeError("worker failed during cancellation drain")
+
+    repo = SimpleNamespace(
+        expire_leases=fail_after_release,
+        release_due_retries=lambda now, scope: 0,
+        redispatch_stale_ready=lambda now, scope: 0,
+        release_expired_outbox_claims=lambda now, scope: 0,
+        count_quarantined_messages=lambda now, scope: 0,
+        expire_stale_artifact_reservations=lambda now, scope: 0,
+    )
+    scheduler = RecoveryScheduler(
+        RecoveryService(repo, SystemRecoveryScope("cancel-worker-error")),
+        SimpleNamespace(
+            try_acquire=lambda: SimpleNamespace(release=released.set)
+        ),
+        clock=lambda: datetime(2026, 8, 25, tzinfo=UTC),
+    )
+
+    task = asyncio.create_task(scheduler.run_once_async())
+    checkpoint = asyncio.get_running_loop().create_future()
+    try:
+        assert await asyncio.to_thread(started.wait, 1)
+        task.cancel()
+        asyncio.get_running_loop().call_soon(
+            lambda: asyncio.get_running_loop().call_soon(
+                checkpoint.set_result, None
+            )
+        )
+        await checkpoint
+        assert task.done() is False
+
+        permit_finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert await asyncio.to_thread(released.wait, 1)
+    finally:
+        permit_finish.set()
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        scheduler.close()
         assert await asyncio.to_thread(released.wait, 1)
