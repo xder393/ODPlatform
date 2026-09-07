@@ -191,7 +191,7 @@ async def test_redis_highwater_interleaving_publishes_before_first_xread(feed, m
         async def xread(self, streams, count, block):
             self.xread_calls.append((streams, count, block))
             feed.publish(alert, LINE_ID)
-            return [("odp:inspection-alerts", [("9-0", {})])]
+            return [("odp:inspection:alerts", [("9-0", {})])]
         async def aclose(self): self.closed = True
     class Redis:
         def __init__(self): self.async_instance = AsyncRedis()
@@ -209,7 +209,7 @@ async def test_redis_highwater_interleaving_publishes_before_first_xread(feed, m
     subscription = durable.subscribe(None)
     received = await asyncio.wait_for(anext(subscription), 0.2)
     assert received.alert.event_id == alert.event_id
-    assert redis.async_instance.xread_calls == [({"odp:inspection-alerts": "8-0"}, 100, 15_000)]
+    assert redis.async_instance.xread_calls == [({"odp:inspection:alerts": "8-0"}, 100, 15_000)]
     await subscription.aclose()
     assert redis.async_instance.closed
 

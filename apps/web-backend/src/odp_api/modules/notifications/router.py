@@ -16,7 +16,7 @@ from odp_api.modules.identity.service import (
     get_current_actor,
     get_current_websocket_actor,
 )
-from odp_api.ports.notifications import InspectionAlertFeedPort, StoredInspectionAlert
+from odp_api.ports.notifications import InspectionAlertReadPort, StoredInspectionAlert
 
 
 class InMemoryInspectionAlertRepository:
@@ -60,7 +60,7 @@ class InMemoryInspectionAlertRepository:
 
 
 def create_notifications_router(
-    repository: InspectionAlertFeedPort,
+    repository: InspectionAlertReadPort,
     actor_provider: Callable[[], Actor] = get_current_actor,
 ) -> APIRouter:
     """Expose cursor reconciliation and continuous ticket-authenticated delivery."""
@@ -146,7 +146,7 @@ def _authorized_lines(actor: Actor) -> frozenset[UUID] | None:
     return None if actor.role is Role.ADMINISTRATOR else actor.line_ids
 
 
-async def _deliver_until_disconnect(websocket: WebSocket, repository: InspectionAlertFeedPort, cursor: str | None, actor: Actor) -> None:
+async def _deliver_until_disconnect(websocket: WebSocket, repository: InspectionAlertReadPort, cursor: str | None, actor: Actor) -> None:
     """Race the next durable event with client disconnect and clean both tasks."""
     subscription = repository.subscribe(cursor)
     event_task = asyncio.create_task(anext(subscription))

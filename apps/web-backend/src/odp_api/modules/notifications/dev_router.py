@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from odp_api.modules.identity.models import Actor
 from odp_api.modules.identity.policies import AuthorizationDenied, authorize
 from odp_api.modules.identity.service import get_current_actor
-from odp_api.ports.notifications import InspectionAlertFeedPort
+from odp_api.ports.notifications import InspectionAlertPublisherPort
 
 
 class DevInspectionEventRequest(BaseModel):
@@ -19,7 +19,7 @@ class DevInspectionEventRequest(BaseModel):
     line_id: UUID
 
 
-def create_development_notifications_router(repository: InspectionAlertFeedPort) -> APIRouter:
+def create_development_notifications_router(publisher: InspectionAlertPublisherPort) -> APIRouter:
     """Expose a deterministic, actor-scoped event publisher outside production only."""
     router = APIRouter(prefix="/api/v1/dev", tags=["development"])
 
@@ -40,7 +40,7 @@ def create_development_notifications_router(repository: InspectionAlertFeedPort)
             defect_class="scratch",
             confidence=0.99,
         )
-        cursor = repository.publish(alert, request.line_id)
+        cursor = publisher.publish(alert, request.line_id)
         return {"cursor": cursor, "alert": alert.model_dump(mode="json")}
 
     return router

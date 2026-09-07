@@ -1,3 +1,4 @@
+import inspect
 from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import UUID
@@ -6,7 +7,8 @@ from alembic.config import Config
 from argon2 import PasswordHasher
 from fastapi import APIRouter, FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect as sqlalchemy_inspect
+from sqlalchemy import text
 from sqlalchemy.exc import (
     DBAPIError,
     DisconnectionError,
@@ -30,6 +32,9 @@ from odp_api.adapters.auth.sqlite_security import (
 from odp_api.adapters.generation.mock import MockLLMAdapter
 from odp_api.adapters.notifications.redis_durable_feed import (
     RedisDurableInspectionAlertFeed,
+)
+from odp_api.adapters.notifications.redis_gateway_feed import (
+    RedisGatewayInspectionAlertFeed,
 )
 from odp_api.adapters.notifications.sqlite_feed import SqliteInspectionAlertFeed
 from odp_api.adapters.persistence.models import Base
@@ -86,6 +91,7 @@ from odp_api.observability.router import create_metrics_router
 from odp_api.observability.tracing import CorrelationIdMiddleware
 from odp_api.ports.retrieval import KnowledgeIndexPort
 from odp_api.ports.vision import FrameInput
+from odp_api.processes.common import process_id
 from odp_api.seed import (
     DEMO_LINE_ID,
     DEMO_ORG_ID,
@@ -128,7 +134,7 @@ def _upgrade_runtime_schema(database_url: str) -> None:
     config.set_main_option("sqlalchemy.url", database_url)
     probe_engine, _ = create_engine_and_session(database_url)
     try:
-        inspector = inspect(probe_engine)
+        inspector = sqlalchemy_inspect(probe_engine)
         if inspector.has_table("defect_cases") and not inspector.has_table("alembic_version"):
             # Task 1's early local runtime created its complete 0001 metadata
             # directly. Mark only that known baseline before applying 0002.
@@ -192,11 +198,22 @@ def create_app(
     # Facts are always database-backed. Redis is deliberately not used as the
     # source of truth, so a transient stream outage cannot erase reconciliation.
     sqlite_alert_feed = SqliteInspectionAlertFeed(session_factory)
-    inspection_alert_feed = (
-        RedisDurableInspectionAlertFeed(sqlite_alert_feed, runtime_stream_client)
-        if runtime_settings.environment.lower() in {"production", "docker", "staging"}
-        else sqlite_alert_feed
-    )
+    deployed_runtime = runtime_settings.environment.lower() in {"production", "docker", "staging"}
+    if deployed_runtime:
+        # The Gateway is read-only: P1 inspection effects append durable facts
+        # and Outbox events, then Relay wakes this consumer with EventEnvelope.
+        # Keep the direct publisher only behind the explicit dev-trigger route.
+        inspection_alert_feed = RedisGatewayInspectionAlertFeed(
+            sqlite_alert_feed,
+            runtime_stream_client,
+            instance_id=process_id("realtime-gateway"),
+        )
+        dev_alert_publisher = RedisDurableInspectionAlertFeed(
+            sqlite_alert_feed, runtime_stream_client
+        )
+    else:
+        inspection_alert_feed = sqlite_alert_feed
+        dev_alert_publisher = sqlite_alert_feed
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -208,6 +225,11 @@ def create_app(
             await daily_audit_verification.stop()
             if task_repository is not None:
                 task_repository.close()
+            close_feed = getattr(inspection_alert_feed, "close", None)
+            if close_feed is not None:
+                result = close_feed()
+                if inspect.isawaitable(result):
+                    await result
             close = getattr(runtime_stream_client, "close", None)
             if close is not None:
                 close()
@@ -316,7 +338,7 @@ def create_app(
         create_notifications_router(inspection_alert_feed)
     )
     if runtime_settings.enable_dev_event_trigger and runtime_settings.environment in {"local", "test", "docker"}:
-        app.include_router(create_development_notifications_router(inspection_alert_feed))
+        app.include_router(create_development_notifications_router(dev_alert_publisher))
     app.include_router(
         create_auth_router(
             reauthentication_service=reauthentication_service,

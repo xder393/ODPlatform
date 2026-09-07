@@ -26,7 +26,7 @@ class RedisStreamInspectionAlertFeed:
     """Uses an append-only stream while keeping router reads provider-neutral."""
 
     def __init__(
-        self, client: RedisInspectionAlertClient, stream_name: str = "odp:inspection-alerts"
+        self, client: RedisInspectionAlertClient, stream_name: str = "odp:inspection:alerts"
     ) -> None:
         self._client = client
         self._stream_name = stream_name

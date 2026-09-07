@@ -17,7 +17,7 @@ class StoredInspectionAlert:
     line_id: UUID | None
 
 
-class InspectionAlertFeedPort(Protocol):
+class InspectionAlertReadPort(Protocol):
     """Supplies persisted alerts to REST reconciliation and websocket delivery."""
 
     def list(
@@ -25,9 +25,13 @@ class InspectionAlertFeedPort(Protocol):
         authorized_line_ids: frozenset[UUID] | None = None,
     ) -> Sequence[StoredInspectionAlert]: ...
 
-    def publish(self, alert: InspectionAlert, line_id: UUID | None) -> str: ...
-
     def subscribe(self, after_cursor: str | None) -> AsyncIterator[StoredInspectionAlert]: ...
+
+
+class InspectionAlertFeedPort(InspectionAlertReadPort, Protocol):
+    """Backward-compatible local/demo feed that can also append a fact."""
+
+    def publish(self, alert: InspectionAlert, line_id: UUID | None) -> str: ...
 
 
 class InspectionAlertPublisherPort(Protocol):

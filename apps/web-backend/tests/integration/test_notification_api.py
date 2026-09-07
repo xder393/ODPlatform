@@ -222,7 +222,7 @@ def test_alert_publication_recovers_a_persisted_claim_after_xadd_fails() -> None
         confidence=0.964,
     )
     redis = RecoverableRedisStream()
-    claim_key = f"odp:inspection-alerts:event:{alert.event_id}"
+    claim_key = f"odp:inspection:alerts:event:{alert.event_id}"
 
     with pytest.raises(OSError, match="claim"):
         RedisStreamInspectionAlertFeed(redis).publish(alert, line_id=None)
