@@ -234,7 +234,7 @@ push, merge, and Compose integration remain outside this checkpoint.
 
 ## Follow-up fix round: cancellation drain and recovery-scan indexes
 
-This uncommitted follow-up addresses the additional review findings without
+This follow-up addresses the additional review findings without
 changing the frozen Task 3 ownership boundaries.
 
 ### Exact RED evidence captured before production changes
@@ -304,3 +304,71 @@ CREATE DATABASE cleanup-authority guard are all covered by tests. The optional
 minor improvement to retain/report already successful Gateway destructions
 after a later cleanup error remains deferred; the error is still isolated and
 visible to the retention process.
+
+## Follow-up fix round 2: executor cancellation authority
+
+The independent follow-up review found two additional cancellation paths in
+the first index/cancellation fix: cancelling the asyncio wrapper Future
+directly could make the scheduler appear finished while its executor thread
+still held the session advisory lock, and a worker exception during
+cancellation draining could mask the original `CancelledError`. These were
+treated as load-bearing because the scheduler contract requires the lock
+lifetime to cover the complete sweep, including cancellation and error paths.
+
+### RED evidence
+
+- The direct-wrapper regression cancelled the `asyncio.wrap_future()` wrapper
+  while the sweep was blocked and observed the outer task finishing before the
+  release event.
+- The worker-error regression cancelled the outer task, released the blocked
+  sweep, and observed the worker `RuntimeError` escape instead of the original
+  `CancelledError`.
+
+### Implementation and GREEN evidence
+
+- `RecoveryScheduler` now owns a bounded single-worker executor and retains the
+  underlying `concurrent.futures.Future` as the completion authority. Asyncio
+  wrappers and cancellation signals are notification mechanisms only; direct
+  wrapper cancellation cannot make the scheduler drain stop early.
+- Cancellation draining waits on a non-raising completion signal, observes the
+  worker result after the underlying Future is done, logs worker failures at
+  debug level, and re-raises the outer cancellation. The long-running `run`
+  loop closes the executor in `finally`; standalone async tests close it in
+  cleanup paths.
+- New cancellation coverage (including direct wrapper cancellation and
+  cancellation plus worker failure) passes: `11 passed in 0.26s`.
+- The no-service full backend rerun after this round passes `364 tests` with
+  `28` explicit service-gated skips and the existing Starlette/httpx warning.
+- Ruff, compileall, `uv lock --check`, and diff-check pass. The preceding
+  service gate remains the verified `390 passed, 1 warning, zero skips` run on
+  PostgreSQL 16/Redis 7 before this cancellation-only round; this round could
+  not repeat network-backed execution after the Codex usage limit blocked
+  escalation.
+
+The earlier index/migration fix remains unchanged and retains its PostgreSQL
+7-test and Redis 2-test evidence. No Task 4, Compose wiring, push, or merge is
+included in this round.
+
+## Controller service revalidation — 2026-09-07
+
+Docker and approval access were restored. The latest cancellation changes were
+verified against PostgreSQL 16 and Redis 7, rather than relying on earlier runs.
+
+- Focused cancellation suite: `11 passed in 0.29s`.
+- Fresh isolated database `odp_task3_final_20260907`, migrated to Alembic head:
+  complete backend suite `392 passed, 1 warning in 70.86s`, zero skips.
+  This includes all seven PostgreSQL scheduler tests and both Redis retention tests.
+- Ruff, compileall, `uv lock --project apps/web-backend --check`, and
+  `git diff --check` passed.
+- An initial run against the previously used test database produced
+  `391 passed, 1 failed`: the case-transition fixture reused a case already in
+  `IN_REVIEW`. The fresh isolated run resolved that fixture-state contamination
+  without changing production code. Integration reruns must use a fresh test DB.
+- The sole warning remains the existing Starlette/httpx deprecation.
+- Independent Luna Max scoped review of `2247df4..914e950`: APPROVE,
+  no blocking findings. Reviewer ran the 11 focused tests and 100 iterations
+  each of repeated cancellation and cancellation with worker failure.
+  Standalone async callers must close the scheduler; `run()` does so automatically.
+
+Implementation commit: `914e950`. Task 3 is complete after this scoped review
+and the fresh service gate. P1 as a whole remains under development.
