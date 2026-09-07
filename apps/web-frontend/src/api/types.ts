@@ -77,3 +77,65 @@ export interface InspectionAlertReconciliation {
   items: InspectionAlertEnvelope[];
   next_cursor: string | null;
 }
+
+export interface CurrentActor {
+  actor_id: string;
+  role: "INSPECTOR" | "SUPERVISOR" | "ADMINISTRATOR";
+  organization_id: string;
+  line_ids: string[];
+}
+
+export interface InspectionSessionInput {
+  camera_id: string;
+  line_id: string;
+  source_type: "RECORDED" | "RTSP" | "LOCAL_CAMERA";
+  source_ref: string;
+  secret_ref?: string;
+}
+
+export interface InspectionSession {
+  session_id: string;
+  organization_id: string;
+  camera_id: string;
+  line_id: string;
+  source_type: string;
+  sanitized_uri: string;
+  secret_reference: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InferenceTask {
+  task_id: string;
+  organization_id: string;
+  camera_id: string;
+  line_id: string | null;
+  artifact_id: string;
+  status: string;
+  dispatch_seq: number;
+  attempt_count: number;
+  error_code: string | null;
+  error_detail: string | null;
+  created_at: string;
+  updated_at: string;
+  attempts: {
+    attempt_id: string; attempt_no: number; fence_token: number; worker_id: string;
+    started_at: string; finished_at: string | null; outcome: string | null;
+    error_code: string | null; duration_ms: number | null;
+  }[];
+  dispatches: {
+    outbox_id: string; event_type: string; schema_version: number; dispatch_seq: number | null;
+    available_at: string; published_at: string | null; publish_attempts: number;
+    last_error: string | null;
+  }[];
+}
+
+export interface TaskReplayResponse {
+  task_id: string;
+  source_task_id: string;
+  status: string;
+  dispatch_seq: number;
+}
+
+export interface EvidenceUrlResponse { url: string; expires_in: number }

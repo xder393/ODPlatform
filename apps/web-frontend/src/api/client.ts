@@ -1,4 +1,10 @@
 import type {
+  CurrentActor,
+  EvidenceUrlResponse,
+  InferenceTask,
+  InspectionSession,
+  InspectionSessionInput,
+  TaskReplayResponse,
   AdviceResponse,
   CaseSummary,
   CaseTransitionStatus,
@@ -7,6 +13,33 @@ import type {
   ReauthenticateResponse,
   WebSocketTicketResponse,
 } from "./types";
+
+async function operationJson<T>(path: string, init?: RequestInit): Promise<T> {
+  return (await apiFetch(path, init)).json() as Promise<T>;
+}
+
+export const getCurrentActor = (signal?: AbortSignal) =>
+  operationJson<CurrentActor>("/api/v1/auth/me", { signal });
+export const listInspectionSessions = (signal?: AbortSignal) =>
+  operationJson<{ items: InspectionSession[] }>("/api/v1/inspection-sessions", { signal });
+export const startInspectionSession = (body: InspectionSessionInput, key: string) =>
+  operationJson<InspectionSession>("/api/v1/inspection-sessions", {
+    method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": key },
+    body: JSON.stringify(body),
+  });
+export const stopInspectionSession = (id: string) =>
+  operationJson<InspectionSession>(`/api/v1/inspection-sessions/${encodeURIComponent(id)}:stop`, { method: "POST" });
+export const listInferenceTasks = (status = "", signal?: AbortSignal) => {
+  const query = new URLSearchParams({ limit: "100" });
+  if (status) query.set("status", status);
+  return operationJson<{ items: InferenceTask[] }>(`/api/v1/inference-tasks?${query}`, { signal });
+};
+export const getInferenceTask = (id: string, signal?: AbortSignal) =>
+  operationJson<InferenceTask>(`/api/v1/inference-tasks/${encodeURIComponent(id)}`, { signal });
+export const replayInferenceTask = (id: string) =>
+  operationJson<TaskReplayResponse>(`/api/v1/inference-tasks/${encodeURIComponent(id)}:replay`, { method: "POST" });
+export const getEvidenceUrl = (id: string, signal?: AbortSignal) =>
+  operationJson<EvidenceUrlResponse>(`/api/v1/artifacts/${encodeURIComponent(id)}/evidence-url`, { signal });
 
 /** 带 HTTP 状态码的 API 错误，调用方可用 status 区分 401/403/404/409。 */
 export class ApiError extends Error {

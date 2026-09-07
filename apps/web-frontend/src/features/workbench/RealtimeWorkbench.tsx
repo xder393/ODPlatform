@@ -10,6 +10,7 @@ import {
 } from "../../api/client";
 import type { AdviceResponse, CaseSummary, CaseTransitionStatus } from "../../api/types";
 import { AdvicePanel } from "../advice/AdvicePanel";
+import { OperationsPanel } from "../operations/OperationsPanel";
 import { caseStatusLabels, CaseTimeline, type CaseTransitionEntry } from "../cases/CaseTimeline";
 import "./workbench.css";
 import { InspectionAlert, useInspectionFeed } from "./useInspectionFeed";
@@ -280,6 +281,7 @@ export function RealtimeWorkbench({ since }: { since: string }) {
           </div>
         </div>
       </section>
+      <OperationsPanel />
     </main>
   );
 }
