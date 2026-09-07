@@ -60,6 +60,10 @@ services:
       ODP_MINIO_ACCESS_KEY: minioadmin
       ODP_MINIO_SECRET_KEY: minioadmin
       ODP_MINIO_BUCKET: odp-artifacts
+      ODP_MINIO_SECURE: "false"
+      ODP_MINIO_PUBLIC_ENDPOINT: ${ODP_MINIO_PUBLIC_ENDPOINT:-localhost:9000}
+      ODP_MINIO_PUBLIC_SECURE: ${ODP_MINIO_PUBLIC_SECURE:-false}
+      ODP_MINIO_REGION: us-east-1
       ODP_RETRIEVAL_BACKEND: pgvector
       ODP_AUTH_JWT_SECRET: odp-dev-jwt-secret-do-not-reuse
       ODP_ENABLE_DEV_EVENT_TRIGGER: "true"

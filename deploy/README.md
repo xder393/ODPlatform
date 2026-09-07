@@ -91,6 +91,35 @@ entrypoint:
 
 ## Enterprise quality inspection demo script
 
+### Browser-visible evidence links
+
+The API uses `ODP_MINIO_ENDPOINT` for internal storage traffic and
+`ODP_MINIO_PUBLIC_ENDPOINT` (host plus optional port, without scheme or path)
+for evidence signing. Compose defaults to `localhost:9000` for local browsers.
+For remote access, set the public endpoint to the hostname reachable by the
+browser and set `ODP_MINIO_PUBLIC_SECURE=true` when it serves HTTPS.
+The API's internal TLS setting is separate (`ODP_MINIO_SECURE`).
+
+Signatures include the public Host header. Do not rewrite a signed URL's host
+or path; a proxy must preserve both. Configure `ODP_MINIO_REGION` to the bucket's
+region (Compose: `us-east-1`) so signing does not attempt network discovery
+through the public address. Existing tenant/line authorization still runs
+before signing, and links expire after 60 seconds.
+
+Browser-only operations regression (controlled HTTP, not the video pipeline):
+
+```sh
+cd apps/web-frontend
+E2E_BASE_URL=http://localhost:8080 npm run test:e2e -- operations.spec.ts
+```
+
+Use `PLAYWRIGHT_CHANNEL=chrome` to select installed Chrome locally. CI defaults
+to Playwright's managed Chromium. The test covers supervisor session start/stop,
+inspector read-only controls, dead-letter replay, a separate evidence tab, and
+390-pixel viewport overflow.
+
+### Demo workflow
+
 One-shot demo of the full quality inspection loop (login, live alert, cited
 AI advice, case handling, audit/metrics):
 

@@ -3,6 +3,7 @@
 from hashlib import sha256
 from io import BytesIO
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -105,3 +106,23 @@ def test_presign_rejects_long_expiry():
 
     with pytest.raises(ValueError, match="60"):
         storage.presign_get("frame-1", expires_seconds=61)
+
+
+def test_public_endpoint_signs_offline_without_changing_internal_object_reads():
+    client = FakeMinioClient()
+    client.objects["frame-1"] = (b"evidence", "a" * 64)
+    storage = MinioObjectStorage(
+        "minio:9000", "access", "secret", "frames", client=client,
+        public_endpoint="evidence.example.test", public_secure=True,
+        region="us-east-1",
+    )
+    url = urlsplit(storage.presign_get("frame-1"))
+    assert url.scheme == "https"
+    assert url.netloc == "evidence.example.test"
+    assert url.path == "/frames/frame-1"
+    query = parse_qs(url.query)
+    assert query["X-Amz-Expires"] == ["60"]
+    assert query["X-Amz-SignedHeaders"] == ["host"]
+    assert "X-Amz-Signature" in query
+    assert storage.get("frame-1") == b"evidence"
+    assert not client.presign_calls

@@ -33,6 +33,9 @@ class MinioObjectStorage(ObjectStoragePort):
         *,
         secure: bool = True,
         client: Any | None = None,
+        public_endpoint: str | None = None,
+        public_secure: bool = True,
+        region: str = "us-east-1",
     ) -> None:
         if not endpoint.strip() or not access_key or not secret_key or not bucket.strip():
             raise ValueError("MinIO endpoint, credentials, and bucket are required")
@@ -47,6 +50,19 @@ class MinioObjectStorage(ObjectStoragePort):
                 secure=secure,
             )
         self._client = client
+        self._signing_client = client
+        if public_endpoint is not None:
+            from minio import Minio
+
+            # SigV4 includes Host. Sign for the browser-visible address from
+            # the outset; rewriting an internal URL invalidates its signature.
+            # Explicit region avoids a server-side call to the public address.
+            if not public_endpoint.strip() or not region.strip():
+                raise ValueError("public MinIO endpoint and region must be nonempty")
+            self._signing_client = Minio(
+                public_endpoint, access_key=access_key, secret_key=secret_key,
+                secure=public_secure, region=region,
+            )
 
     @property
     def bucket(self) -> str:
@@ -144,7 +160,7 @@ class MinioObjectStorage(ObjectStoragePort):
     def presign_get(self, object_key: str, expires_seconds: int = 60) -> str:
         if expires_seconds < 1 or expires_seconds > 60:
             raise ValueError("evidence presign TTL must be between 1 and 60 seconds")
-        return self._client.presigned_get_object(
+        return self._signing_client.presigned_get_object(
             self._bucket,
             object_key,
             expires=timedelta(seconds=expires_seconds),
@@ -191,7 +207,7 @@ class MinioObjectStorage(ObjectStoragePort):
             "PUT",
             self._bucket,
             object_key,
-            body=io.BytesIO(content),
+            body=content,
             headers=headers,
         )
         release = getattr(response, "release_conn", None)

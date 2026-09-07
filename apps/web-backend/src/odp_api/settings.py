@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     minio_access_key: str | None = None
     minio_secret_key: str | None = None
     minio_bucket: str | None = None
+    minio_secure: bool = True
+    minio_public_endpoint: str | None = None
+    minio_public_secure: bool = True
+    minio_region: str = "us-east-1"
     # Load the deterministic demo seed at app creation (used by the Compose
     # stack so the browser demo can log in with the demo accounts).
     seed_demo: bool = False

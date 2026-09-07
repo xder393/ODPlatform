@@ -341,7 +341,10 @@ def create_app(
             runtime_settings.minio_access_key or "",
             runtime_settings.minio_secret_key or "",
             runtime_settings.minio_bucket or "",
-            secure=False,
+            secure=runtime_settings.minio_secure,
+            public_endpoint=runtime_settings.minio_public_endpoint,
+            public_secure=runtime_settings.minio_public_secure,
+            region=runtime_settings.minio_region,
         )
     app.state.object_storage = object_storage
 

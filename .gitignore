@@ -44,6 +44,8 @@ Thumbs.db
 htmlcov/
 .mypy_cache/
 .ruff_cache/
+apps/web-frontend/test-results/
+apps/web-frontend/playwright-report/
 
 # ============================================================
 # ODPlatform 专属(Monorepo 路径)
