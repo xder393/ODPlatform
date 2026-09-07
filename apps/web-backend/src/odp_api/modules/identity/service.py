@@ -172,4 +172,13 @@ def create_auth_router(
             raise HTTPException(status_code=503, detail="WebSocket authentication is not configured.")
         return {"ticket": websocket_ticket_service.issue(actor.actor_id), "expires_in": 60}
 
+    @router.get("/me")
+    def current_profile(actor: Actor = Depends(actor_provider)) -> dict[str, object]:
+        return {
+            "actor_id": str(actor.actor_id),
+            "role": actor.role.value,
+            "organization_id": str(actor.organization_id),
+            "line_ids": sorted(str(line_id) for line_id in actor.line_ids),
+        }
+
     return router

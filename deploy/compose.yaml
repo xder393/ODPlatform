@@ -56,6 +56,10 @@ services:
       ODP_REDIS_URL: redis://redis:6379/0
       ODP_DATABASE_URL: postgresql+psycopg://odp_api:odp_api_dev@postgres:5432/odp
       ODP_POSTGRES_URL: postgresql://odp_api:odp_api_dev@postgres:5432/odp
+      ODP_MINIO_ENDPOINT: minio:9000
+      ODP_MINIO_ACCESS_KEY: minioadmin
+      ODP_MINIO_SECRET_KEY: minioadmin
+      ODP_MINIO_BUCKET: odp-artifacts
       ODP_RETRIEVAL_BACKEND: pgvector
       ODP_AUTH_JWT_SECRET: odp-dev-jwt-secret-do-not-reuse
       ODP_ENABLE_DEV_EVENT_TRIGGER: "true"

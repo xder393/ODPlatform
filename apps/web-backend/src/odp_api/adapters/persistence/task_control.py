@@ -41,6 +41,7 @@ from odp_api.modules.tasks.models import (
     TaskStatus,
 )
 from odp_api.modules.tasks.recovery import (
+    DeadLetterReplayResult,
     QuarantineResult,
     ReplayResult,
     SystemRecoveryScope,
@@ -1640,6 +1641,106 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                 self._append_replay_audit(session, command)
                 session.commit()
                 return ReplayResult(True, task.dispatch_seq, outbox_id)
+            except BaseException:
+                session.rollback()
+                raise
+
+    def replay_dead_letter(
+        self, task_id: UUID, organization_id: UUID, actor_id: UUID | None = None
+    ) -> DeadLetterReplayResult:
+        """Create a fresh READY task/outbox for one terminal task.
+
+        The original task and attempts remain immutable history.  The camera
+        anchor is locked before the source task and the ready-window guard is
+        reused so replay cannot bypass admission backpressure.
+        """
+
+        with self._session_factory() as session:
+            try:
+                current = self._db_now(session)
+                source = session.scalar(
+                    select(InferenceTaskRow).where(
+                        InferenceTaskRow.task_id == task_id,
+                        InferenceTaskRow.organization_id == organization_id,
+                    )
+                )
+                if source is None or source.status != TaskStatus.DEAD_LETTER.value:
+                    raise AdmissionRejected("TASK_NOT_DEAD_LETTER")
+                state = self._lock_camera_state(session, organization_id, source.camera_id)
+                source = session.scalar(
+                    select(InferenceTaskRow)
+                    .where(
+                        InferenceTaskRow.task_id == task_id,
+                        InferenceTaskRow.organization_id == organization_id,
+                    )
+                    .with_for_update()
+                )
+                if source is None or source.status != TaskStatus.DEAD_LETTER.value:
+                    raise AdmissionRejected("TASK_NOT_DEAD_LETTER")
+                if self._sync_ready_count(session, state) >= 2:
+                    raise AdmissionRejected("READY_WINDOW_FULL")
+                replay_id = uuid4()
+                replay = InferenceTaskRow(
+                    task_id=replay_id,
+                    organization_id=organization_id,
+                    camera_id=source.camera_id,
+                    artifact_id=source.artifact_id,
+                    idempotency_key=f"{source.idempotency_key}:replay:{replay_id}",
+                    status=TaskStatus.READY.value,
+                    dispatch_seq=1,
+                    attempt_count=0,
+                    next_attempt_at=None,
+                    last_dispatched_at=current,
+                    lease_owner=None,
+                    fence_token=0,
+                    lease_expires_at=None,
+                    error_code=None,
+                    error_detail=None,
+                    created_at=current,
+                    updated_at=current,
+                )
+                session.add(replay)
+                outbox_id = uuid4()
+                session.add(
+                    OutboxEventRow(
+                        outbox_id=outbox_id,
+                        organization_id=organization_id,
+                        aggregate_type="inference_task",
+                        aggregate_id=replay_id,
+                        task_id=replay_id,
+                        dispatch_seq=1,
+                        event_type=INFERENCE_REQUEST_EVENT,
+                        schema_version=EVENT_SCHEMA_VERSION,
+                        payload={"task_id": str(replay_id), "dispatch_seq": 1},
+                        available_at=current,
+                        claim_owner=None,
+                        claim_expires_at=None,
+                        publish_attempts=0,
+                        published_at=None,
+                        last_error=None,
+                        created_at=current,
+                        updated_at=current,
+                    )
+                )
+                state.ready_count = self._sync_ready_count(session, state)
+                state.version += 1
+                state.updated_at = current
+                self._append_replay_audit(
+                    session,
+                    AuditCommand(
+                        organization_id,
+                        "inference_task",
+                        replay_id,
+                        "DEAD_LETTER_REPLAYED",
+                        f"replayed source task {task_id}",
+                        actor_id,
+                        current,
+                        None,
+                        None,
+                    ),
+                )
+                session.commit()
+                return DeadLetterReplayResult(replay_id, 1, outbox_id)
             except BaseException:
                 session.rollback()
                 raise

@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     # PostgreSQL with the pgvector extension through a lazily imported driver.
     retrieval_backend: RetrievalBackend = "inmemory"
     postgres_url: str | None = None
+    minio_endpoint: str | None = None
+    minio_access_key: str | None = None
+    minio_secret_key: str | None = None
+    minio_bucket: str | None = None
     # Load the deterministic demo seed at app creation (used by the Compose
     # stack so the browser demo can log in with the demo accounts).
     seed_demo: bool = False

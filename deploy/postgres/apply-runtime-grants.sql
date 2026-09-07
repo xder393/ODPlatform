@@ -16,7 +16,10 @@ BEGIN
         'actors', 'actor_line_grants', 'password_credentials', 'defect_cases',
         'inspection_events', 'case_transitions', 'alerts', 'inspection_alerts',
         'websocket_tickets', 'reauthentication_markers', 'knowledge_documents',
-        'knowledge_parent_chunks', 'knowledge_chunk_index'
+        'knowledge_parent_chunks', 'knowledge_chunk_index', 'inspection_sessions',
+        'camera_inference_state', 'frame_artifacts', 'inference_tasks',
+        'inference_attempts', 'published_inference_results', 'outbox_events',
+        'message_quarantine', 'defect_episode'
     ]
     LOOP
         IF to_regclass('public.' || table_name) IS NOT NULL THEN

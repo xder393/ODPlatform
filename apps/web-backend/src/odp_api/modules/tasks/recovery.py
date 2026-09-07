@@ -30,6 +30,15 @@ class ReplayResult:
 
 
 @dataclass(frozen=True, slots=True)
+class DeadLetterReplayResult:
+    """New task identity created when a terminal task is replayed."""
+
+    task_id: UUID
+    dispatch_seq: int
+    new_outbox_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
 class SystemRecoveryScope:
     """Explicit capability held only by the database recovery scheduler."""
 

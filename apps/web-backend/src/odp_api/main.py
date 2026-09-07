@@ -44,6 +44,7 @@ from odp_api.adapters.persistence.repositories import (
     SqlAlchemyCaseRepository,
     SqlAlchemyPasswordCredentialRepository,
 )
+from odp_api.adapters.persistence.task_control import SqlAlchemyTaskControlRepository
 from odp_api.adapters.persistence.unit_of_work import SqlAlchemyBusinessUnitOfWork
 from odp_api.adapters.redis_stream import RedisSocketStreamClient, SQLiteStreamClient
 from odp_api.adapters.retrieval.embedding import hash_embedding
@@ -52,6 +53,7 @@ from odp_api.adapters.retrieval.pgvector import (
     PgVectorPostgresAdapter,
     psycopg_executor,
 )
+from odp_api.adapters.storage.minio import MinioObjectStorage
 from odp_api.adapters.tasks.redis_stream import (
     RedisStreamTaskAlertPublisher,
     RedisStreamTaskQueue,
@@ -60,6 +62,7 @@ from odp_api.adapters.vision.mock import MockVisionAdapter
 from odp_api.db import create_engine_and_session
 from odp_api.modules.ai_orchestration.router import create_advice_router
 from odp_api.modules.ai_orchestration.service import AdviceService
+from odp_api.modules.artifacts.router import EvidenceService, create_artifacts_router
 from odp_api.modules.audit.service import AuditRepository, AuditService
 from odp_api.modules.audit.verify import (
     AuditVerificationMonitor,
@@ -74,11 +77,15 @@ from odp_api.modules.identity.service import (
 )
 from odp_api.modules.identity.tickets import WebSocketTicketService
 from odp_api.modules.inspection.service import InspectionService
+from odp_api.modules.inspection_sessions.router import create_inspection_sessions_router
+from odp_api.modules.inspection_sessions.service import InspectionSessionService
 from odp_api.modules.knowledge.ingest import KnowledgeIngestionService
 from odp_api.modules.notifications.dev_router import (
     create_development_notifications_router,
 )
 from odp_api.modules.notifications.router import create_notifications_router
+from odp_api.modules.tasks.diagnostics import TaskDiagnosticsService
+from odp_api.modules.tasks.router import create_task_diagnostics_router
 from odp_api.modules.tasks.service import TaskService
 from odp_api.observability.logging import configure_uvicorn_access_logging
 from odp_api.observability.metrics import (
@@ -317,6 +324,26 @@ def create_app(
     app.state.case_repository = case_repository
     app.state.inspection_alert_feed = inspection_alert_feed
     app.state.metric_registry = registry
+    app.state.inspection_session_service = InspectionSessionService(session_factory)
+    app.state.task_control_repository = SqlAlchemyTaskControlRepository(session_factory)
+    app.state.task_diagnostics_service = TaskDiagnosticsService(session_factory)
+    object_storage = None
+    if all(
+        (
+            runtime_settings.minio_endpoint,
+            runtime_settings.minio_access_key,
+            runtime_settings.minio_secret_key,
+            runtime_settings.minio_bucket,
+        )
+    ):
+        object_storage = MinioObjectStorage(
+            runtime_settings.minio_endpoint or "",
+            runtime_settings.minio_access_key or "",
+            runtime_settings.minio_secret_key or "",
+            runtime_settings.minio_bucket or "",
+            secure=False,
+        )
+    app.state.object_storage = object_storage
 
     app.include_router(
         create_cases_router(
@@ -346,6 +373,18 @@ def create_app(
             actor_repository=resolved_actor_repository,
             websocket_ticket_service=websocket_ticket_service,
         )
+    )
+    app.include_router(
+        create_inspection_sessions_router(app.state.inspection_session_service)
+    )
+    app.include_router(
+        create_task_diagnostics_router(
+            app.state.task_diagnostics_service,
+            app.state.task_control_repository,
+        )
+    )
+    app.include_router(
+        create_artifacts_router(EvidenceService(session_factory, object_storage))
     )
     return app
 
