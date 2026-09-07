@@ -3,6 +3,11 @@
 Docker Compose platform for ODPlatform, including the observability stack
 (Prometheus, Alertmanager and Grafana).
 
+The P1B runtime is split into independent process containers: a frame
+ingestor, transactional-Outbox relay, two inference workers, a recovery
+scheduler, an artifact reconciler, and Redis Stream retention. PostgreSQL is
+the task/evidence authority; Redis is only the distribution plane.
+
 ## Start and stop
 
 ```bash
@@ -21,6 +26,12 @@ needs an image-level `uv` installation and a container validation pass.
 | Service       | Port          | Notes                                                        |
 | ------------- | ------------- | ------------------------------------------------------------ |
 | api           | 8000          | FastAPI; exposes `GET /metrics` and `GET /healthz`           |
+| frame-ingestor | —            | Claims `inspection_sessions` and uploads sampled frames      |
+| outbox-relay  | —             | Publishes committed events to Redis Streams                  |
+| inference-worker-1/2 | —       | Independent CPU inference consumers with lease renewal       |
+| recovery-scheduler | —         | Single PostgreSQL-advisory-lock recovery leader              |
+| artifact-reconciler | —       | Repairs pending MinIO uploads and protected cleanup          |
+| stream-retention | —          | Redis 7 exact `MINID` retention with PEL safety               |
 | postgres      | 5432          | database `odp`, user/password `odp`                          |
 | redis         | 6379          | task queue and alert streams                                 |
 | minio         | 9000 / 9001   | object storage; console `minioadmin` / `minioadmin`          |
@@ -53,12 +64,19 @@ service (`docker compose -f deploy/compose.yaml restart prometheus`).
 ## Database bootstrap
 
 `migrate` 是唯一的数据库 bootstrap 服务：它以既有卷 owner `odp` 执行
-角色/RAG/Alembic 迁移和授权，再以 runtime role `odp_app` 依次播种业务数据、
+角色/RAG/Alembic 迁移和授权，再以兼容 runtime role `odp_app` 依次播种业务数据、
 durable inspection alerts（`python -m odp_api.seed_alerts`）和知识库。API
-不会在启动时重播这些告警。旧卷升级请运行
+使用独立的 `odp_api` 登录角色；Worker、Relay 和 Scheduler/Artifact
+Reconciler 分别使用 `odp_worker`、`odp_relay` 和 `odp_scheduler`，其 SQL 授权
+边界按最小权限划分。API 不会在启动时重播这些告警。旧卷升级请运行
 `deploy/postgres/upgrade-existing-volume.sh`；脚本使用 migrate 的退出码，失败
 即失败。Compose 仍使用 editable `pip install`，尚未 frozen；这是明确保留的
 后续改进项。
+
+P1 进程的启动只依赖 `migrate` 完成、Redis/MinIO 健康检查；运行时恢复不依赖
+Compose 的 `depends_on`。每个进程从 PostgreSQL、Redis、MinIO 和（需要推理的
+进程）模型 SHA 配置中做 fail-closed readiness 校验。模型 fixture 生成并提交
+后，可通过 `ODP_MODEL_SHA256` 覆盖 Compose 中的占位 digest。
 
 ## Web frontend (nginx)
 

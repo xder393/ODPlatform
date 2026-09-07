@@ -1,4 +1,32 @@
+x-p1-process: &p1-process
+  # All P1 processes share the same source/image surface but have separate
+  # PostgreSQL credentials and independent restart boundaries.  They do not
+  # use the API's request lifecycle or a local SQLite task database.
+  image: python:3.12-slim
+  working_dir: /workspace
+  volumes:
+    - ..:/workspace
+    - ../apps/web-backend/tests/fixtures:/workspace/apps/web-backend/tests/fixtures:ro
+  environment: &p1-environment
+    ODP_ENVIRONMENT: docker
+    ODP_REDIS_URL: redis://redis:6379/0
+    ODP_MINIO_ENDPOINT: minio:9000
+    ODP_MINIO_ACCESS_KEY: minioadmin
+    ODP_MINIO_SECRET_KEY: minioadmin
+    ODP_MINIO_BUCKET: odp-artifacts
+    ODP_MODEL_PATH: /workspace/apps/web-backend/tests/fixtures/models/tiny-detector.onnx
+    ODP_MODEL_SHA256: ${ODP_MODEL_SHA256:-0000000000000000000000000000000000000000000000000000000000000000}
+    ODP_EXECUTION_PROVIDER: CPUExecutionProvider
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+    redis:
+      condition: service_healthy
+    minio:
+      condition: service_healthy
+
 services:
+
   migrate:
     image: python:3.12-slim
     working_dir: /workspace
@@ -22,14 +50,12 @@ services:
     working_dir: /workspace
     volumes:
       - ..:/workspace
-      - task-state:/data
     command: ["sh", "-c", "pip install -e /workspace/apps/web-backend -e /workspace/packages/shared-schemas && uvicorn odp_api.main:create_app --factory --host 0.0.0.0 --port 8000 --log-config /workspace/apps/web-backend/src/odp_api/observability/uvicorn_logging.json"]
     environment:
       ODP_ENVIRONMENT: docker
       ODP_REDIS_URL: redis://redis:6379/0
-      ODP_DATABASE_URL: postgresql+psycopg://odp_app:odp_app_dev@postgres:5432/odp
-      ODP_POSTGRES_URL: postgresql://odp_app:odp_app_dev@postgres:5432/odp
-      ODP_TASK_DATABASE_PATH: /data/odp-tasks.sqlite3
+      ODP_DATABASE_URL: postgresql+psycopg://odp_api:odp_api_dev@postgres:5432/odp
+      ODP_POSTGRES_URL: postgresql://odp_api:odp_api_dev@postgres:5432/odp
       ODP_RETRIEVAL_BACKEND: pgvector
       ODP_AUTH_JWT_SECRET: odp-dev-jwt-secret-do-not-reuse
       ODP_ENABLE_DEV_EVENT_TRIGGER: "true"
@@ -46,6 +72,62 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+
+  frame-ingestor:
+    <<: *p1-process
+    environment:
+      <<: *p1-environment
+      ODP_PROCESS_ID: frame-ingestor
+      ODP_DATABASE_URL: postgresql+psycopg://odp_worker:odp_worker_dev@postgres:5432/odp
+    command: ["sh", "-c", "pip install -e /workspace/apps/web-backend -e /workspace/packages/shared-schemas && python -m odp_api.processes.frame_ingestor"]
+
+  outbox-relay:
+    <<: *p1-process
+    environment:
+      <<: *p1-environment
+      ODP_PROCESS_ID: outbox-relay
+      ODP_DATABASE_URL: postgresql+psycopg://odp_relay:odp_relay_dev@postgres:5432/odp
+    command: ["sh", "-c", "pip install -e /workspace/apps/web-backend -e /workspace/packages/shared-schemas && python -m odp_api.processes.outbox_relay"]
+
+  inference-worker-1:
+    <<: *p1-process
+    environment:
+      <<: *p1-environment
+      ODP_PROCESS_ID: inference-worker-1
+      ODP_DATABASE_URL: postgresql+psycopg://odp_worker:odp_worker_dev@postgres:5432/odp
+    command: ["sh", "-c", "pip install -e /workspace/apps/web-backend -e /workspace/packages/shared-schemas && python -m odp_api.processes.inference_worker"]
+
+  inference-worker-2:
+    <<: *p1-process
+    environment:
+      <<: *p1-environment
+      ODP_PROCESS_ID: inference-worker-2
+      ODP_DATABASE_URL: postgresql+psycopg://odp_worker:odp_worker_dev@postgres:5432/odp
+    command: ["sh", "-c", "pip install -e /workspace/apps/web-backend -e /workspace/packages/shared-schemas && python -m odp_api.processes.inference_worker"]
+
+  recovery-scheduler:
+    <<: *p1-process
+    environment:
+      <<: *p1-environment
+      ODP_PROCESS_ID: recovery-scheduler
+      ODP_DATABASE_URL: postgresql+psycopg://odp_scheduler:odp_scheduler_dev@postgres:5432/odp
+    command: ["sh", "-c", "pip install -e /workspace/apps/web-backend -e /workspace/packages/shared-schemas && python -m odp_api.processes.recovery_scheduler"]
+
+  artifact-reconciler:
+    <<: *p1-process
+    environment:
+      <<: *p1-environment
+      ODP_PROCESS_ID: artifact-reconciler
+      ODP_DATABASE_URL: postgresql+psycopg://odp_scheduler:odp_scheduler_dev@postgres:5432/odp
+    command: ["sh", "-c", "pip install -e /workspace/apps/web-backend -e /workspace/packages/shared-schemas && python -m odp_api.processes.artifact_reconciler"]
+
+  stream-retention:
+    <<: *p1-process
+    environment:
+      <<: *p1-environment
+      ODP_PROCESS_ID: stream-retention
+      ODP_DATABASE_URL: postgresql+psycopg://odp_scheduler:odp_scheduler_dev@postgres:5432/odp
+    command: ["sh", "-c", "pip install -e /workspace/apps/web-backend -e /workspace/packages/shared-schemas && python -m odp_api.processes.stream_retention"]
 
   web:
     build:
@@ -88,6 +170,11 @@ services:
     ports:
       - "9000:9000"
       - "9001:9001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   prometheus:
     image: prom/prometheus:v2.53.1
@@ -121,5 +208,4 @@ services:
       - "9093:9093"
 
 volumes:
-  task-state:
   postgres-data:

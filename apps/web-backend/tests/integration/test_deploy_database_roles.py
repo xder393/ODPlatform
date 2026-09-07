@@ -13,8 +13,8 @@ def test_compose_isolates_owner_credentials_in_one_shot_migrator() -> None:
     assert "ODP_MIGRATOR_DATABASE_URL" not in api_section
     assert "postgresql+psycopg://odp:" not in api_section
     assert "postgresql://odp:odp@" not in api_section
-    assert "ODP_DATABASE_URL: postgresql+psycopg://odp_app:" in api_section
-    assert "ODP_POSTGRES_URL: postgresql://odp_app:" in api_section
+    assert "ODP_DATABASE_URL: postgresql+psycopg://odp_api:" in api_section
+    assert "ODP_POSTGRES_URL: postgresql://odp_api:" in api_section
     assert "ODP_MIGRATOR_DATABASE_URL" in migrate_section
     assert "python -m odp_api.migrations" in migrate_section
     assert "alembic upgrade head" in migrate_section

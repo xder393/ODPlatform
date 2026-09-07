@@ -27,6 +27,16 @@ def test_runtime_grant_script_preserves_append_only_audit_boundaries() -> None:
     assert "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.%I TO odp_app" in sql
 
 
+def test_runtime_grants_define_distinct_p1_process_roles() -> None:
+    from odp_api.database_roles import grant_sql
+
+    sql = grant_sql()
+    for role in ("odp_api", "odp_worker", "odp_relay", "odp_scheduler"):
+        assert f"TO {role}" in sql
+    assert "GRANT SELECT, UPDATE ON TABLE public.outbox_events TO odp_relay" in sql
+    assert "GRANT SELECT, INSERT ON TABLE public.audit_logs TO odp_worker" in sql
+
+
 def test_bootstrap_role_script_repairs_the_runtime_login_for_existing_volumes() -> None:
     from odp_api.database_roles import bootstrap_sql
 
@@ -34,6 +44,8 @@ def test_bootstrap_role_script_repairs_the_runtime_login_for_existing_volumes() 
 
     assert "CREATE ROLE odp_app" in sql
     assert "ALTER ROLE odp_app LOGIN PASSWORD 'odp_app_dev'" in sql
+    for role in ("odp_api", "odp_worker", "odp_relay", "odp_scheduler"):
+        assert f"CREATE ROLE {role}" in sql
 
 
 @pytest.mark.skipif(

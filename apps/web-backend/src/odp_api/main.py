@@ -51,7 +51,6 @@ from odp_api.adapters.tasks.redis_stream import (
     RedisStreamTaskAlertPublisher,
     RedisStreamTaskQueue,
 )
-from odp_api.adapters.tasks.sqlite import SQLiteTaskRepository
 from odp_api.adapters.vision.mock import MockVisionAdapter
 from odp_api.db import create_engine_and_session
 from odp_api.modules.ai_orchestration.router import create_advice_router
@@ -173,14 +172,23 @@ def create_app(
     if managed_database:
         Base.metadata.create_all(engine)
     runtime_stream_client = stream_client or _runtime_stream_client(runtime_settings)
-    task_repository = SQLiteTaskRepository(runtime_settings.task_database_path)
-    task_service = TaskService(
-        task_repository,
-        RedisStreamTaskQueue(runtime_stream_client),
-        RegistryTaskMetrics(registry),
-        RedisStreamTaskAlertPublisher(runtime_stream_client),
-    )
-    task_service.recover_unpublished()
+    # P0's local SQLite task service remains available for local/test demos.
+    # Deployed P1 composition owns task authority in PostgreSQL and the
+    # independent Worker/Relay processes; the API must not create a hidden
+    # /tmp SQLite state file when running under Docker/staging/production.
+    task_repository = None
+    task_service = None
+    if runtime_settings.environment in {"local", "test"}:
+        from odp_api.adapters.tasks.sqlite import SQLiteTaskRepository
+
+        task_repository = SQLiteTaskRepository(runtime_settings.task_database_path)
+        task_service = TaskService(
+            task_repository,
+            RedisStreamTaskQueue(runtime_stream_client),
+            RegistryTaskMetrics(registry),
+            RedisStreamTaskAlertPublisher(runtime_stream_client),
+        )
+        task_service.recover_unpublished()
     # Facts are always database-backed. Redis is deliberately not used as the
     # source of truth, so a transient stream outage cannot erase reconciliation.
     sqlite_alert_feed = SqliteInspectionAlertFeed(session_factory)
@@ -198,7 +206,8 @@ def create_app(
             yield
         finally:
             await daily_audit_verification.stop()
-            task_repository.close()
+            if task_repository is not None:
+                task_repository.close()
             close = getattr(runtime_stream_client, "close", None)
             if close is not None:
                 close()
