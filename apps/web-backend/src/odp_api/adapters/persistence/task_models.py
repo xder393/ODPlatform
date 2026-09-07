@@ -76,6 +76,7 @@ class InspectionSessionRow(Base):
             "idempotency_key",
             name="uq_inspection_session_tenant_key",
         ),
+        Index("ix_inspection_sessions_ingestor_process_id", "ingestor_process_id"),
     )
 
     session_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
@@ -86,6 +87,7 @@ class InspectionSessionRow(Base):
     sanitized_uri: Mapped[str] = mapped_column(String(2048), nullable=False)
     secret_reference: Mapped[str | None] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(32), nullable=False)
+    ingestor_process_id: Mapped[str | None] = mapped_column(String(255))
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error_code: Mapped[str | None] = mapped_column(String(128))

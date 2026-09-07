@@ -67,6 +67,11 @@ def test_p1_control_plane_schema_has_required_constraints(tmp_path):
             for column in inspector.get_columns("inspection_sessions")
             if column["name"] == "line_id"
         ) is False
+        assert next(
+            column["nullable"]
+            for column in inspector.get_columns("inspection_sessions")
+            if column["name"] == "ingestor_process_id"
+        ) is True
     finally:
         engine.dispose()
 
