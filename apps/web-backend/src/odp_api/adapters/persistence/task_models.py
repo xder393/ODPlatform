@@ -84,6 +84,7 @@ class InspectionSessionRow(Base):
     camera_id: Mapped[UUID] = mapped_column(Uuid, nullable=False, index=True)
     line_id: Mapped[UUID] = mapped_column(Uuid, nullable=False, index=True)
     source_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    product_category: Mapped[str | None] = mapped_column(String(255))
     sanitized_uri: Mapped[str] = mapped_column(String(2048), nullable=False)
     secret_reference: Mapped[str | None] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(32), nullable=False)

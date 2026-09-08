@@ -65,6 +65,7 @@ it("reuses the session idempotency key after a network failure and stops the cre
   await screen.findByRole("button", { name: "启动实时检测" });
   fireEvent.change(screen.getByLabelText("相机 ID"), { target: { value: camera } });
   fireEvent.change(screen.getByLabelText("视频源"), { target: { value: "scratch-loop" } });
+  fireEvent.change(screen.getByLabelText("产品类别（用于知识检索）"), { target: { value: "外壳注塑件" } });
   failNextStart();
   fireEvent.click(screen.getByRole("button", { name: "启动实时检测" }));
   expect(await screen.findByText(/操作失败/)).toBeVisible();
@@ -73,6 +74,7 @@ it("reuses the session idempotency key after a network failure and stops the cre
   expect(await screen.findByText("等待停止")).toBeVisible();
   const starts = requests.filter(r => r.url === "/api/v1/inspection-sessions" && r.init?.method === "POST");
   expect(starts).toHaveLength(2);
+  expect(JSON.parse(String(starts[0].init?.body)).product_category).toBe("外壳注塑件");
   expect(new Headers(starts[0].init?.headers).get("Idempotency-Key")).toBeTruthy();
   expect(new Headers(starts[0].init?.headers).get("Idempotency-Key"))
     .toBe(new Headers(starts[1].init?.headers).get("Idempotency-Key"));

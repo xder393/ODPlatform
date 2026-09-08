@@ -75,6 +75,8 @@ class ProcessSettings(BaseSettings):
     minio_access_key: str | None = None
     minio_secret_key: str | None = None
     minio_bucket: str | None = None
+    minio_secure: bool = True
+    minio_region: str = "us-east-1"
     model_path: str | None = None
     model_sha256: str | None = None
     execution_provider: str = "CPUExecutionProvider"

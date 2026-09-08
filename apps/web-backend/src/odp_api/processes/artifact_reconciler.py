@@ -56,7 +56,8 @@ def _build_process(settings: ArtifactReconcilerSettings) -> ArtifactReconcilerPr
         settings.minio_access_key or "",
         settings.minio_secret_key or "",
         settings.minio_bucket or "",
-        secure=False,
+        secure=settings.minio_secure,
+        region=settings.minio_region,
     )
     # Keep the engine alive through the process lifetime; SQLAlchemy owns the
     # pool and closes it when the interpreter receives SIGTERM.

@@ -14,8 +14,10 @@ x-p1-process: &p1-process
     ODP_MINIO_ACCESS_KEY: minioadmin
     ODP_MINIO_SECRET_KEY: minioadmin
     ODP_MINIO_BUCKET: odp-artifacts
+    ODP_MINIO_SECURE: "false"
+    ODP_MINIO_REGION: us-east-1
     ODP_MODEL_PATH: /workspace/apps/web-backend/tests/fixtures/models/tiny-detector.onnx
-    ODP_MODEL_SHA256: ${ODP_MODEL_SHA256:-0000000000000000000000000000000000000000000000000000000000000000}
+    ODP_MODEL_SHA256: ${ODP_MODEL_SHA256:-210389bb2b3a8fa94645c41b10420eb4da318ac12a31b7708eda1e9c882f2922}
     ODP_EXECUTION_PROVIDER: CPUExecutionProvider
   depends_on:
     migrate:
@@ -24,8 +26,28 @@ x-p1-process: &p1-process
       condition: service_healthy
     minio:
       condition: service_healthy
+    storage-init:
+      condition: service_completed_successfully
 
 services:
+
+  storage-init:
+    image: python:3.12-slim
+    working_dir: /workspace
+    volumes:
+      - ..:/workspace:ro
+    environment:
+      ODP_MINIO_ENDPOINT: minio:9000
+      ODP_MINIO_ACCESS_KEY: minioadmin
+      ODP_MINIO_SECRET_KEY: minioadmin
+      ODP_MINIO_BUCKET: odp-artifacts
+      ODP_MINIO_SECURE: "false"
+      ODP_MINIO_REGION: us-east-1
+      PYTHONPATH: /workspace/apps/web-backend/src
+    command: ["sh", "-c", "pip install 'minio>=7.2,<8' && python -m odp_api.storage_bootstrap"]
+    depends_on:
+      minio:
+        condition: service_healthy
 
   migrate:
     image: python:3.12-slim
@@ -76,6 +98,8 @@ services:
       retries: 12
       start_period: 20s
     depends_on:
+      storage-init:
+        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
       redis:

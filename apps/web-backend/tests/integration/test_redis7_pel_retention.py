@@ -10,6 +10,38 @@ pytestmark = [pytest.mark.anyio, pytest.mark.integration]
 REDIS_URL = os.getenv("ODP_REDIS_TEST_URL")
 
 
+@pytest.mark.skipif(not REDIS_URL, reason="requires ODP_REDIS_TEST_URL")
+async def test_absent_stream_skips_trim_but_wrong_type_still_fails():
+    from redis.asyncio import Redis
+    from redis.exceptions import ResponseError
+
+    from odp_api.modules.tasks.retention import (
+        MinimumRetentionPolicy,
+        RedisRetentionAdapter,
+        StreamRetentionController,
+        StreamRetentionPolicy,
+    )
+
+    stream = f"odp:test:retention-cold-start:{uuid4()}"
+    redis = Redis.from_url(REDIS_URL)
+    controller = StreamRetentionController(
+        RedisRetentionAdapter(redis),
+        StreamRetentionPolicy(stream, MinimumRetentionPolicy(timedelta(minutes=15))),
+        clock=lambda: datetime.now(UTC),
+    )
+    try:
+        summary = await controller.run_once()
+        assert summary.safe_min_id is None
+        assert summary.trimmed_entries == 0
+        assert not await redis.exists(stream)
+        await redis.set(stream, "not-a-stream")
+        with pytest.raises(ResponseError, match="WRONGTYPE"):
+            await controller.run_once()
+    finally:
+        await redis.delete(stream)
+        await redis.aclose()
+
+
 @pytest.mark.skipif(
     not REDIS_URL,
     reason="requires the dedicated ODP_REDIS_TEST_URL CI Redis 7 service",

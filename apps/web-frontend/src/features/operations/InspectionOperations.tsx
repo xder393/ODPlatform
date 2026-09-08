@@ -10,6 +10,7 @@ export function InspectionOperations({ actor, sessions, onChange }: {
   const [camera, setCamera] = useState("");
   const [line, setLine] = useState(actor.line_ids[0] ?? "");
   const [source, setSource] = useState("");
+  const [productCategory, setProductCategory] = useState("");
   const [kind, setKind] = useState<InspectionSessionInput["source_type"]>("RECORDED");
   const [secret, setSecret] = useState("");
   const [busy, setBusy] = useState(false);
@@ -24,6 +25,7 @@ export function InspectionOperations({ actor, sessions, onChange }: {
     const body: InspectionSessionInput = {
       camera_id: camera.trim(), line_id: line, source_type: kind,
       source_ref: source.trim(), ...(secret.trim() ? { secret_ref: secret.trim() } : {}),
+      ...(productCategory.trim() ? { product_category: productCategory.trim() } : {}),
     };
     const serialized = JSON.stringify(body);
     if (submission.current?.body !== serialized) submission.current = { body: serialized, key: crypto.randomUUID() };
@@ -55,6 +57,8 @@ export function InspectionOperations({ actor, sessions, onChange }: {
         <option value="RECORDED">录制视频</option><option value="RTSP">RTSP</option><option value="LOCAL_CAMERA">本地相机</option>
       </select></label>
       <label>视频源<input required maxLength={2048} value={source} onChange={e => setSource(e.target.value)} placeholder="例如 scratch-loop" /></label>
+      <label>产品类别（用于知识检索）<input maxLength={255} value={productCategory} onChange={e => setProductCategory(e.target.value)} placeholder="与知识规范中的产品类别一致" /></label>
+      <p>未填写产品类别时，检测仍可运行，但 AI 处置建议不可用。</p>
       <label>凭据引用（可选）<input maxLength={255} value={secret} onChange={e => setSecret(e.target.value)} placeholder="使用凭据引用，不填写密码" /></label>
       <button disabled={busy || !line} type="submit">启动实时检测</button>
     </form>}

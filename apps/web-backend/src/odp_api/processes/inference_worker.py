@@ -38,6 +38,8 @@ from odp_api.modules.tasks.consumer import (
 from odp_api.modules.tasks.models import FailureKind
 from odp_api.modules.tasks.recovery import QuarantineResult
 from odp_api.ports.tasks import StaleLease
+from odp_api.processes.common import install_signal_stop_event, load_settings
+from odp_api.settings import WorkerSettings
 
 LEASE_SECONDS = 20
 RENEW_INTERVAL_SECONDS = 5
@@ -239,7 +241,13 @@ class InferenceWorker:
         renewal_interval_seconds: float = RENEW_INTERVAL_SECONDS,
         inference_timeout_seconds: float = INFERENCE_TIMEOUT_SECONDS,
         recovery_interval_seconds: float = RECOVERY_INTERVAL_SECONDS,
+        heartbeat: Callable[[], Awaitable[None]] | None = None,
+        heartbeat_interval_seconds: float = 5.0,
     ) -> None:
+        if not math.isfinite(heartbeat_interval_seconds) or heartbeat_interval_seconds <= 0:
+            raise ValueError("heartbeat interval must be finite and positive")
+        self._heartbeat = heartbeat
+        self._heartbeat_interval = heartbeat_interval_seconds
         self._consumer = consumer
         self._control = task_control
         self._effects = effects
@@ -465,9 +473,37 @@ class InferenceWorker:
         return len(messages)
 
     async def run(self, stop_event: asyncio.Event | None = None) -> None:
+        stop = stop_event or asyncio.Event()
+        if stop.is_set():
+            return
         await self._consumer.start()
+        if self._heartbeat is not None:
+            await self._heartbeat()
+        tasks = [asyncio.create_task(self._run_deliveries(stop)), asyncio.create_task(stop.wait())]
+        if self._heartbeat is not None:
+            tasks.append(asyncio.create_task(self._heartbeat_loop()))
+        try:
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                await task
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _heartbeat_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self._heartbeat_interval)
+            await self._heartbeat()
+
+    async def _run_deliveries(self, stop_event: asyncio.Event) -> None:
         while stop_event is None or not stop_event.is_set():
-            await self.run_once()
+            processed = await self.run_once()
+            if processed:
+                # Keep draining queued references, including obsolete deliveries.
+                # An idle delay here caps throughput and can starve fresh frames.
+                await asyncio.sleep(0)
+                continue
             if stop_event is None:
                 await asyncio.sleep(self.recovery_interval_seconds)
             else:
@@ -808,6 +844,30 @@ def _raise_renewal_issue(state: _RenewalState) -> None:
         raise StaleLease("lease renewal was rejected")
 
 
+def _build_process(settings: WorkerSettings) -> InferenceWorker:
+    from odp_api.processes.runtime import build_worker
+
+    return build_worker(settings)
+
+
+def main() -> None:
+    settings = load_settings(WorkerSettings)
+    process = _build_process(settings)
+
+    async def serve() -> None:
+        stop = install_signal_stop_event()
+        try:
+            await process.run(stop)
+        finally:
+            await process.close()
+
+    asyncio.run(serve())
+
+
+if __name__ == "__main__":
+    main()
+
+
 __all__ = [
     "GROUP_NAME",
     "INFERENCE_TIMEOUT_SECONDS",
@@ -830,4 +890,5 @@ __all__ = [
     "ThreadedTaskControlAdapter",
     "WorkerProcessResult",
     "WorkerTaskControlPort",
+    "main",
 ]

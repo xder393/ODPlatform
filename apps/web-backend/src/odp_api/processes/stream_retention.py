@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from odp_api.modules.tasks.retention import TrimSummary
+from odp_api.processes.common import install_signal_stop_event, load_settings
+from odp_api.settings import StreamRetentionSettings
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_RETENTION_INTERVAL_SECONDS = 30.0
@@ -90,9 +92,40 @@ def _controller_stream_name(controller: object, index: int) -> str:
     return stream_name if isinstance(stream_name, str) else f"controller-{index}"
 
 
+def _build_process(settings: StreamRetentionSettings) -> tuple[StreamRetentionProcess, object]:
+    from odp_api.processes.runtime import build_retention
+
+    return build_retention(settings)
+
+
+def main() -> None:
+    settings = load_settings(StreamRetentionSettings)
+    process, redis = _build_process(settings)
+
+    async def serve() -> None:
+        stop = install_signal_stop_event()
+        try:
+            await process.run(stop)
+        finally:
+            close = getattr(redis, "aclose", None) or getattr(redis, "close", None)
+            if close is not None:
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+
+    import inspect
+
+    asyncio.run(serve())
+
+
+if __name__ == "__main__":
+    main()
+
+
 __all__ = [
     "DEFAULT_RETENTION_INTERVAL_SECONDS",
     "RetentionFailure",
     "RetentionProcessSummary",
     "StreamRetentionProcess",
+    "main",
 ]

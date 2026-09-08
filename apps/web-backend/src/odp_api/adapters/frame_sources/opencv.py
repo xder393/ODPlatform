@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -64,6 +65,9 @@ class _OpenCvSource:
         self._capture: Any | None = None
         self._sequence = 0
         self._closed = False
+        # asyncio cancellation does not stop an in-flight native read. Protect
+        # the handle in the worker threads, including close from heartbeat expiry.
+        self._capture_lock = threading.Lock()
 
     @staticmethod
     def _default_capture_factory(source: str | int) -> Any:
@@ -84,13 +88,23 @@ class _OpenCvSource:
         return capture
 
     async def _read(self) -> tuple[bool, Any]:
-        capture = self._capture or self._open()
-        return await asyncio.to_thread(capture.read)
+        return await asyncio.to_thread(self._read_locked)
+
+    def _read_locked(self) -> tuple[bool, Any]:
+        with self._capture_lock:
+            if self._closed:
+                return False, None
+            capture = self._capture or self._open()
+            return capture.read()
 
     async def _release(self) -> None:
-        capture, self._capture = self._capture, None
-        if capture is not None:
-            await asyncio.to_thread(capture.release)
+        await asyncio.to_thread(self._release_locked)
+
+    def _release_locked(self) -> None:
+        with self._capture_lock:
+            capture, self._capture = self._capture, None
+            if capture is not None:
+                capture.release()
 
     async def close(self) -> None:
         self._closed = True

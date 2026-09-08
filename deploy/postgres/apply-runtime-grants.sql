@@ -118,3 +118,23 @@ BEGIN
 END
 $$;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO odp_api, odp_worker, odp_relay, odp_scheduler;
+
+-- P1 operations API: session lifecycle, diagnostics and fenced dead-letter replay.
+-- UPDATE is also required by PostgreSQL SELECT FOR UPDATE on replay anchors.
+GRANT SELECT, INSERT, UPDATE ON public.inspection_sessions TO odp_api;
+GRANT SELECT, INSERT, UPDATE ON public.inference_tasks TO odp_api;
+GRANT SELECT, UPDATE ON public.camera_inference_state, public.frame_artifacts TO odp_api;
+GRANT SELECT ON public.inference_attempts, public.message_quarantine,
+    public.published_inference_results TO odp_api;
+GRANT SELECT, INSERT ON public.outbox_events TO odp_api;
+
+-- Completion creates or locks the case belonging to the detected episode.
+GRANT SELECT, INSERT, UPDATE ON public.defect_cases TO odp_worker;
+
+-- The relay validates tenant-matched task references while claiming Outbox rows.
+GRANT SELECT ON public.inference_tasks TO odp_relay;
+
+-- Recovery redispatch and orphan upload promotion create new durable records.
+GRANT INSERT ON public.inference_tasks, public.outbox_events TO odp_scheduler;
+-- Evidence cleanup checks event references before removing an artifact.
+GRANT SELECT ON public.inspection_events TO odp_scheduler;

@@ -18,6 +18,8 @@ from odp_api.modules.ingestion.service import (
 )
 from odp_api.ports.frame_sources import FrameSource
 from odp_api.ports.inspection_sessions import InspectionSession, InspectionSessionPort
+from odp_api.processes.common import install_signal_stop_event, load_settings
+from odp_api.settings import IngestorSettings
 
 LOGGER = logging.getLogger(__name__)
 
@@ -48,12 +50,20 @@ class FrameIngestor:
         *,
         process_id: str,
         heartbeat_interval_seconds: float = 5.0,
+        max_concurrent_sessions: int = 10,
+        poll_interval_seconds: float = 1.0,
         clock: Clock | None = None,
     ) -> None:
         if not process_id.strip():
             raise ValueError("process_id is required")
         if heartbeat_interval_seconds <= 0:
             raise ValueError("heartbeat interval must be positive")
+        if isinstance(max_concurrent_sessions, bool) or not isinstance(max_concurrent_sessions, int) or max_concurrent_sessions < 1:
+            raise ValueError("max_concurrent_sessions must be a positive integer")
+        if poll_interval_seconds <= 0:
+            raise ValueError("poll interval must be positive")
+        self._max_sessions = max_concurrent_sessions
+        self._poll_interval = poll_interval_seconds
         self._sessions = sessions
         self._ingestion = ingestion
         self._health = health
@@ -62,6 +72,56 @@ class FrameIngestor:
         self._process_id = process_id
         self._heartbeat_interval = heartbeat_interval_seconds
         self._clock = clock or (lambda: datetime.now(UTC))
+
+    async def run(self, stop_event: asyncio.Event | None = None) -> None:
+        """Keep polling independently of long-lived streams, within capacity."""
+        stop = stop_event or asyncio.Event()
+        if stop.is_set():
+            return
+        active = {}
+        try:
+            while not stop.is_set():
+                for session_id, task in tuple(active.items()):
+                    if task.done():
+                        await task
+                        del active[session_id]
+                stopped = await asyncio.to_thread(
+                    self._sessions.claim_stop_requests, self._process_id, self._max_sessions
+                )
+                for session in stopped:
+                    task = active.pop(session.session_id, None)
+                    if task is not None:
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                capacity = self._max_sessions - len(active)
+                if capacity and not stop.is_set():
+                    started = await asyncio.to_thread(
+                        self._sessions.claim_start_requests, self._process_id, capacity
+                    )
+                    for session in started:
+                        active[session.session_id] = asyncio.create_task(
+                            self._run_claimed(session, None)
+                        )
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=self._poll_interval)
+        finally:
+            for task in active.values():
+                task.cancel()
+            await asyncio.gather(*active.values(), return_exceptions=True)
+
+    async def _run_claimed(self, session, max_frames):
+        try:
+            return await self._run_session(session, max_frames)
+        except Exception as error:
+            LOGGER.exception(
+                "frame-ingestor session failed",
+                extra={"session_id": str(session.session_id), "error_type": type(error).__name__},
+            )
+            await asyncio.to_thread(
+                self._sessions.mark_failed, session.session_id, self._process_id,
+                "INGESTOR_FAILED", str(error) or type(error).__name__, self._clock(),
+            )
+            return None
 
     async def run_once(
         self,
@@ -74,7 +134,8 @@ class FrameIngestor:
         )
         reports: list[IngestionReport] = []
         failed = 0
-        for session in started:
+        async def run_claimed(session):
+            nonlocal failed
             try:
                 reports.append(await self._run_session(session, max_frames_per_session))
             except Exception as error:
@@ -88,9 +149,16 @@ class FrameIngestor:
                     session.session_id,
                     self._process_id,
                     "INGESTOR_FAILED",
-                    str(error),
+                    str(error) or type(error).__name__,
                     self._clock(),
                 )
+        tasks = [asyncio.create_task(run_claimed(session)) for session in started]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         stopped = await asyncio.to_thread(
             self._sessions.claim_stop_requests, self._process_id, limit
         )
@@ -155,4 +223,25 @@ def sanitize_source_uri(uri: str) -> str:
     raise ValueError("unsupported source URI scheme")
 
 
-__all__ = ["FrameIngestor", "IngestorRunReport", "sanitize_source_uri"]
+def _build_process(settings: IngestorSettings) -> FrameIngestor:
+    from odp_api.processes.runtime import build_ingestor
+
+    return build_ingestor(settings)
+
+
+def main() -> None:
+    settings = load_settings(IngestorSettings)
+    process = _build_process(settings)
+
+    async def serve() -> None:
+        stop = install_signal_stop_event()
+        await process.run(stop)
+
+    asyncio.run(serve())
+
+
+if __name__ == "__main__":
+    main()
+
+
+__all__ = ["FrameIngestor", "IngestorRunReport", "main", "sanitize_source_uri"]

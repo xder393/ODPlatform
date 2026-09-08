@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
+from redis.exceptions import ResponseError
+
 INFERENCE_STREAM_NAME = "odp:inference:tasks"
 ALERT_STREAM_NAME = "odp:inspection:alerts"
 GATEWAY_GROUP_PREFIX = "odp-alert-gateway:"
@@ -209,7 +211,14 @@ class RedisRetentionAdapter:
         self._client = client
 
     async def group_progress(self, stream_name: str) -> tuple[GroupProgress, ...]:
-        response = await _maybe_await(self._client.xinfo_groups(stream_name))
+        try:
+            response = await _maybe_await(self._client.xinfo_groups(stream_name))
+        except ResponseError as error:
+            if str(error) != "no such key":
+                raise
+            # Cold start (or concurrent deletion): no trusted snapshot exists.
+            # Skip this round, including XTRIM, if a new stream appears meanwhile.
+            return (GroupProgress("", None, None, trusted=False),)
         if not _is_sequence(response):
             return (GroupProgress("", None, None, trusted=False),)
 

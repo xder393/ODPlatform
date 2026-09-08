@@ -141,6 +141,27 @@ def _service(sessions, *, hook=None):
     return InspectionEffectService(SqlAlchemyInspectionEffects(sessions, clock=hook))
 
 
+def test_product_scope_is_snapshotted_and_changes_rotate_case(runtime):
+    now = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    org, camera, line = uuid4(), uuid4(), uuid4()
+    effects = []
+    for category in ("外壳注塑件", "外壳注塑件", "金属件", None):
+        _, _, artifact, _, claim = _running(runtime, now, camera=camera,
+                                           organization=org, line_id=line)
+        with runtime.begin() as session:
+            row = session.get(FrameArtifactRow, artifact)
+            session.get(InspectionSessionRow, row.stream_session_id).product_category = category
+        effects.append(_service(runtime, hook=lambda _: now).publish(_command(
+            claim, now, ({"defect_type": "scratch", "confidence": 0.95},))))
+    assert effects[0].case_id == effects[1].case_id
+    assert effects[1].case_id != effects[2].case_id
+    assert effects[2].case_id != effects[3].case_id
+    with runtime() as session:
+        assert [session.get(DefectCaseRow, effect.case_id).product_category for effect in effects] == [
+            "外壳注塑件", "外壳注塑件", "金属件", None,
+        ]
+
+
 def test_no_defect_publishes_result_and_closes_fenced_execution_without_business_effects(runtime):
     now = datetime(2026, 8, 25, 12, tzinfo=UTC)
     org, camera, artifact, task, claim = _running(runtime, now)

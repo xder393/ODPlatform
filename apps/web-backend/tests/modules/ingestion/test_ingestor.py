@@ -94,7 +94,7 @@ def test_ingestor_samples_before_encoding_and_rejects_without_upload():
             return None
 
     class Health:
-        def snapshot(self, _camera_id):
+        def snapshot(self, _organization_id, _camera_id):
             return ArtifactHealth(False, True, 0, 0)
 
     class Encoder:
@@ -145,7 +145,7 @@ def test_ingestor_encodes_selected_frames_and_calls_saga_after_preflight():
             return None
 
     class Health:
-        def snapshot(self, _camera_id):
+        def snapshot(self, _organization_id, _camera_id):
             return ArtifactHealth(True, True, 0, 0)
 
     class Encoder:
@@ -267,7 +267,7 @@ def test_frame_ingestor_uses_database_session_claim_and_sanitizes_credentials():
             self.closed = True
 
     class Health:
-        def snapshot(self, _camera_id):
+        def snapshot(self, _organization_id, _camera_id):
             return ArtifactHealth(True, True, 0, 0)
 
     class Encoder:

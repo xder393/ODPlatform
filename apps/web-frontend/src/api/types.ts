@@ -86,6 +86,7 @@ export interface CurrentActor {
 }
 
 export interface InspectionSessionInput {
+  product_category?: string;
   camera_id: string;
   line_id: string;
   source_type: "RECORDED" | "RTSP" | "LOCAL_CAMERA";
@@ -94,6 +95,7 @@ export interface InspectionSessionInput {
 }
 
 export interface InspectionSession {
+  product_category?: string | null;
   session_id: string;
   organization_id: string;
   camera_id: string;

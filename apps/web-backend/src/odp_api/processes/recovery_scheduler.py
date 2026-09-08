@@ -16,6 +16,8 @@ from typing import Protocol
 from sqlalchemy import Connection, Engine, text
 
 from odp_api.modules.tasks.recovery import RecoveryService, RecoverySummary
+from odp_api.processes.common import install_signal_stop_event, load_settings
+from odp_api.settings import SchedulerSettings
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_RECOVERY_INTERVAL_SECONDS = 2.0
@@ -294,6 +296,27 @@ class RecoveryScheduler:
             self.close()
 
 
+def _build_process(settings: SchedulerSettings) -> RecoveryScheduler:
+    from odp_api.processes.runtime import build_recovery_scheduler
+
+    return build_recovery_scheduler(settings)
+
+
+def main() -> None:
+    settings = load_settings(SchedulerSettings)
+    process = _build_process(settings)
+
+    async def serve() -> None:
+        stop = install_signal_stop_event()
+        await process.run(stop)
+
+    asyncio.run(serve())
+
+
+if __name__ == "__main__":
+    main()
+
+
 __all__ = [
     "DEFAULT_RECOVERY_INTERVAL_SECONDS",
     "RECOVERY_ADVISORY_LOCK_KEY",
@@ -303,4 +326,5 @@ __all__ = [
     "RecoveryScheduler",
     "RecoverySchedulerFailure",
     "RecoverySchedulerSummary",
+    "main",
 ]

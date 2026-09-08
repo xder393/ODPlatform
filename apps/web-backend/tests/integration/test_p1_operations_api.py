@@ -82,3 +82,16 @@ def test_authenticated_actor_profile_exposes_scope_without_credentials(tmp_path:
     assert profile.json()["organization_id"] == str(ORG_ID)
     assert profile.json()["line_ids"] == [str(LINE_ID)]
     assert "password" not in profile.json()
+
+
+def test_session_product_scope_is_persisted_and_part_of_idempotency(tmp_path):
+    client = _client(tmp_path, Role.SUPERVISOR)
+    payload = {"camera_id": str(uuid4()), "line_id": str(LINE_ID), "source_type": "RECORDED",
+               "source_ref": "scratch-loop", "product_category": "外壳注塑件"}
+    headers = {"Idempotency-Key": "product-scope"}
+    created = client.post("/api/v1/inspection-sessions", json=payload, headers=headers)
+    assert created.status_code == 201
+    assert created.json().get("product_category") == "外壳注塑件"
+    assert client.get("/api/v1/inspection-sessions").json()["items"][0]["product_category"] == "外壳注塑件"
+    payload["product_category"] = "金属件"
+    assert client.post("/api/v1/inspection-sessions", json=payload, headers=headers).status_code == 409

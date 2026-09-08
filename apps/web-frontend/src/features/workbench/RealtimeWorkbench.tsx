@@ -80,7 +80,7 @@ export function RealtimeWorkbench({ since }: { since: string }) {
 
   useEffect(() => {
     void refreshCases();
-  }, [refreshCases]);
+  }, [refreshCases, newest?.event_id]);
 
   const loadAdvice = useCallback(async (caseId: string) => {
     const requestId = ++adviceRequest.current;

@@ -302,12 +302,21 @@ class SqlAlchemyInspectionEffects:
                     ep = claim_defect_episode(
                         s, c.organization_id, task.camera_id, typ, zone, now
                     )
-                    if ep.current_case_id is None or self._utc(ep.episode_expires_at) <= now:
+                    existing_case = None
+                    if ep.current_case_id is not None and self._utc(ep.episode_expires_at) > now:
+                        existing_case = s.scalar(select(DefectCaseRow).where(
+                            DefectCaseRow.case_id == ep.current_case_id,
+                            DefectCaseRow.organization_id == c.organization_id,
+                        ).with_for_update())
+                        if existing_case is None:
+                            raise StaleLease("episode case is missing")
+                    if existing_case is None or existing_case.product_category != stream_session.product_category:
                         case = DefectCaseRow(
                             case_id=uuid4(),
                             organization_id=c.organization_id,
                             status="PENDING_CONFIRMATION",
                             line_id=stream_session.line_id,
+                            product_category=stream_session.product_category,
                             updated_at=now,
                         )
                         s.add(case)
@@ -318,16 +327,7 @@ class SqlAlchemyInspectionEffects:
                             now,
                         )
                     else:
-                        case = s.scalar(
-                            select(DefectCaseRow)
-                            .where(
-                                DefectCaseRow.case_id == ep.current_case_id,
-                                DefectCaseRow.organization_id == c.organization_id,
-                            )
-                            .with_for_update()
-                        )
-                        if case is None:
-                            raise StaleLease("episode case is missing")
+                        case = existing_case
                         if case.line_id is None:
                             case.line_id = stream_session.line_id
                         elif case.line_id != stream_session.line_id:

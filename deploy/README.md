@@ -8,6 +8,14 @@ ingestor, transactional-Outbox relay, two inference workers, a recovery
 scheduler, an artifact reconciler, and Redis Stream retention. PostgreSQL is
 the task/evidence authority; Redis is only the distribution plane.
 
+Workers renew model-scoped presence in Redis every 5 seconds with a 15-second
+TTL, after the model has loaded and the consumer group has started. Admission
+pauses when no matching worker presence remains and resumes on a fresh pulse
+(subject to the existing backlog and frame-age checks). A stopping worker does
+not delete shared presence, so another worker's renewal remains valid. This is
+a process-liveness signal, not a guarantee that inference or downstream storage
+is healthy. Database leases and fencing still decide task ownership.
+
 ## Start and stop
 
 ```bash
@@ -63,6 +71,15 @@ service (`docker compose -f deploy/compose.yaml restart prometheus`).
 
 ## Database bootstrap
 
+Role regression gate: in an explicitly disposable PostgreSQL instance with a
+database named `odp`, set `ODP_ROLE_GATE_ADMIN_URL` and run
+`pytest -q tests/integration/test_p1_role_gate.py` from the backend directory.
+This gate applies the bootstrap and grant scripts (including development role
+passwords), so it must not target a shared or production instance. It verifies
+required privileges, audit/credential restrictions, and real API/Relay/Scheduler
+queries through their non-owner logins. It creates tables from ORM metadata;
+full Compose migration and process validation remain separate gates.
+
 `migrate` 是唯一的数据库 bootstrap 服务：它以既有卷 owner `odp` 执行
 角色/RAG/Alembic 迁移和授权，再以兼容 runtime role `odp_app` 依次播种业务数据、
 durable inspection alerts（`python -m odp_api.seed_alerts`）和知识库。API
@@ -75,8 +92,11 @@ Reconciler 分别使用 `odp_worker`、`odp_relay` 和 `odp_scheduler`，其 SQL
 
 P1 进程的启动只依赖 `migrate` 完成、Redis/MinIO 健康检查；运行时恢复不依赖
 Compose 的 `depends_on`。每个进程从 PostgreSQL、Redis、MinIO 和（需要推理的
-进程）模型 SHA 配置中做 fail-closed readiness 校验。模型 fixture 生成并提交
-后，可通过 `ODP_MODEL_SHA256` 覆盖 Compose 中的占位 digest。
+进程）模型 SHA 配置中做 fail-closed readiness 校验。仓库内已提交固定的
+`tests/fixtures/models/tiny-detector.onnx`，其 SHA-256 已写入 Compose 默认值；
+`scripts/build_fixture_onnx.py` 使用官方 ONNX helper 和 checker 生成并校验模型，
+重建需要安装后端 dev 依赖。该模型固定输出划痕，仅用于验证管道，不代表检测准确率。
+生产部署必须替换模型文件并通过 `ODP_MODEL_SHA256` 配置已审批模型的摘要。
 
 ## Web frontend (nginx)
 
@@ -90,6 +110,26 @@ entrypoint:
   Playwright suite and CI).
 
 ## Enterprise quality inspection demo script
+
+### Recorded-video integration gate
+
+With dedicated `ODP_POSTGRES_TEST_URL`, `ODP_REDIS_TEST_URL`, and
+`ODP_MINIO_TEST_ENDPOINT` / `ODP_MINIO_TEST_ACCESS_KEY` /
+`ODP_MINIO_TEST_SECRET_KEY` configured, run from `apps/web-backend`:
+
+```sh
+PYTHONPATH=src:../../packages/shared-schemas/src .venv/bin/pytest -q tests/integration/test_recorded_video_pipeline.py
+```
+
+The test generates a small AVI, decodes and samples it with OpenCV, uploads
+immutable evidence to MinIO, publishes the PostgreSQL Outbox through Redis,
+runs the actual ONNX Runtime model, and verifies durable result/case/alert/audit
+rows. Duplicate delivery must remain harmless, and evidence hashes must match
+after reopening the database pool. Each run owns a random schema, bucket, and
+stream names and cleans those resources. The model emits a fixed detection;
+this gate does not measure accuracy or exercise Compose role grants, process
+supervision, or browser delivery. PostgreSQL test credentials need permission
+to create and drop the isolated test schema.
 
 ### Browser-visible evidence links
 
@@ -147,3 +187,122 @@ AI advice, case handling, audit/metrics):
 10. Open Prometheus at http://localhost:9090 and query
     `odp_inspection_alerts_total` / `odp_audit_verification_failures_total`;
     stop the stack with `docker compose -f deploy/compose.yaml down`
+# P1 cold-start verification (2026-09-08)
+
+## Worker backlog scheduling follow-up
+
+Historical timeout session `6b08e9c6-2b87-4a74-8768-7b0ea844cfc7` showed Outbox
+publication in approximately 0.2–0.8 seconds, but the first 58 tasks were evicted
+by latest-frame-wins before execution. The Worker imposed its two-second idle
+wait after every batch, even when processing queued messages. A controlled
+three-batch regression failed before changing the loop to drain nonempty batches
+immediately (with a cooperative yield); an empty-queue regression verifies that
+backoff and responsive shutdown remain intact. Leases, ACK and fencing are unchanged.
+
+After the fix, two real browser video/RAG workflows passed in 12.6s and 11.5s.
+Database timings for sessions `99bdf4d4-e12d-4979-a37f-31655ec43a80` and
+`d93f0aa8-4ed3-4025-b49e-ddf0425b4d3e`: first claim after session creation
+2.129s/2.648s; mean task-created-to-claim latency 0.365s/0.508s (19/18 attempts).
+Backend regression: 442 passed, 58 skipped. This confirms removal of an artificial
+backlog throughput limit; it does not prove every historical timeout had that sole
+cause, nor establish full cold-start/load SLO compliance. Dependency installation
+at container startup and browser polling latency remain separate concerns.
+
+## Browser acceptance follow-up
+
+Verified with local Chrome, Vite on `127.0.0.1:18080`, and the real Compose API,
+PostgreSQL, Redis, MinIO, ingestor, relay and ONNX Worker. All four Playwright tests
+passed (13.7s); the two role/UI-contract tests mock HTTP, while the quality workflow
+and new recorded-pipeline test use the real API. Frontend unit tests: 43 passed;
+production build and E2E typecheck passed.
+
+The recorded-pipeline test is opt-in: set `E2E_RECORDED_SOURCE` to an existing
+video path **inside the ingestor container**. In this run it was a synthetic MJPG
+AVI at `/tmp/odp-browser-e2e.avi`. Run only against disposable demo data:
+
+```sh
+cd apps/web-frontend
+E2E_BASE_URL=http://127.0.0.1:18080 \
+E2E_RECORDED_SOURCE=/tmp/odp-browser-e2e.avi PLAYWRIGHT_CHANNEL=chrome \
+npm run test:e2e -- --workers=1
+```
+
+Coverage: supervisor login, UI session creation, successful independent inference,
+browser loading of signed evidence images, stop request, and newly created case
+review/resolution without page reload. Live alerts now trigger a case-list refresh;
+a regression test failed before this fix and passes after it. The seeded RAG test
+uses a unique event ID and explicitly selects an unhandled mock-model seed case,
+avoiding interference from real inference cases in a reused database. A fresh
+database is still required once those seeded pending cases have been consumed.
+
+Limits: Nginx image build was blocked by Docker Hub token-request timeout, so
+this is not Nginx-container acceptance. Live video display is still a placeholder.
+Real inference cases created without product scope remain unable to retrieve
+scoped advice; see the product-scope implementation below. Fixed-output ONNX verifies
+the application chain, not visual-model accuracy. No production-readiness claim.
+
+### Product scope and real-case RAG (2026-09-08)
+
+Migration `0013_session_product_scope` adds nullable session `product_category`.
+The supervisor/administrator form accepts a category matching knowledge metadata.
+The API trims and bounds it (1–255 characters when supplied), includes it in
+idempotency comparison, and persists it on the session. The Worker reads this
+database-owned value into new cases; a changed category rotates the defect episode
+to a new case instead of relabeling historical cases. Missing categories remain
+NULL and continue to fail closed in RAG. Organization and line filters are unchanged.
+This is operator-supplied classification, not a new product master-data catalog.
+
+Evidence: API/effects product regressions failed before implementation; the frontend
+product-entry test failed before the control existed. Backend 440 passed, 58 skipped;
+frontend 43 passed, build/typecheck and changed-file Ruff passed. Real PostgreSQL
+migrated to 0013. The recorded-pipeline browser test now supplies the product category
+and verifies HIGH-confidence advice plus a versioned citation on the newly inferred
+case before review/resolution (1 passed, 12.4s). The first cold run timed out waiting
+for a successful task; a repeat after services settled passed. Startup latency and
+load behavior are not accepted by this test. Older cases were not backfilled.
+
+Compose now runs `storage-init` after MinIO becomes healthy. The API and P1
+processes wait for this one-shot initializer to succeed. It creates the configured
+artifact bucket if absent and never clears existing objects or changes bucket
+access policy. Credentials in Compose are development-only; production bucket
+provisioning must use deployment credentials, not request-time privileges.
+
+Verified in an isolated Compose project: SQL/Alembic migrations and demo seeds
+exit successfully; the six selected background processes start independently and
+the ONNX Worker publishes its Redis presence key. A missing Stream on cold start
+now skips retention for that iteration without trimming; wrong-type and other
+Redis errors still surface. Real MinIO tests cover repeated initialization and
+preservation of existing evidence; real Redis tests cover cold start and PEL safety.
+
+The startup check above is **not** browser acceptance. Separate-process
+video-to-case acceptance is recorded below. Also note
+that this development Compose file still installs dependencies at startup and
+does not persist MinIO `/data` across container replacement; it is not a production
+deployment manifest.
+
+## Separate-process video acceptance (2026-09-08)
+
+In a disposable Compose project with the background services running, execute:
+
+```sh
+docker compose -p YOUR_TEST_PROJECT -f deploy/compose.yaml exec -T \
+  -e ODP_ALLOW_COMPOSE_PROBE=disposable frame-ingestor \
+  python /workspace/apps/web-backend/scripts/verify_compose_pipeline.py
+```
+
+The probe generates a temporary AVI inside the ingestor container, creates a
+uniquely scoped database session, and only observes the independently running
+ingestor, relay and ONNX Worker. It verifies a successful result, linked detection,
+case, alert and audit record, MinIO evidence SHA-256, model SHA-256, and the matching
+alert envelope published to Redis. It requests session stop and waits for STOPPED.
+Recorded input intentionally loops, so this does not assert exactly one task.
+Database/evidence facts remain for inspection; do not run against production.
+
+Three consecutive runs passed after fixing concurrent OpenCV read/release during
+session cancellation. Two deterministic regressions demonstrated premature release
+before the fix and pass with native operations serialized by a thread lock.
+Full backend regression: 438 passed, 58 skipped (external-service gated tests were
+not enabled in that full run). This verifies infrastructure with a fixed-output
+synthetic model, not model accuracy, browser workflow, crash recovery, or load SLOs.
+A native read that never returns can still delay close; bounded RTSP I/O remains
+an explicit follow-up rather than releasing a handle underneath an active read.

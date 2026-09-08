@@ -22,7 +22,9 @@ from odp_api.ports.tasks import AdmissionRejected, TaskRecord
 
 
 class IngestionHealthPort(Protocol):
-    def snapshot(self, camera_id: UUID) -> ArtifactHealth | Awaitable[ArtifactHealth]: ...
+    def snapshot(
+        self, organization_id: UUID, camera_id: UUID,
+    ) -> ArtifactHealth | Awaitable[ArtifactHealth]: ...
 
 
 Clock = Callable[[], datetime]
@@ -83,7 +85,7 @@ class IngestionService:
                 continue
             report.sampled += 1
             now = self._clock()
-            snapshot = health.snapshot(decoded.camera_id)
+            snapshot = health.snapshot(organization_id, decoded.camera_id)
             if inspect.isawaitable(snapshot):
                 snapshot = await snapshot
             decision = self._policy.evaluate(

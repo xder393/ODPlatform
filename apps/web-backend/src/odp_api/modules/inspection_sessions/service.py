@@ -55,6 +55,7 @@ class InspectionSessionService:
                 camera_id=request.camera_id,
                 line_id=request.line_id,
                 source_type=request.source_type,
+                product_category=request.product_category,
                 sanitized_uri=sanitized,
                 secret_reference=request.secret_ref,
                 status="START_REQUESTED",
@@ -145,6 +146,7 @@ def _same_request(
         and row.source_type == request.source_type
         and row.sanitized_uri == sanitized
         and row.secret_reference == request.secret_ref
+        and row.product_category == request.product_category
     )
 
 
@@ -160,6 +162,7 @@ def _response(row: InspectionSessionRow) -> InspectionSessionResponse:
         status=row.status,
         created_at=_utc(row.created_at),
         updated_at=_utc(row.updated_at),
+        product_category=row.product_category,
     )
 
 
