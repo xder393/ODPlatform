@@ -100,9 +100,10 @@ def test_websocket_rejects_missing_ticket() -> None:
     from starlette.websockets import WebSocketDisconnect
 
     client, _ = _seeded_client()
-    with pytest.raises(WebSocketDisconnect) as exc_info:
-        with client.websocket_connect("/ws/inspection-events"):
-            pass
+    with pytest.raises(WebSocketDisconnect) as exc_info, client.websocket_connect(
+        "/ws/inspection-events"
+    ):
+        pass
     # The server closes with policy-violation 1008 before accepting the socket.
     assert exc_info.value.code == 1008
 
@@ -121,7 +122,8 @@ def test_disabled_actor_loses_existing_jwt_login_and_issued_websocket_ticket() -
 
     assert client.get("/api/v1/cases", headers={"Authorization": f"Bearer {token}"}).status_code == 401
     assert client.post("/api/v1/auth/login", json={"email": email, "password": password}).status_code == 401
-    with pytest.raises(WebSocketDisconnect) as disconnected:
-        with client.websocket_connect(f"/ws/inspection-events?ticket={ticket}"):
-            pass
+    with pytest.raises(
+        WebSocketDisconnect
+    ) as disconnected, client.websocket_connect(f"/ws/inspection-events?ticket={ticket}"):
+        pass
     assert disconnected.value.code == 1008

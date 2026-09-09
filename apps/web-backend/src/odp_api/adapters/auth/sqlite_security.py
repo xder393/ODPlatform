@@ -7,10 +7,12 @@ from uuid import UUID, uuid4
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from odp_api.adapters.persistence.models import ReauthenticationMarkerRow, WebSocketTicketRow
+from odp_api.adapters.persistence.models import (
+    ReauthenticationMarkerRow,
+    WebSocketTicketRow,
+)
 from odp_api.modules.identity.ports import REAUTHENTICATION_TTL_SECONDS
 from odp_api.modules.identity.tickets import WEBSOCKET_TICKET_TTL_SECONDS
-
 
 _SYSTEM_ORGANIZATION_ID = UUID(int=0)
 

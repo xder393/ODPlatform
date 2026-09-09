@@ -157,7 +157,7 @@ class TaskService:
                 "vision inference exceeded 30 second timeout",
                 current_time,
             )
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - worker failures must be persisted as retries.
             return self._retry_or_dead_letter(running, str(error), current_time)
         return self._save(replace(running, status="SUCCEEDED", last_error=None))
 

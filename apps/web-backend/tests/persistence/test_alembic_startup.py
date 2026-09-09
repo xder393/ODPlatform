@@ -1,15 +1,17 @@
 import os
-from pathlib import Path
 import subprocess
 import sys
+from datetime import UTC, datetime
+from pathlib import Path
+from uuid import uuid4
 
 import pytest
-from alembic import command
 from alembic.config import Config
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect, select, text
 
+from alembic import command
+from odp_api.adapters.persistence.task_models import MessageQuarantineRow
 from odp_api.db import create_engine_and_session
-
 
 BACKEND_DIR = Path(__file__).parents[2]
 
@@ -22,6 +24,7 @@ def test_alembic_cli_uses_odp_database_url_for_a_real_sqlite_upgrade(tmp_path) -
         cwd=BACKEND_DIR,
         env={**os.environ, "ODP_DATABASE_URL": database_url},
         capture_output=True,
+        check=False,
         text=True,
     )
 
@@ -53,6 +56,33 @@ def test_programmatic_alembic_url_has_priority_over_odp_environment(tmp_path, mo
         environment_engine.dispose()
 
 
+def test_recovery_indexes_upgrade_and_downgrade_with_alembic(tmp_path) -> None:
+    """Revision 0010 must install and remove both partial recovery indexes."""
+    database_url = f"sqlite:///{tmp_path / 'recovery-indexes.db'}"
+    config = Config(str(BACKEND_DIR / "alembic.ini"))
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(config, "head")
+    engine, _ = create_engine_and_session(database_url)
+    expected = {
+        "ix_inference_tasks_retry_wait_next_attempt_task",
+        "ix_inference_tasks_ready_organization_camera",
+    }
+    try:
+        assert expected <= {
+            item["name"] for item in inspect(engine).get_indexes("inference_tasks")
+        }
+        command.downgrade(config, "0009_bound_message_quarantine_error")
+        assert not expected & {
+            item["name"] for item in inspect(engine).get_indexes("inference_tasks")
+        }
+        command.upgrade(config, "head")
+        assert expected <= {
+            item["name"] for item in inspect(engine).get_indexes("inference_tasks")
+        }
+    finally:
+        engine.dispose()
+
+
 def test_alembic_cli_renders_postgresql_ddl_and_widens_revision_storage() -> None:
     """PostgreSQL startup SQL must use PostgreSQL types and fit long revisions."""
     result = subprocess.run(
@@ -63,12 +93,88 @@ def test_alembic_cli_renders_postgresql_ddl_and_widens_revision_storage() -> Non
             "ODP_DATABASE_URL": "postgresql+psycopg://odp:odp@localhost:5432/odp",
         },
         capture_output=True,
+        check=False,
         text=True,
     )
 
     assert result.returncode == 0, result.stderr
     assert "actor_id UUID NOT NULL" in result.stdout
     assert "ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(64)" in result.stdout
+
+
+def _exercise_quarantine_error_migration(database_url: str) -> None:
+    """Prove 0009 preserves bounded evidence across upgrade and downgrade."""
+    config = Config(str(BACKEND_DIR / "alembic.ini"))
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(config, "head")
+    command.downgrade(config, "0008_numeric_outbox_schema_version")
+    engine, _ = create_engine_and_session(database_url)
+    quarantine_id = uuid4()
+    long_error = "legacy-quarantine-error-" + ("x" * 3_000)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                MessageQuarantineRow.__table__.insert().values(
+                    quarantine_id=quarantine_id,
+                    stream_name="odp:inference:tasks",
+                    message_id=f"migration-{quarantine_id}",
+                    event_id=uuid4(),
+                    event_type="vision.inference.requested.v1",
+                    schema_version="1",
+                    raw_payload=b"legacy",
+                    error=long_error,
+                    status="QUARANTINED",
+                    quarantined_at=datetime.now(UTC),
+                    created_at=datetime.now(UTC),
+                    updated_at=datetime.now(UTC),
+                )
+            )
+
+        command.upgrade(config, "head")
+        with engine.connect() as connection:
+            upgraded_error = connection.scalar(
+                select(MessageQuarantineRow.error).where(
+                    MessageQuarantineRow.quarantine_id == quarantine_id
+                )
+            )
+            upgraded_type = next(
+                column
+                for column in inspect(connection).get_columns("message_quarantine")
+                if column["name"] == "error"
+            )
+        assert upgraded_error == long_error[:2048]
+        assert getattr(upgraded_type["type"], "length", None) == 2048
+
+        command.downgrade(config, "0008_numeric_outbox_schema_version")
+        with engine.connect() as connection:
+            downgraded_error = connection.scalar(
+                select(MessageQuarantineRow.error).where(
+                    MessageQuarantineRow.quarantine_id == quarantine_id
+                )
+            )
+            downgraded_type = next(
+                column
+                for column in inspect(connection).get_columns("message_quarantine")
+                if column["name"] == "error"
+            )
+        assert downgraded_error == long_error[:2048]
+        assert getattr(downgraded_type["type"], "length", None) is None
+    finally:
+        # Leave a shared PostgreSQL test database at Alembic head for later tests.
+        command.upgrade(config, "head")
+        engine.dispose()
+
+
+def test_sqlite_quarantine_error_migration_truncates_legacy_rows(tmp_path) -> None:
+    _exercise_quarantine_error_migration(f"sqlite:///{tmp_path / 'legacy.db'}")
+
+
+@pytest.mark.skipif(
+    not os.getenv("ODP_POSTGRES_TEST_URL"),
+    reason="requires the dedicated ODP_POSTGRES_TEST_URL CI database",
+)
+def test_postgresql_quarantine_error_migration_truncates_legacy_rows() -> None:
+    _exercise_quarantine_error_migration(os.environ["ODP_POSTGRES_TEST_URL"])
 
 
 @pytest.mark.skipif(

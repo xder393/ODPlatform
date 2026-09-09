@@ -100,7 +100,7 @@ def build_demo_seed() -> DemoSeed:
     )
     passwords = {
         actor.actor_id: password
-        for actor, (_email, password, _role) in zip(actors, DEMO_ACCOUNTS)
+        for actor, (_email, password, _role) in zip(actors, DEMO_ACCOUNTS, strict=True)
     }
 
     inspection_service = InspectionService(MockVisionAdapter())
@@ -135,12 +135,18 @@ def build_demo_seed() -> DemoSeed:
             filename="scratch-inspection-specification.pdf",
             content=_pdf_bytes(
                 (
-                    "scratch inspection specification: stop the line and re-inspect "
-                    "immediately when scratch defect confidence exceeds 0.9.",
-                    "inspection follows the shell injection part standard; record the "
-                    "model release and threshold used for the decision.",
-                    "simulated line pause requires reauthentication completed within "
-                    "five minutes.",
+                    (
+                        "scratch inspection specification: stop the line and re-inspect "
+                        "immediately when scratch defect confidence exceeds 0.9."
+                    ),
+                    (
+                        "inspection follows the shell injection part standard; record the "
+                        "model release and threshold used for the decision."
+                    ),
+                    (
+                        "simulated line pause requires reauthentication completed within "
+                        "five minutes."
+                    ),
                 )
             ),
             evidence_kind="CURRENT_SPECIFICATION",
@@ -150,10 +156,14 @@ def build_demo_seed() -> DemoSeed:
             filename="scratch-historical-cases.pdf",
             content=_pdf_bytes(
                 (
-                    "scratch historical case 2026-03: a shell injection part surface "
-                    "scratch at confidence 0.95 was confirmed as a false positive.",
-                    "scratch historical case 2026-05: a scratch on the same line was "
-                    "confirmed as a real defect; the threshold was raised afterwards.",
+                    (
+                        "scratch historical case 2026-03: a shell injection part surface "
+                        "scratch at confidence 0.95 was confirmed as a false positive."
+                    ),
+                    (
+                        "scratch historical case 2026-05: a scratch on the same line was "
+                        "confirmed as a real defect; the threshold was raised afterwards."
+                    ),
                 )
             ),
             evidence_kind="HISTORICAL_CASE",

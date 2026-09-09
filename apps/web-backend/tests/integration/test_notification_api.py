@@ -11,6 +11,8 @@ WEB_BACKEND_SRC = Path(__file__).parents[2] / "src"
 SHARED_SCHEMAS_SRC = Path(__file__).parents[4] / "packages" / "shared-schemas" / "src"
 sys.path[:0] = [str(WEB_BACKEND_SRC), str(SHARED_SCHEMAS_SRC)]
 
+from odp_schemas.events import InspectionAlert
+
 from odp_api.adapters.notifications.redis_stream import RedisStreamInspectionAlertFeed
 from odp_api.adapters.redis_stream import RedisSocketStreamClient
 from odp_api.adapters.tasks.redis_stream import RedisStreamTaskQueue
@@ -21,8 +23,6 @@ from odp_api.modules.notifications.router import (
     InMemoryInspectionAlertRepository,
     create_notifications_router,
 )
-
-from odp_schemas.events import InspectionAlert
 
 
 def test_reconnect_returns_unseen_alert_and_websocket_emits_alert_contract() -> None:
@@ -222,7 +222,7 @@ def test_alert_publication_recovers_a_persisted_claim_after_xadd_fails() -> None
         confidence=0.964,
     )
     redis = RecoverableRedisStream()
-    claim_key = f"odp:inspection-alerts:event:{alert.event_id}"
+    claim_key = f"odp:inspection:alerts:event:{alert.event_id}"
 
     with pytest.raises(OSError, match="claim"):
         RedisStreamInspectionAlertFeed(redis).publish(alert, line_id=None)

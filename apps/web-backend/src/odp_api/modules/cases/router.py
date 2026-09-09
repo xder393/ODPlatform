@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
 import json
+from collections.abc import Callable
+from datetime import UTC, datetime
 from threading import RLock
-from typing import TYPE_CHECKING, Callable, Literal
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from odp_api.modules.cases.errors import InvalidCaseTransition
 from odp_api.modules.cases.application import AuditContext, CaseApplicationService
-from odp_api.modules.cases.ports import CaseTransition, CaseRepositoryPort, StoredCase
+from odp_api.modules.cases.errors import InvalidCaseTransition
+from odp_api.modules.cases.ports import CaseRepositoryPort, CaseTransition, StoredCase
 from odp_api.modules.cases.service import CaseService
 from odp_api.modules.identity.models import Actor
 from odp_api.modules.identity.policies import AuthorizationDenied, authorize
@@ -43,7 +44,7 @@ class InspectionEventSummary(BaseModel):
     input_frame_sha256: str
 
     @classmethod
-    def from_event(cls, event: InspectionEvent) -> "InspectionEventSummary":
+    def from_event(cls, event: InspectionEvent) -> InspectionEventSummary:
         return cls(
             defect_class=event.defect_class,
             confidence=event.confidence,
@@ -59,10 +60,10 @@ class CaseSummary(BaseModel):
     status: CaseStatus
     updated_at: datetime
     inspection_events: list[InspectionEventSummary]
-    history: list["CaseTransitionSummary"]
+    history: list[CaseTransitionSummary]
 
     @classmethod
-    def from_case(cls, stored_case: "StoredCase") -> "CaseSummary":
+    def from_case(cls, stored_case: StoredCase) -> CaseSummary:
         return cls(
             case_id=stored_case.case.case_id,
             status=stored_case.case.status,
@@ -83,7 +84,7 @@ class CaseTransitionSummary(BaseModel):
     correlation_id: UUID | None
 
     @classmethod
-    def from_transition(cls, transition: CaseTransition) -> "CaseTransitionSummary":
+    def from_transition(cls, transition: CaseTransition) -> CaseTransitionSummary:
         return cls(
             from_status=transition.from_status,
             to_status=transition.to_status,
@@ -128,7 +129,7 @@ class InMemoryCaseRepository:
             return self._save_unlocked(case)
 
     def save_with_audit(
-        self, case: DefectCase, audit_service: "AuditService", audit_command: "AuditCommand"
+        self, case: DefectCase, audit_service: AuditService, audit_command: AuditCommand
     ) -> StoredCase:
         """Commit the in-memory case mutation only after its audit append succeeds.
 
@@ -145,8 +146,8 @@ class InMemoryCaseRepository:
         organization_id: UUID,
         to_status: CaseStatus,
         actor: Actor,
-        audit_service: "AuditService",
-        make_audit_command: Callable[[DefectCase, DefectCase], "AuditCommand"],
+        audit_service: AuditService,
+        make_audit_command: Callable[[DefectCase, DefectCase], AuditCommand],
     ) -> StoredCase | None:
         """Lock/load/transition/audit/save as one in-memory mutation transaction.
 
@@ -192,11 +193,15 @@ def create_cases_router(
     repository: CaseRepositoryPort,
     actor_provider: Callable[[], Actor] = get_current_actor,
     reauthentication_service: ReauthenticationService | None = None,
-    audit_service: "AuditService | None" = None,
+    audit_service: AuditService | None = None,
     case_application_service: CaseApplicationService | None = None,
     metric_registry: MetricRegistry | None = None,
 ) -> APIRouter:
-    from odp_api.modules.audit.service import AuditAppendBlocked, AuditService, InMemoryAuditRepository
+    from odp_api.modules.audit.service import (
+        AuditAppendBlocked,
+        AuditService,
+        InMemoryAuditRepository,
+    )
 
     router = APIRouter(prefix="/api/v1/cases", tags=["cases"])
     reauth_service = reauthentication_service or ReauthenticationService(
@@ -308,7 +313,7 @@ def _observe_case_resolution(stored_case: StoredCase, registry: MetricRegistry) 
 
 def _transition_audit_command(
     before: DefectCase, after: DefectCase, actor: Actor, request: Request | None
-) -> "AuditCommand":
+) -> AuditCommand:
     from odp_api.modules.audit.models import AuditCommand
 
     context = _audit_context(request)
@@ -344,7 +349,7 @@ def _audit_context(request: Request | None) -> AuditContext:
     )
 
 
-def _pause_audit_command(case: DefectCase, actor: Actor, request: Request) -> "AuditCommand":
+def _pause_audit_command(case: DefectCase, actor: Actor, request: Request) -> AuditCommand:
     from odp_api.modules.audit.models import AuditCommand
 
     context = _audit_context(request)

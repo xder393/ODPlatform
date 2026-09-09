@@ -2,20 +2,22 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from argon2 import PasswordHasher
-from alembic import command
 from alembic.config import Config
+from argon2 import PasswordHasher
 from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
+from alembic import command
 from odp_api.adapters.persistence.models import (
     ActorRow,
     Base,
     DefectCaseRow,
     InspectionEventRow,
 )
-from odp_api.adapters.persistence.repositories import SqlAlchemyPasswordCredentialRepository
+from odp_api.adapters.persistence.repositories import (
+    SqlAlchemyPasswordCredentialRepository,
+)
 from odp_api.db import create_engine_and_session
 from odp_api.seed import DEMO_ACCOUNTS, build_demo_seed, main, seed_business_data
 

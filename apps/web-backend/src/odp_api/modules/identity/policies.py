@@ -14,6 +14,9 @@ ROLE_GRANTS: dict[Role, frozenset[str]] = {
             "defect_case:update:own_line",
             "defect_case:pause:own_line",
             "inspection_event:read:own_line",
+            "inspection_session:read:own_line",
+            "inference_task:read:own_line",
+            "artifact:evidence:read:own_line",
         }
     ),
     Role.SUPERVISOR: frozenset(
@@ -22,6 +25,12 @@ ROLE_GRANTS: dict[Role, frozenset[str]] = {
             "defect_case:update:own_line",
             "defect_case:pause:own_line",
             "inspection_event:read:own_line",
+            "inspection_session:read:own_line",
+            "inspection_session:start",
+            "inspection_session:stop",
+            "inference_task:read:own_line",
+            "inference_task:replay",
+            "artifact:evidence:read:own_line",
         }
     ),
     Role.ADMINISTRATOR: frozenset({"*"}),

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Protocol
+from typing import Protocol, Self
 from uuid import UUID
 
 from odp_api.modules.audit.service import AuditRepository
@@ -50,7 +50,7 @@ class BusinessUnitOfWorkPort(Protocol):
     cases: MutableCaseRepositoryPort
     audits: AuditRepository
 
-    def __enter__(self) -> "BusinessUnitOfWorkPort": ...
+    def __enter__(self) -> Self: ...
 
     def __exit__(self, exc_type, exc_value, traceback) -> bool | None: ...
 

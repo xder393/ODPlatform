@@ -1,11 +1,11 @@
 """End-to-end contracts for opaque, one-time WebSocket tickets."""
 
-from datetime import UTC, datetime, timedelta
 import json
 import logging
 import logging.config
-from pathlib import Path
 import sys
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -16,13 +16,17 @@ from starlette.websockets import WebSocketDisconnect
 from odp_api.adapters.auth.redis_security import RedisWebSocketTicketStore
 from odp_api.adapters.auth.sqlite_security import SqliteWebSocketTicketStore
 from odp_api.adapters.persistence.models import WebSocketTicketRow
-from odp_api.adapters.persistence.repositories import SqlAlchemyPasswordCredentialRepository
+from odp_api.adapters.persistence.repositories import (
+    SqlAlchemyPasswordCredentialRepository,
+)
 from odp_api.main import create_app
-from odp_api.modules.identity.tickets import InvalidWebSocketTicket, WebSocketTicketService
+from odp_api.modules.identity.tickets import (
+    InvalidWebSocketTicket,
+    WebSocketTicketService,
+)
 from odp_api.observability.logging import configure_uvicorn_access_logging
 from odp_api.seed import DEMO_ACCOUNTS, build_demo_seed
 from odp_api.settings import Settings
-
 
 NOW = datetime(2026, 8, 24, 12, tzinfo=UTC)
 
@@ -138,14 +142,16 @@ def test_ticket_endpoint_is_bearer_protected_single_use_and_does_not_echo_ticket
         with client.websocket_connect(f"/ws/inspection-events?ticket={ticket}") as websocket:
             assert websocket.receive_json()["alert"]["defect_class"] == "scratch"
 
-        with pytest.raises(WebSocketDisconnect) as reused:
-            with client.websocket_connect(f"/ws/inspection-events?ticket={ticket}"):
-                pass
+        with pytest.raises(
+            WebSocketDisconnect
+        ) as reused, client.websocket_connect(f"/ws/inspection-events?ticket={ticket}"):
+            pass
         assert reused.value.code == 1008
 
-        with pytest.raises(WebSocketDisconnect) as legacy:
-            with client.websocket_connect(f"/ws/inspection-events?token={token}"):
-                pass
+        with pytest.raises(
+            WebSocketDisconnect
+        ) as legacy, client.websocket_connect(f"/ws/inspection-events?token={token}"):
+            pass
         assert legacy.value.code == 1008
 
 

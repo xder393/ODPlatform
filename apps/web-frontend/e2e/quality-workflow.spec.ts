@@ -75,23 +75,24 @@ test("质检员在同一实时连接中接收新告警并完成处置", async ({
   const alertCards = page.getByRole("heading", { name: "疑似表面划痕" });
   const beforeCount = await alertCards.count();
   const pageUrl = page.url();
-  const trigger = await page.evaluate(async () => {
+  const eventId = await page.evaluate(() => crypto.randomUUID());
+  const trigger = await page.evaluate(async (eventId) => {
     const token = localStorage.getItem("odp_token");
     const response = await fetch("/api/v1/dev/inspection-events", {
       method: "POST",
       headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        event_id: "40000000-0000-4000-8000-000000000005",
+        event_id: eventId,
         line_id: "20000000-0000-4000-8000-000000000001",
       }),
     });
     return { status: response.status, body: await response.json() };
-  });
+  }, eventId);
   expect(trigger.status).toBe(201);
-  expect(trigger.body.alert.event_id).toBe("40000000-0000-4000-8000-000000000005");
+  expect(trigger.body.alert.event_id).toBe(eventId);
   await expect.poll(() => receivedFrames.some((payload) => {
     try {
-      return JSON.parse(payload).alert?.event_id === "40000000-0000-4000-8000-000000000005";
+      return JSON.parse(payload).alert?.event_id === eventId;
     } catch {
       return false;
     }
@@ -104,7 +105,20 @@ test("质检员在同一实时连接中接收新告警并完成处置", async ({
   expect(await page.evaluate(() => performance.getEntriesByType("navigation").length)).toBe(navigationEntries);
 
   // 4. 工单列表选中一个待确认工单 → AI 处置建议：可信度高徽标 + 引用来源含文档版本/页码
-  await page.getByRole("button", { name: /待确认/ }).first().click();
+  // A reused test database can also contain ONNX cases with no seeded RAG scope.
+  // This scenario specifically verifies the seeded specification/case contract.
+  const seededCaseId = await page.evaluate(async () => {
+    const response = await fetch("/api/v1/cases", { headers: {
+      Authorization: `Bearer ${localStorage.getItem("odp_token")}`,
+    } });
+    const cases = await response.json() as Array<{
+      case_id: string; status: string; inspection_events: Array<{ model_release: string }>;
+    }>;
+    return cases.find(item => item.status === "PENDING_CONFIRMATION"
+      && item.inspection_events.some(event => event.model_release === "mock-yolo-1.0"))?.case_id;
+  });
+  expect(seededCaseId, "requires an unhandled seeded case; use a fresh test database").toBeTruthy();
+  await page.getByRole("button", { name: new RegExp(seededCaseId!.slice(0, 8)) }).click();
   const advicePanel = page.getByRole("region", { name: "AI 处置建议" });
   await expect(advicePanel.getByText("可信度高")).toBeVisible();
   await expect(advicePanel.getByText(/文档版本 \d+/).first()).toBeVisible();

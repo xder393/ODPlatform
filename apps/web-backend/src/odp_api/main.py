@@ -1,12 +1,24 @@
+import inspect
 from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import UUID
 
-from alembic import command
 from alembic.config import Config
 from argon2 import PasswordHasher
 from fastapi import APIRouter, FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
+from sqlalchemy import inspect as sqlalchemy_inspect
+from sqlalchemy import text
+from sqlalchemy.exc import (
+    DBAPIError,
+    DisconnectionError,
+    IntegrityError,
+    InterfaceError,
+    OperationalError,
+    SQLAlchemyError,
+)
+
+from alembic import command
 from odp_api.adapters.auth.argon2 import Argon2PasswordVerifier
 from odp_api.adapters.auth.jwt import ActorRepository, JwtAuthenticator
 from odp_api.adapters.auth.redis_security import (
@@ -18,7 +30,12 @@ from odp_api.adapters.auth.sqlite_security import (
     SqliteWebSocketTicketStore,
 )
 from odp_api.adapters.generation.mock import MockLLMAdapter
-from odp_api.adapters.notifications.redis_durable_feed import RedisDurableInspectionAlertFeed
+from odp_api.adapters.notifications.redis_durable_feed import (
+    RedisDurableInspectionAlertFeed,
+)
+from odp_api.adapters.notifications.redis_gateway_feed import (
+    RedisGatewayInspectionAlertFeed,
+)
 from odp_api.adapters.notifications.sqlite_feed import SqliteInspectionAlertFeed
 from odp_api.adapters.persistence.models import Base
 from odp_api.adapters.persistence.repositories import (
@@ -27,19 +44,30 @@ from odp_api.adapters.persistence.repositories import (
     SqlAlchemyCaseRepository,
     SqlAlchemyPasswordCredentialRepository,
 )
+from odp_api.adapters.persistence.task_control import SqlAlchemyTaskControlRepository
 from odp_api.adapters.persistence.unit_of_work import SqlAlchemyBusinessUnitOfWork
 from odp_api.adapters.redis_stream import RedisSocketStreamClient, SQLiteStreamClient
 from odp_api.adapters.retrieval.embedding import hash_embedding
 from odp_api.adapters.retrieval.inmemory import InMemoryKnowledgeIndex
-from odp_api.adapters.retrieval.pgvector import PgVectorPostgresAdapter, psycopg_executor
-from odp_api.adapters.tasks.redis_stream import RedisStreamTaskAlertPublisher, RedisStreamTaskQueue
-from odp_api.adapters.tasks.sqlite import SQLiteTaskRepository
+from odp_api.adapters.retrieval.pgvector import (
+    PgVectorPostgresAdapter,
+    psycopg_executor,
+)
+from odp_api.adapters.storage.minio import MinioObjectStorage
+from odp_api.adapters.tasks.redis_stream import (
+    RedisStreamTaskAlertPublisher,
+    RedisStreamTaskQueue,
+)
 from odp_api.adapters.vision.mock import MockVisionAdapter
 from odp_api.db import create_engine_and_session
 from odp_api.modules.ai_orchestration.router import create_advice_router
 from odp_api.modules.ai_orchestration.service import AdviceService
+from odp_api.modules.artifacts.router import EvidenceService, create_artifacts_router
 from odp_api.modules.audit.service import AuditRepository, AuditService
-from odp_api.modules.audit.verify import AuditVerificationMonitor, ManagedDailyAuditVerification
+from odp_api.modules.audit.verify import (
+    AuditVerificationMonitor,
+    ManagedDailyAuditVerification,
+)
 from odp_api.modules.cases.application import CaseApplicationService
 from odp_api.modules.cases.router import create_cases_router
 from odp_api.modules.identity.service import (
@@ -49,9 +77,15 @@ from odp_api.modules.identity.service import (
 )
 from odp_api.modules.identity.tickets import WebSocketTicketService
 from odp_api.modules.inspection.service import InspectionService
+from odp_api.modules.inspection_sessions.router import create_inspection_sessions_router
+from odp_api.modules.inspection_sessions.service import InspectionSessionService
 from odp_api.modules.knowledge.ingest import KnowledgeIngestionService
-from odp_api.modules.notifications.dev_router import create_development_notifications_router
+from odp_api.modules.notifications.dev_router import (
+    create_development_notifications_router,
+)
 from odp_api.modules.notifications.router import create_notifications_router
+from odp_api.modules.tasks.diagnostics import TaskDiagnosticsService
+from odp_api.modules.tasks.router import create_task_diagnostics_router
 from odp_api.modules.tasks.service import TaskService
 from odp_api.observability.logging import configure_uvicorn_access_logging
 from odp_api.observability.metrics import (
@@ -64,6 +98,7 @@ from odp_api.observability.router import create_metrics_router
 from odp_api.observability.tracing import CorrelationIdMiddleware
 from odp_api.ports.retrieval import KnowledgeIndexPort
 from odp_api.ports.vision import FrameInput
+from odp_api.processes.common import process_id
 from odp_api.seed import (
     DEMO_LINE_ID,
     DEMO_ORG_ID,
@@ -73,15 +108,6 @@ from odp_api.seed import (
     seed_business_data,
 )
 from odp_api.settings import Settings
-from sqlalchemy import inspect, text
-from sqlalchemy.exc import (
-    DBAPIError,
-    DisconnectionError,
-    IntegrityError,
-    InterfaceError,
-    OperationalError,
-    SQLAlchemyError,
-)
 
 health_router = APIRouter()
 
@@ -115,7 +141,7 @@ def _upgrade_runtime_schema(database_url: str) -> None:
     config.set_main_option("sqlalchemy.url", database_url)
     probe_engine, _ = create_engine_and_session(database_url)
     try:
-        inspector = inspect(probe_engine)
+        inspector = sqlalchemy_inspect(probe_engine)
         if inspector.has_table("defect_cases") and not inspector.has_table("alembic_version"):
             # Task 1's early local runtime created its complete 0001 metadata
             # directly. Mark only that known baseline before applying 0002.
@@ -159,22 +185,42 @@ def create_app(
     if managed_database:
         Base.metadata.create_all(engine)
     runtime_stream_client = stream_client or _runtime_stream_client(runtime_settings)
-    task_repository = SQLiteTaskRepository(runtime_settings.task_database_path)
-    task_service = TaskService(
-        task_repository,
-        RedisStreamTaskQueue(runtime_stream_client),
-        RegistryTaskMetrics(registry),
-        RedisStreamTaskAlertPublisher(runtime_stream_client),
-    )
-    task_service.recover_unpublished()
+    # P0's local SQLite task service remains available for local/test demos.
+    # Deployed P1 composition owns task authority in PostgreSQL and the
+    # independent Worker/Relay processes; the API must not create a hidden
+    # /tmp SQLite state file when running under Docker/staging/production.
+    task_repository = None
+    task_service = None
+    if runtime_settings.environment in {"local", "test"}:
+        from odp_api.adapters.tasks.sqlite import SQLiteTaskRepository
+
+        task_repository = SQLiteTaskRepository(runtime_settings.task_database_path)
+        task_service = TaskService(
+            task_repository,
+            RedisStreamTaskQueue(runtime_stream_client),
+            RegistryTaskMetrics(registry),
+            RedisStreamTaskAlertPublisher(runtime_stream_client),
+        )
+        task_service.recover_unpublished()
     # Facts are always database-backed. Redis is deliberately not used as the
     # source of truth, so a transient stream outage cannot erase reconciliation.
     sqlite_alert_feed = SqliteInspectionAlertFeed(session_factory)
-    inspection_alert_feed = (
-        RedisDurableInspectionAlertFeed(sqlite_alert_feed, runtime_stream_client)
-        if runtime_settings.environment.lower() in {"production", "docker", "staging"}
-        else sqlite_alert_feed
-    )
+    deployed_runtime = runtime_settings.environment.lower() in {"production", "docker", "staging"}
+    if deployed_runtime:
+        # The Gateway is read-only: P1 inspection effects append durable facts
+        # and Outbox events, then Relay wakes this consumer with EventEnvelope.
+        # Keep the direct publisher only behind the explicit dev-trigger route.
+        inspection_alert_feed = RedisGatewayInspectionAlertFeed(
+            sqlite_alert_feed,
+            runtime_stream_client,
+            instance_id=process_id("realtime-gateway"),
+        )
+        dev_alert_publisher = RedisDurableInspectionAlertFeed(
+            sqlite_alert_feed, runtime_stream_client
+        )
+    else:
+        inspection_alert_feed = sqlite_alert_feed
+        dev_alert_publisher = sqlite_alert_feed
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -184,7 +230,13 @@ def create_app(
             yield
         finally:
             await daily_audit_verification.stop()
-            task_repository.close()
+            if task_repository is not None:
+                task_repository.close()
+            close_feed = getattr(inspection_alert_feed, "close", None)
+            if close_feed is not None:
+                result = close_feed()
+                if inspect.isawaitable(result):
+                    await result
             close = getattr(runtime_stream_client, "close", None)
             if close is not None:
                 close()
@@ -272,6 +324,29 @@ def create_app(
     app.state.case_repository = case_repository
     app.state.inspection_alert_feed = inspection_alert_feed
     app.state.metric_registry = registry
+    app.state.inspection_session_service = InspectionSessionService(session_factory)
+    app.state.task_control_repository = SqlAlchemyTaskControlRepository(session_factory)
+    app.state.task_diagnostics_service = TaskDiagnosticsService(session_factory)
+    object_storage = None
+    if all(
+        (
+            runtime_settings.minio_endpoint,
+            runtime_settings.minio_access_key,
+            runtime_settings.minio_secret_key,
+            runtime_settings.minio_bucket,
+        )
+    ):
+        object_storage = MinioObjectStorage(
+            runtime_settings.minio_endpoint or "",
+            runtime_settings.minio_access_key or "",
+            runtime_settings.minio_secret_key or "",
+            runtime_settings.minio_bucket or "",
+            secure=runtime_settings.minio_secure,
+            public_endpoint=runtime_settings.minio_public_endpoint,
+            public_secure=runtime_settings.minio_public_secure,
+            region=runtime_settings.minio_region,
+        )
+    app.state.object_storage = object_storage
 
     app.include_router(
         create_cases_router(
@@ -293,7 +368,7 @@ def create_app(
         create_notifications_router(inspection_alert_feed)
     )
     if runtime_settings.enable_dev_event_trigger and runtime_settings.environment in {"local", "test", "docker"}:
-        app.include_router(create_development_notifications_router(inspection_alert_feed))
+        app.include_router(create_development_notifications_router(dev_alert_publisher))
     app.include_router(
         create_auth_router(
             reauthentication_service=reauthentication_service,
@@ -301,6 +376,18 @@ def create_app(
             actor_repository=resolved_actor_repository,
             websocket_ticket_service=websocket_ticket_service,
         )
+    )
+    app.include_router(
+        create_inspection_sessions_router(app.state.inspection_session_service)
+    )
+    app.include_router(
+        create_task_diagnostics_router(
+            app.state.task_diagnostics_service,
+            app.state.task_control_repository,
+        )
+    )
+    app.include_router(
+        create_artifacts_router(EvidenceService(session_factory, object_storage))
     )
     return app
 

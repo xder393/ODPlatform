@@ -48,13 +48,12 @@ def apply_migrations(postgres_url: str, migrations_dir: Path = MIGRATIONS_DIR) -
     )
     for filename in pending:
         sql = (migrations_dir / filename).read_text(encoding="utf-8")
-        with psycopg.connect(postgres_url) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(sql)
-                cursor.execute(
-                    "INSERT INTO schema_migrations (filename) VALUES (%s)",
-                    (filename,),
-                )
+        with psycopg.connect(postgres_url) as connection, connection.cursor() as cursor:
+            cursor.execute(sql)
+            cursor.execute(
+                "INSERT INTO schema_migrations (filename) VALUES (%s)",
+                (filename,),
+            )
         logger.info("Applied migration %s", filename)
     return pending
 

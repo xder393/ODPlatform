@@ -1,10 +1,68 @@
 """Ports for durable asynchronous work and its operational signals."""
 
 from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
+from odp_api.modules.tasks.commands import LeaseClaim
 from odp_api.modules.tasks.models import TaskDeadLetterAlert, TaskRecord
+
+
+@dataclass(frozen=True, slots=True)
+class AdmissionRequest:
+    """Tenant-scoped frame metadata needed before an object upload."""
+
+    organization_id: UUID
+    camera_id: UUID
+    stream_session_id: UUID
+    frame_sequence: int
+    captured_at: datetime
+    content_sha256: str
+    correlation_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
+class AdmissionReservation:
+    """A database reservation that permits one frame object upload."""
+
+    reservation_id: UUID
+    artifact_id: UUID
+    organization_id: UUID
+    camera_id: UUID
+    stream_session_id: UUID
+    frame_sequence: int
+    captured_at: datetime
+    content_sha256: str
+    evicted_task_id: UUID | None = None
+
+
+class AdmissionRejected(RuntimeError):
+    """Raised when a frame cannot be admitted before object storage upload."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
+class CameraAdmissionPort(Protocol):
+    """Reserves camera capacity before uploading a frame object."""
+
+    def reserve(self, request: AdmissionRequest, now: datetime) -> AdmissionReservation: ...
+
+    def complete_upload(
+        self,
+        reservation_id: UUID,
+        organization_id: UUID,
+        object_key: str,
+        content_length: int,
+        now: datetime,
+    ) -> TaskRecord: ...
+
+    def fail_upload(
+        self, reservation_id: UUID, organization_id: UUID, error_code: str, now: datetime
+    ) -> None: ...
 
 
 class TaskQueuePort(Protocol):
@@ -41,3 +99,15 @@ class TaskRepositoryPort(Protocol):
     def outstanding(self) -> Sequence[TaskRecord]: ...
 
     def unpublished(self) -> Sequence[TaskRecord]: ...
+
+
+class StaleLease(RuntimeError):
+    """The worker no longer owns a live fencing lease."""
+
+
+class TaskExecutionPort(Protocol):
+    def claim(
+        self, task_id: UUID, organization_id: UUID, worker_id: str, now: datetime
+    ) -> LeaseClaim | None: ...
+    def renew(self, claim: LeaseClaim, now: datetime) -> LeaseClaim | None: ...
+    def record_failure(self, claim: LeaseClaim, failure: object, now: datetime) -> None: ...

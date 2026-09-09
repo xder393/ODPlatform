@@ -1,15 +1,16 @@
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
-import sys
 from uuid import uuid4
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-
 WEB_BACKEND_SRC = Path(__file__).parents[2] / "src"
 SHARED_SCHEMAS_SRC = Path(__file__).parents[4] / "packages" / "shared-schemas" / "src"
 sys.path[:0] = [str(WEB_BACKEND_SRC), str(SHARED_SCHEMAS_SRC)]
+
+from odp_schemas.events import InspectionAlert
 
 from odp_api.modules.cases.router import InMemoryCaseRepository, create_cases_router
 from odp_api.modules.identity.models import Actor, Role
@@ -21,8 +22,10 @@ from odp_api.modules.identity.service import (
     get_current_actor,
 )
 from odp_api.modules.inspection.models import DefectCase, InspectionEvent
-from odp_api.modules.notifications.router import InMemoryInspectionAlertRepository, create_notifications_router
-from odp_schemas.events import InspectionAlert
+from odp_api.modules.notifications.router import (
+    InMemoryInspectionAlertRepository,
+    create_notifications_router,
+)
 
 
 def make_case(organization_id, line_id) -> DefectCase:

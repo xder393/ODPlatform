@@ -1,7 +1,7 @@
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
-import sys
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,8 +11,9 @@ WEB_BACKEND_SRC = Path(__file__).parents[1] / "src"
 SHARED_SCHEMAS_SRC = Path(__file__).parents[3] / "packages" / "shared-schemas" / "src"
 sys.path[:0] = [str(WEB_BACKEND_SRC), str(SHARED_SCHEMAS_SRC)]
 
-from odp_api.main import create_app
 from odp_schemas.events import InspectionAlert
+
+from odp_api.main import create_app
 
 
 @pytest.fixture

@@ -12,6 +12,10 @@ dependencies = [
     "alembic>=1.13,<2",
     "argon2-cffi>=23.1,<26",
     "fastapi>=0.110.0",
+    "minio>=7.2,<8",
+    "numpy>=1.26,<3",
+    "onnxruntime>=1.20,<2",
+    "opencv-python-headless>=4.10,<5",
     "pypdf>=5.0.0",
     "redis>=5,<7",
     "psycopg[binary]>=3.1",
@@ -22,10 +26,24 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "hypothesis>=6.112,<7",
     "httpx>=0.27.0",
+    "onnx>=1.17,<2",
     "pytest>=7.4.0",
     "ruff>=0.6,<1",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/odp_api"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests intentionally extend sys.path before importing the application package.
+"tests/**/*.py" = ["E402"]
+# FastAPI evaluates dependency and query markers at import time by design.
+"src/odp_api/modules/ai_orchestration/router.py" = ["B008"]
+"src/odp_api/modules/cases/router.py" = ["B008"]
+"src/odp_api/modules/identity/service.py" = ["B008"]
+"src/odp_api/modules/notifications/router.py" = ["B008"]
+"src/odp_api/modules/artifacts/router.py" = ["B008"]
+"src/odp_api/modules/inspection_sessions/router.py" = ["B008"]
+"src/odp_api/modules/tasks/router.py" = ["B008"]

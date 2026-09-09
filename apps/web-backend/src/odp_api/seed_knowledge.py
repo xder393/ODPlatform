@@ -5,7 +5,10 @@ from __future__ import annotations
 import os
 
 from odp_api.adapters.retrieval.embedding import hash_embedding
-from odp_api.adapters.retrieval.pgvector import PgVectorPostgresAdapter, psycopg_executor
+from odp_api.adapters.retrieval.pgvector import (
+    PgVectorPostgresAdapter,
+    psycopg_executor,
+)
 from odp_api.main import _ingest_seed_documents
 from odp_api.seed import build_demo_seed
 from odp_api.settings import Settings

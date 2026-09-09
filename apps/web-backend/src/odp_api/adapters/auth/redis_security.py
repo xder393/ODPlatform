@@ -5,7 +5,10 @@ from hashlib import sha256
 from typing import Protocol
 from uuid import UUID
 
-from odp_api.modules.identity.ports import REAUTHENTICATION_TTL_SECONDS, WebSocketTicketStorePort
+from odp_api.modules.identity.ports import (
+    REAUTHENTICATION_TTL_SECONDS,
+    WebSocketTicketStorePort,
+)
 from odp_api.modules.identity.tickets import WEBSOCKET_TICKET_TTL_SECONDS
 
 

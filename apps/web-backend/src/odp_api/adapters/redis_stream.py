@@ -163,6 +163,11 @@ class RedisSocketStreamClient:
     def xlen(self, stream: str) -> int:
         return int(self._execute("XLEN", stream))
 
+    def xinfo_groups(self, stream: str) -> object:
+        """Return Redis Stream consumer-group metadata for readiness checks."""
+
+        return self._execute("XINFO", "GROUPS", stream)
+
     def xrange(self, stream: str) -> list[tuple[str, dict[str, str]]]:
         response = self._execute("XRANGE", stream, "-", "+")
         return [

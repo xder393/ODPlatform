@@ -3,12 +3,13 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import ProgrammingError
+
 from odp_api.adapters.persistence.repositories import SqlAlchemyAuditRepository
 from odp_api.db import create_engine_and_session
 from odp_api.modules.audit.models import AuditCommand
 from odp_api.modules.audit.service import AuditService
-from sqlalchemy import text
-from sqlalchemy.exc import ProgrammingError
 
 
 def test_runtime_grant_script_preserves_append_only_audit_boundaries() -> None:
@@ -26,6 +27,16 @@ def test_runtime_grant_script_preserves_append_only_audit_boundaries() -> None:
     assert "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.%I TO odp_app" in sql
 
 
+def test_runtime_grants_define_distinct_p1_process_roles() -> None:
+    from odp_api.database_roles import grant_sql
+
+    sql = grant_sql()
+    for role in ("odp_api", "odp_worker", "odp_relay", "odp_scheduler"):
+        assert f"TO {role}" in sql
+    assert "GRANT SELECT, UPDATE ON TABLE public.outbox_events TO odp_relay" in sql
+    assert "GRANT SELECT, INSERT ON TABLE public.audit_logs TO odp_worker" in sql
+
+
 def test_bootstrap_role_script_repairs_the_runtime_login_for_existing_volumes() -> None:
     from odp_api.database_roles import bootstrap_sql
 
@@ -33,6 +44,8 @@ def test_bootstrap_role_script_repairs_the_runtime_login_for_existing_volumes() 
 
     assert "CREATE ROLE odp_app" in sql
     assert "ALTER ROLE odp_app LOGIN PASSWORD 'odp_app_dev'" in sql
+    for role in ("odp_api", "odp_worker", "odp_relay", "odp_scheduler"):
+        assert f"CREATE ROLE {role}" in sql
 
 
 @pytest.mark.skipif(
@@ -65,17 +78,15 @@ def test_postgresql_runtime_role_is_not_owner_and_cannot_mutate_audit_rows() -> 
             )
         )
 
-        with pytest.raises(ProgrammingError):
-            with app_engine.begin() as connection:
-                connection.execute(
-                    text("UPDATE audit_logs SET action = 'rewritten' WHERE audit_id = :audit_id"),
-                    {"audit_id": appended.audit_id},
-                )
-        with pytest.raises(ProgrammingError):
-            with app_engine.begin() as connection:
-                connection.execute(
-                    text("DELETE FROM audit_logs WHERE audit_id = :audit_id"),
-                    {"audit_id": appended.audit_id},
-                )
+        with pytest.raises(ProgrammingError), app_engine.begin() as connection:
+            connection.execute(
+                text("UPDATE audit_logs SET action = 'rewritten' WHERE audit_id = :audit_id"),
+                {"audit_id": appended.audit_id},
+            )
+        with pytest.raises(ProgrammingError), app_engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM audit_logs WHERE audit_id = :audit_id"),
+                {"audit_id": appended.audit_id},
+            )
     finally:
         app_engine.dispose()

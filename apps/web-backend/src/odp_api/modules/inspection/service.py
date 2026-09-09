@@ -1,12 +1,12 @@
-from datetime import UTC, datetime
 import time
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
+
+from odp_schemas.events import InspectionAlert
 
 from odp_api.modules.inspection.models import DefectCase, InspectionEvent
 from odp_api.observability.metrics import DEFAULT_REGISTRY, MetricRegistry
 from odp_api.ports.vision import FrameInput, VisionInferencePort
-
-from odp_schemas.events import InspectionAlert
 
 
 class InspectionService:

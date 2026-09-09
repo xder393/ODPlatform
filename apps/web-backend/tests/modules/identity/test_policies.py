@@ -1,10 +1,9 @@
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-import sys
 from uuid import uuid4
 
 import pytest
-
 
 WEB_BACKEND_SRC = Path(__file__).parents[3] / "src"
 SHARED_SCHEMAS_SRC = Path(__file__).parents[5] / "packages" / "shared-schemas" / "src"

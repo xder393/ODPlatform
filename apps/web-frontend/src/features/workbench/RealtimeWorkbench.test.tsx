@@ -30,6 +30,28 @@ function ok(body: unknown) {
 }
 
 describe("RealtimeWorkbench", () => {
+  it("makes a newly published case actionable when a live alert arrives", async () => {
+    let published = false;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/v1/cases") return ok(published ? [{
+        case_id: "12345678-0000-4000-8000-000000000001", status: "PENDING_CONFIRMATION",
+        organization_id: alert.organization_id,
+      }] : []);
+      if (url === "/api/v1/inspection-events") return ok({ items: [], next_cursor: null });
+      if (url === "/api/v1/auth/websocket-ticket") return ok({ ticket: "live-case", expires_in: 60 });
+      throw new Error(`Unexpected request: ${url}`);
+    }));
+    render(<RealtimeWorkbench since="2026-08-19T08:00:00Z" />);
+    await waitFor(() => expect(TestWebSocket.instances).toHaveLength(1));
+    expect(screen.queryByRole("button", { name: /12345678/ })).not.toBeInTheDocument();
+    published = true;
+    await act(async () => TestWebSocket.instances[0].onmessage?.({
+      data: JSON.stringify({ cursor: "15", alert }),
+    } as MessageEvent<string>));
+    expect(await screen.findByRole("button", { name: /12345678/ })).toBeInTheDocument();
+  });
+
   beforeEach(() => {
     TestWebSocket.instances = [];
     localStorage.setItem("odp_token", "test-token");

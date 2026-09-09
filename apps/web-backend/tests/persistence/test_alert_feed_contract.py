@@ -1,27 +1,26 @@
 """Contract tests for the durable cursor-based inspection alert feed."""
 
 import asyncio
+import sys
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
 from datetime import UTC, datetime
 from pathlib import Path
-import json
-import sys
+from threading import Barrier
 from types import ModuleType
 from uuid import UUID, uuid4
 
 import pytest
-from alembic import command
 from alembic.config import Config
-from sqlalchemy import text
-
-from odp_api.adapters.notifications.redis_durable_feed import RedisDurableInspectionAlertFeed
-from odp_api.adapters.notifications.sqlite_feed import SqliteInspectionAlertFeed
-from odp_api.adapters.redis_stream import RedisSocketStreamClient
-from odp_api.adapters.persistence.models import Base, InspectionAlertFeedRow
-from odp_api.db import create_engine_and_session
 from odp_schemas.events import InspectionAlert
 
+from alembic import command
+from odp_api.adapters.notifications.redis_durable_feed import (
+    RedisDurableInspectionAlertFeed,
+)
+from odp_api.adapters.notifications.sqlite_feed import SqliteInspectionAlertFeed
+from odp_api.adapters.persistence.models import Base, InspectionAlertFeedRow
+from odp_api.adapters.redis_stream import RedisSocketStreamClient
+from odp_api.db import create_engine_and_session
 
 ORG_ID = UUID("10000000-0000-4000-8000-000000000001")
 LINE_ID = UUID("20000000-0000-4000-8000-000000000001")
@@ -163,7 +162,6 @@ async def test_redis_wakeup_requeries_durable_facts_and_uses_bounded_commands(fe
         async def xread(self, streams, count, block):
             self.xread_calls.append((streams, count, block))
             await asyncio.sleep(0.01)
-            return None
         async def aclose(self): return None
     redis = FakeRedis()
     durable = RedisDurableInspectionAlertFeed(feed, redis)
@@ -193,7 +191,7 @@ async def test_redis_highwater_interleaving_publishes_before_first_xread(feed, m
         async def xread(self, streams, count, block):
             self.xread_calls.append((streams, count, block))
             feed.publish(alert, LINE_ID)
-            return [("odp:inspection-alerts", [("9-0", {})])]
+            return [("odp:inspection:alerts", [("9-0", {})])]
         async def aclose(self): self.closed = True
     class Redis:
         def __init__(self): self.async_instance = AsyncRedis()
@@ -211,7 +209,7 @@ async def test_redis_highwater_interleaving_publishes_before_first_xread(feed, m
     subscription = durable.subscribe(None)
     received = await asyncio.wait_for(anext(subscription), 0.2)
     assert received.alert.event_id == alert.event_id
-    assert redis.async_instance.xread_calls == [({"odp:inspection-alerts": "8-0"}, 100, 15_000)]
+    assert redis.async_instance.xread_calls == [({"odp:inspection:alerts": "8-0"}, 100, 15_000)]
     await subscription.aclose()
     assert redis.async_instance.closed
 

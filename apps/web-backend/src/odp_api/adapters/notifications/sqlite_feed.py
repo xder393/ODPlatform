@@ -14,13 +14,13 @@ from threading import Condition
 from typing import Final
 from uuid import UUID
 
+from odp_schemas.events import InspectionAlert
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from odp_api.adapters.persistence.models import InspectionAlertFeedRow
 from odp_api.ports.notifications import StoredInspectionAlert
-from odp_schemas.events import InspectionAlert
 
 _MAX_LIMIT: Final = 100
 _WAKE_TIMEOUT_SECONDS: Final = 1.0

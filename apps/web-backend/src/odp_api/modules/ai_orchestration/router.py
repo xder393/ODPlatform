@@ -4,6 +4,7 @@ from collections.abc import Callable
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
+
 from odp_api.modules.ai_orchestration.service import AdviceResponse, AdviceService
 from odp_api.modules.cases.ports import CaseRepositoryPort
 from odp_api.modules.identity.models import Actor

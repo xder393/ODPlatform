@@ -1,5 +1,6 @@
 from dataclasses import replace
 from typing import Final
+
 from odp_api.modules.cases.errors import InvalidCaseTransition
 from odp_api.modules.identity.models import Actor
 from odp_api.modules.identity.policies import authorize

@@ -1,27 +1,33 @@
 """Database fact feed with Redis Streams as bounded cross-instance wake-ups."""
 
-import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 from uuid import UUID
 
+from odp_schemas.events import InspectionAlert
+
 from odp_api.adapters.notifications.sqlite_feed import SqliteInspectionAlertFeed
 from odp_api.ports.notifications import StoredInspectionAlert
-from odp_schemas.events import InspectionAlert
 
 
 class RedisDurableInspectionAlertFeed:
     """Never reads reconciliation facts from Redis, only uses it for transport."""
 
-    def __init__(self, facts: SqliteInspectionAlertFeed, client: Any, stream_name: str = "odp:inspection-alerts", async_client_factory=None) -> None:
+    def __init__(self, facts: SqliteInspectionAlertFeed, client: Any, stream_name: str = "odp:inspection:alerts", async_client_factory=None) -> None:
         if not callable(getattr(client, "xadd_bounded", None)):
-            raise RuntimeError("Redis alert transport requires bounded XADD")
+            raise TypeError("Redis alert transport requires bounded XADD")
         self._facts, self._client, self._stream = facts, client, stream_name
         self._async_client_factory = async_client_factory or getattr(client, "async_client", None)
 
     def publish(self, alert: InspectionAlert, line_id: UUID | None) -> str:
         cursor = self._facts.publish(alert, line_id)
-        fields = {"cursor": cursor, "event_id": str(alert.event_id)}
+        # This adapter remains the explicit non-P1 dev trigger publisher.
+        # Production effects publish the canonical Outbox envelope instead.
+        fields = {
+            "cursor": cursor,
+            "event_id": str(alert.event_id),
+            "organization_id": str(alert.organization_id),
+        }
         self._client.xadd_bounded(self._stream, fields, 10_000)
         return cursor
 
@@ -33,7 +39,7 @@ class RedisDurableInspectionAlertFeed:
             raise ValueError("invalid cursor")
         cursor = int(after_cursor or "0")
         if not callable(self._async_client_factory):
-            raise RuntimeError("Redis alert transport requires an async XREAD client")
+            raise TypeError("Redis alert transport requires an async XREAD client")
         client = self._async_client_factory()
         try:
             # Capture a stable high-water mark before the durable query. An

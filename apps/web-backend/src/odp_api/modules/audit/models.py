@@ -1,11 +1,10 @@
 """Immutable records and canonical serialization for the audit hash chain."""
 
-from dataclasses import dataclass
-from datetime import UTC, datetime
 import hashlib
 import json
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
-
 
 GENESIS_HASH = "0" * 64
 

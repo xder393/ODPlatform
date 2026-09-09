@@ -1,6 +1,7 @@
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from hmac import compare_digest
-from typing import Callable, Protocol
+from typing import Protocol
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, status
@@ -8,8 +9,12 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 from odp_api.modules.identity.models import Actor
-from odp_api.modules.identity.ports import REAUTHENTICATION_TTL_SECONDS, ReauthenticationStorePort
+from odp_api.modules.identity.ports import (
+    REAUTHENTICATION_TTL_SECONDS,
+    ReauthenticationStorePort,
+)
 from odp_api.modules.identity.tickets import WebSocketTicketService
+
 
 class RecentReauthenticationRequired(PermissionError):
     """Raised when a simulated high-risk command lacks a five-minute marker."""
@@ -166,5 +171,14 @@ def create_auth_router(
         if websocket_ticket_service is None:
             raise HTTPException(status_code=503, detail="WebSocket authentication is not configured.")
         return {"ticket": websocket_ticket_service.issue(actor.actor_id), "expires_in": 60}
+
+    @router.get("/me")
+    def current_profile(actor: Actor = Depends(actor_provider)) -> dict[str, object]:
+        return {
+            "actor_id": str(actor.actor_id),
+            "role": actor.role.value,
+            "organization_id": str(actor.organization_id),
+            "line_ids": sorted(str(line_id) for line_id in actor.line_ids),
+        }
 
     return router

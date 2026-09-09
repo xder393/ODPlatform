@@ -1,14 +1,14 @@
 """Verification and operational health checks for audit chains."""
 
 import asyncio
-from dataclasses import dataclass
 import logging
+from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
 from odp_api.modules.audit.models import (
-    AuditP0Failure,
     GENESIS_HASH,
+    AuditP0Failure,
     VerificationResult,
     calculate_entry_hash,
 )

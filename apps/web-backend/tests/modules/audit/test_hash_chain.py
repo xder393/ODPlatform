@@ -1,18 +1,23 @@
 import asyncio
+import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from itertools import pairwise
 from pathlib import Path
-import sys
 from threading import Event
-import time
 from uuid import UUID, uuid4
 
 import pytest
 
-
 WEB_BACKEND_SRC = Path(__file__).parents[3] / "src"
 sys.path[:0] = [str(WEB_BACKEND_SRC)]
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from odp_api.main import create_app
+from odp_api.modules.audit import verify as audit_verify
 from odp_api.modules.audit.models import AuditCommand
 from odp_api.modules.audit.service import AuditService, InMemoryAuditRepository
 from odp_api.modules.audit.verify import (
@@ -20,17 +25,12 @@ from odp_api.modules.audit.verify import (
     AuditVerificationMonitor,
     InMemoryP0FailureReporter,
 )
-from odp_api.modules.audit import verify as audit_verify
 from odp_api.modules.cases.errors import InvalidCaseTransition
 from odp_api.modules.cases.router import InMemoryCaseRepository, create_cases_router
 from odp_api.modules.identity.models import Actor, Role
 from odp_api.modules.identity.policies import AuthorizationDenied
 from odp_api.modules.identity.service import get_current_actor
 from odp_api.modules.inspection.models import DefectCase, InspectionEvent
-from odp_api.main import create_app
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-
 
 ORGANIZATION_ID = UUID("00000000-0000-0000-0000-000000000001")
 RESOURCE_ID = UUID("00000000-0000-0000-0000-000000000002")
@@ -78,7 +78,7 @@ def test_concurrent_appends_form_one_continuous_organization_chain() -> None:
     assert [entry.sequence for entry in ordered] == list(range(1, 21))
     assert all(
         current.previous_hash == previous.entry_hash
-        for previous, current in zip(ordered, ordered[1:])
+        for previous, current in pairwise(ordered)
     )
     assert service.verify_organization_chain(ORGANIZATION_ID).is_valid
 

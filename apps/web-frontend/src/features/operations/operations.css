@@ -1,0 +1,16 @@
+.operations-panel { margin-top: 2rem; padding: 1.25rem; background: #f1f5f9; color: #0f172a; border-radius: .75rem; }
+.operations-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.operations-card { margin-top: 1rem; padding: 1rem; background: white; border: 1px solid #cbd5e1; border-radius: .5rem; overflow-wrap: anywhere; }
+.operations-hint { font-size: .875rem; color: #475569; }
+.session-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .75rem; align-items: end; }
+.session-form label, .operations-heading label { display: flex; flex-direction: column; gap: .35rem; }
+.operations-panel input, .operations-panel select { padding: .6rem; border: 1px solid #94a3b8; border-radius: .3rem; min-width: 0; width: 100%; box-sizing: border-box; }
+.operations-panel button { padding: .5rem .75rem; border: 1px solid #64748b; border-radius: .3rem; background: #fff; color: #0f172a; cursor: pointer; }
+.operations-panel button:hover { background: #e2e8f0; }
+.operations-panel button:disabled { opacity: .5; cursor: not-allowed; }
+.operations-panel button:focus-visible, .operations-panel a:focus-visible { outline: 3px solid #2563eb; outline-offset: 2px; }
+.operations-list { list-style: none; padding: 0; max-height: 360px; overflow-y: auto; }
+.operations-list li { padding: .75rem 0; border-bottom: 1px solid #e2e8f0; }
+.operations-status { display: inline-block; margin: .25rem .6rem; padding: .15rem .45rem; background: #e2e8f0; border-radius: .25rem; }
+.operations-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; }
+.operations-panel [role="alert"] { color: #b91c1c; }

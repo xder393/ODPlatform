@@ -18,7 +18,11 @@ from odp_api.adapters.retrieval.pgvector import (
     _normalize,
     _tokens,
 )
-from odp_api.modules.knowledge.models import KnowledgeChunk, KnowledgeDocument, KnowledgeParentChunk
+from odp_api.modules.knowledge.models import (
+    KnowledgeChunk,
+    KnowledgeDocument,
+    KnowledgeParentChunk,
+)
 from odp_api.ports.retrieval import RetrievalFilters, RetrievedChunk
 
 
@@ -139,7 +143,7 @@ class InMemoryKnowledgeIndex:
         normal_bm25 = _normalize(bm25_scores)
         results = [
             self._retrieved_chunk(chunk, vector, bm25, (vector + bm25) / 2)
-            for chunk, vector, bm25 in zip(candidates, normal_vector, normal_bm25)
+            for chunk, vector, bm25 in zip(candidates, normal_vector, normal_bm25, strict=True)
         ]
         return sorted(results, key=lambda result: (-result.score, str(result.chunk_id)))[: filters.limit]
 
