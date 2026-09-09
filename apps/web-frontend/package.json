@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "test": "vitest --environment jsdom",
     "test:e2e": "playwright test",
+    "test:e2e-gate": "node scripts/check-e2e-gate.mjs",
     "typecheck:e2e": "tsc --noEmit -p tsconfig.e2e.json"
   },
   "dependencies": {

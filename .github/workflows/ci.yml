@@ -150,12 +150,16 @@ jobs:
         working-directory: apps/web-frontend
         run: npm run typecheck:e2e
 
+      - name: Verify mandatory recorded E2E gate
+        working-directory: apps/web-frontend
+        run: npm run test:e2e-gate
+
   # Playwright E2E：由 compose 拉起 api/nginx 全套服务后跑确定性闭环。
-  # 注：本机无 docker，此 job 未在本地验证；是否一键跑通依赖并行实现的
-  # deploy/compose.yaml（nginx 前端入口 8080、seed 与登录接口）。
+  # Includes independently running recorded-video inference and browser disposition.
   e2e:
     needs: [backend-web, frontend-web]
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -191,11 +195,49 @@ jobs:
         working-directory: apps/web-frontend
         run: npx playwright install --with-deps chromium
 
+      - name: Prepare and verify independent recorded pipeline
+        timeout-minutes: 5
+        run: |
+          ready=0
+          for i in $(seq 1 60); do
+            if docker compose -f deploy/compose.yaml exec -T frame-ingestor python -c 'import cv2, numpy, odp_api' ; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          test "$ready" = 1
+          docker compose -f deploy/compose.yaml exec -T \
+            -e ODP_ALLOW_COMPOSE_PROBE=disposable frame-ingestor \
+            python /workspace/apps/web-backend/scripts/verify_compose_pipeline.py
+          docker compose -f deploy/compose.yaml exec -T frame-ingestor python - <<'PY'
+          import cv2
+          import numpy as np
+          path = "/tmp/odp-browser-e2e.avi"
+          writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"MJPG"), 5, (64, 64))
+          if not writer.isOpened():
+              raise RuntimeError("Unable to create recorded E2E video")
+          try:
+              frame = np.zeros((64, 64, 3), dtype=np.uint8)
+              cv2.line(frame, (5, 5), (55, 55), (255, 255, 255), 2)
+              writer.write(frame)
+          finally:
+              writer.release()
+          capture = cv2.VideoCapture(path)
+          try:
+              ok, decoded = capture.read()
+              if not ok or decoded is None:
+                  raise RuntimeError("Recorded E2E video cannot be decoded")
+          finally:
+              capture.release()
+          PY
+
       - name: Run E2E tests
         working-directory: apps/web-frontend
         run: npm run test:e2e
         env:
           E2E_BASE_URL: http://localhost:8080
+          E2E_RECORDED_SOURCE: /tmp/odp-browser-e2e.avi
 
       - name: Restart API and verify durable case history
         run: |
@@ -224,7 +266,17 @@ jobs:
 
       - name: Dump compose logs
         if: always()
-        run: docker compose -f deploy/compose.yaml logs
+        run: docker compose -f deploy/compose.yaml logs --no-color > compose-e2e.log
+
+      - name: Upload E2E diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-diagnostics
+          retention-days: 7
+          path: |
+            compose-e2e.log
+            apps/web-frontend/test-results/
 
       - name: Tear down services
         if: always()
