@@ -216,7 +216,7 @@ passed (13.7s); the two role/UI-contract tests mock HTTP, while the quality work
 and new recorded-pipeline test use the real API. Frontend unit tests: 43 passed;
 production build and E2E typecheck passed.
 
-The recorded-pipeline test is opt-in: set `E2E_RECORDED_SOURCE` to an existing
+For local runs, the recorded-pipeline test is opt-in: set `E2E_RECORDED_SOURCE` to an existing
 video path **inside the ingestor container**. In this run it was a synthetic MJPG
 AVI at `/tmp/odp-browser-e2e.avi`. Run only against disposable demo data:
 
@@ -226,6 +226,18 @@ E2E_BASE_URL=http://127.0.0.1:18080 \
 E2E_RECORDED_SOURCE=/tmp/odp-browser-e2e.avi PLAYWRIGHT_CHANNEL=chrome \
 npm run test:e2e -- --workers=1
 ```
+
+In GitHub CI this test is mandatory. The E2E job waits for the ingestor's
+dependencies, runs the independent Compose pipeline probe (including Worker
+presence and durable effects), then creates and decodes a synthetic AVI inside
+the ingestor container. It passes that path to Playwright and runs one browser
+worker to keep the two real case workflows from interfering. Missing or blank
+`E2E_RECORDED_SOURCE` in CI fails configuration loading instead of skipping the
+test; `npm run test:e2e-gate` checks this behavior without a browser. An invalid
+path, unavailable runtime, or failed inference fails acceptance. Compose logs,
+failure screenshots and retained traces are uploaded for seven days. These
+artifacts may contain demo evidence and must not be generated against production.
+The fixed-output model still validates integration, not detection accuracy.
 
 Coverage: supervisor login, UI session creation, successful independent inference,
 browser loading of signed evidence images, stop request, and newly created case
