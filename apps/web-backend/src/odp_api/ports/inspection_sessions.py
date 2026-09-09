@@ -21,6 +21,22 @@ class InspectionSession:
     status: str
 
 
+@dataclass(frozen=True, slots=True)
+class IngestionClaim:
+    organization_id: UUID
+    camera_id: UUID
+    session_id: UUID
+    owner_instance_id: UUID
+    generation: int
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimedInspectionSession:
+    session: InspectionSession
+    claim: IngestionClaim
+    initial_sequence: int
+
+
 class InspectionSessionPort(Protocol):
     def claim_start_requests(self, process_id: str, limit: int) -> Sequence[InspectionSession]: ...
 
@@ -33,4 +49,9 @@ class InspectionSessionPort(Protocol):
     ) -> bool: ...
 
 
-__all__ = ["InspectionSession", "InspectionSessionPort"]
+__all__ = [
+    "ClaimedInspectionSession",
+    "IngestionClaim",
+    "InspectionSession",
+    "InspectionSessionPort",
+]
