@@ -49,12 +49,17 @@ class SqlAlchemyInspectionSessionRepository(InspectionSessionPort):
         with self._session_factory() as session:
             try:
                 claimed: list[ClaimedInspectionSession] = []
+                processed_ids: set[UUID] = set()
                 last_updated_at = None
                 last_session_id = None
                 while len(claimed) < limit:
                     predicates = [
                         InspectionSessionRow.status.in_(("START_REQUESTED", "RUNNING"))
                     ]
+                    if processed_ids:
+                        predicates.append(
+                            InspectionSessionRow.session_id.not_in(processed_ids)
+                        )
                     if last_updated_at is not None:
                         predicates.append(
                             or_(
@@ -78,6 +83,7 @@ class SqlAlchemyInspectionSessionRepository(InspectionSessionPort):
                     if not rows:
                         break
                     for row in rows:
+                        processed_ids.add(row.session_id)
                         last_updated_at = row.updated_at
                         last_session_id = row.session_id
                         now = self._db_now(session)

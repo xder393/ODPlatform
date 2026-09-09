@@ -1,6 +1,7 @@
 """Real PostgreSQL concurrency coverage for ingestion ownership leases."""
 
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -11,6 +12,7 @@ from uuid import uuid4
 import pytest
 from alembic.config import Config
 from sqlalchemy import create_engine, select, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
 from alembic import command
@@ -34,9 +36,37 @@ def _migrate_head(database_url: str) -> None:
 
 @pytest.fixture(scope="module")
 def postgres_url():
-    database_url = os.environ["ODP_POSTGRES_TEST_URL"]
-    _migrate_head(database_url)
-    yield database_url
+    shared_url = make_url(os.environ["ODP_POSTGRES_TEST_URL"])
+    database_name = f"odp_task2_ingestion_{uuid4().hex}"
+    if re.fullmatch(r"[a-z0-9_]+", database_name) is None:
+        raise AssertionError("generated PostgreSQL test database name is unsafe")
+    admin_engine = create_engine(
+        shared_url.set(database="postgres"), isolation_level="AUTOCOMMIT"
+    )
+    isolated_url = shared_url.set(database=database_name).render_as_string(
+        hide_password=False
+    )
+    created = False
+    try:
+        with admin_engine.connect() as connection:
+            connection.exec_driver_sql(f'CREATE DATABASE "{database_name}"')
+        created = True
+        _migrate_head(isolated_url)
+        yield isolated_url
+    finally:
+        if created:
+            with admin_engine.connect() as connection:
+                connection.execute(
+                    text(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                        "WHERE datname = :database_name AND pid <> pg_backend_pid()"
+                    ),
+                    {"database_name": database_name},
+                )
+                connection.exec_driver_sql(
+                    f'DROP DATABASE IF EXISTS "{database_name}"'
+                )
+        admin_engine.dispose()
 
 
 def _seed(sessions, *, status="START_REQUESTED", lease_expires_at=None):

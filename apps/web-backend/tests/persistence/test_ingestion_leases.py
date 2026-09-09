@@ -102,6 +102,24 @@ def test_claim_renew_and_reclaim_use_strict_lease_boundary(repository, clock):
     assert repository.renew(second.claim) is True
 
 
+def test_claim_batch_does_not_revisit_row_after_its_lease_expires(repository, clock):
+    session_id, _, _ = _seed(repository, clock)
+    advancing_times = iter(
+        [NOW + timedelta(seconds=1), NOW + timedelta(seconds=3)]
+    )
+    batch_repository = SqlAlchemyInspectionSessionRepository(
+        repository._session_factory,
+        clock=lambda _: next(advancing_times),
+        lease_duration=timedelta(seconds=1),
+    )
+
+    claimed = batch_repository.claim_available("ingestor", uuid4(), 2)
+
+    assert len(claimed) == 1
+    assert claimed[0].session.session_id == session_id
+    assert claimed[0].claim.generation == 1
+
+
 def test_claim_returns_frozen_high_water_and_never_reopens_stop_requested(
     repository, clock
 ):
@@ -140,6 +158,20 @@ def test_stop_before_claim_and_expired_orphan_stop_are_not_restarted(repository,
     assert row.stopped_at.replace(tzinfo=UTC) == NOW
     assert (row.organization_id, row.camera_id) == (organization_id, camera_id)
     assert repository.finalize_expired_stops(10) == 0
+
+
+def test_never_owned_stop_request_is_finalized_without_a_claim(repository, clock):
+    session_id, _, _ = _seed(repository, clock, status="STOP_REQUESTED")
+
+    assert repository.stop_candidates(uuid4(), 1) == []
+    assert repository.finalize_expired_stops(1) == 1
+
+    row = _row(repository, session_id)
+    assert (row.status, row.owner_instance_id, row.lease_expires_at) == (
+        "STOPPED",
+        None,
+        None,
+    )
 
 
 @pytest.mark.parametrize("field", ["organization_id", "owner_instance_id", "generation"])
