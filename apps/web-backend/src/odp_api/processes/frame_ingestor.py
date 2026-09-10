@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from urllib.parse import SplitResult, urlsplit, urlunsplit
+from uuid import UUID
 
 from odp_api.modules.ingestion.artifacts import ArtifactSaga
 from odp_api.modules.ingestion.service import (
@@ -17,7 +18,11 @@ from odp_api.modules.ingestion.service import (
     IngestionService,
 )
 from odp_api.ports.frame_sources import FrameSource
-from odp_api.ports.inspection_sessions import InspectionSession, InspectionSessionPort
+from odp_api.ports.inspection_sessions import (
+    ClaimedInspectionSession,
+    InspectionSession,
+    InspectionSessionPort,
+)
 from odp_api.processes.common import install_signal_stop_event, load_settings
 from odp_api.settings import IngestorSettings
 
@@ -49,6 +54,7 @@ class FrameIngestor:
         saga_factory: SagaFactory,
         *,
         process_id: str,
+        instance_id: UUID,
         heartbeat_interval_seconds: float = 5.0,
         max_concurrent_sessions: int = 10,
         poll_interval_seconds: float = 1.0,
@@ -70,6 +76,9 @@ class FrameIngestor:
         self._source_factory = source_factory
         self._saga_factory = saga_factory
         self._process_id = process_id
+        if not isinstance(instance_id, UUID):
+            raise TypeError("instance_id must be a UUID")
+        self._instance_id = instance_id
         self._heartbeat_interval = heartbeat_interval_seconds
         self._clock = clock or (lambda: datetime.now(UTC))
 
@@ -96,11 +105,14 @@ class FrameIngestor:
                 capacity = self._max_sessions - len(active)
                 if capacity and not stop.is_set():
                     started = await asyncio.to_thread(
-                        self._sessions.claim_start_requests, self._process_id, capacity
+                        self._sessions.claim_available,
+                        self._process_id,
+                        self._instance_id,
+                        capacity,
                     )
-                    for session in started:
-                        active[session.session_id] = asyncio.create_task(
-                            self._run_claimed(session, None)
+                    for claimed in started:
+                        active[claimed.session.session_id] = asyncio.create_task(
+                            self._run_claimed(claimed, None)
                         )
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(stop.wait(), timeout=self._poll_interval)
@@ -109,17 +121,20 @@ class FrameIngestor:
                 task.cancel()
             await asyncio.gather(*active.values(), return_exceptions=True)
 
-    async def _run_claimed(self, session, max_frames):
+    async def _run_claimed(self, claimed: ClaimedInspectionSession, max_frames):
+        session = claimed.session
         try:
-            return await self._run_session(session, max_frames)
+            return await self._run_session(claimed, max_frames)
         except Exception as error:
             LOGGER.exception(
                 "frame-ingestor session failed",
                 extra={"session_id": str(session.session_id), "error_type": type(error).__name__},
             )
             await asyncio.to_thread(
-                self._sessions.mark_failed, session.session_id, self._process_id,
-                "INGESTOR_FAILED", str(error) or type(error).__name__, self._clock(),
+                self._sessions.fail_claim,
+                claimed.claim,
+                "INGESTOR_FAILED",
+                str(error) or type(error).__name__,
             )
             return None
 
@@ -130,29 +145,35 @@ class FrameIngestor:
         max_frames_per_session: int | None = None,
     ) -> IngestorRunReport:
         started = await asyncio.to_thread(
-            self._sessions.claim_start_requests, self._process_id, limit
+            self._sessions.claim_available,
+            self._process_id,
+            self._instance_id,
+            limit,
         )
         reports: list[IngestionReport] = []
         failed = 0
-        async def run_claimed(session):
+        async def run_claimed(claimed: ClaimedInspectionSession):
             nonlocal failed
             try:
-                reports.append(await self._run_session(session, max_frames_per_session))
+                reports.append(
+                    await self._run_session(claimed, max_frames_per_session)
+                )
             except Exception as error:
                 failed += 1
                 LOGGER.exception(
                     "frame-ingestor session failed",
-                    extra={"session_id": str(session.session_id), "error_type": type(error).__name__},
+                    extra={
+                        "session_id": str(claimed.session.session_id),
+                        "error_type": type(error).__name__,
+                    },
                 )
                 await asyncio.to_thread(
-                    self._sessions.mark_failed,
-                    session.session_id,
-                    self._process_id,
+                    self._sessions.fail_claim,
+                    claimed.claim,
                     "INGESTOR_FAILED",
                     str(error) or type(error).__name__,
-                    self._clock(),
                 )
-        tasks = [asyncio.create_task(run_claimed(session)) for session in started]
+        tasks = [asyncio.create_task(run_claimed(claimed)) for claimed in started]
         try:
             await asyncio.gather(*tasks)
         finally:
@@ -170,16 +191,18 @@ class FrameIngestor:
         )
 
     async def _run_session(
-        self, session: InspectionSession, max_frames: int | None
+        self, claimed: ClaimedInspectionSession, max_frames: int | None
     ) -> IngestionReport:
+        session = claimed.session
         source = self._source_factory(session)
-        heartbeat = asyncio.create_task(self._heartbeat_until_stop(session, source))
+        heartbeat = asyncio.create_task(self._heartbeat_until_stop(claimed, source))
         try:
             return await self._ingestion.run(
                 source,
                 organization_id=session.organization_id,
                 health=self._health,
                 saga=self._saga_factory(session),
+                claim=claimed.claim,
                 max_frames=max_frames,
             )
         finally:
@@ -188,14 +211,14 @@ class FrameIngestor:
                 await heartbeat
             await source.close()
 
-    async def _heartbeat_until_stop(self, session: InspectionSession, source: FrameSource) -> None:
+    async def _heartbeat_until_stop(
+        self, claimed: ClaimedInspectionSession, source: FrameSource
+    ) -> None:
         while True:
             await asyncio.sleep(self._heartbeat_interval)
             alive = await asyncio.to_thread(
-                self._sessions.heartbeat,
-                session.session_id,
-                self._process_id,
-                self._clock(),
+                self._sessions.renew,
+                claimed.claim,
             )
             if not alive:
                 await source.close()

@@ -31,6 +31,7 @@ class PendingArtifact:
     content_length: int | None
     referenced: bool = False
     retention_until: datetime | None = None
+    cleanup_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,7 +105,7 @@ class ArtifactReconciler:
             if candidate.referenced:
                 skipped_referenced += 1
                 continue
-            if candidate.retention_until is None or candidate.retention_until > now:
+            if candidate.retention_until is not None and candidate.retention_until > now:
                 continue
             try:
                 self._storage.delete(candidate.object_key)

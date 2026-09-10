@@ -8,6 +8,7 @@ from uuid import UUID
 
 from odp_api.modules.tasks.commands import LeaseClaim
 from odp_api.modules.tasks.models import TaskDeadLetterAlert, TaskRecord
+from odp_api.ports.inspection_sessions import IngestionClaim
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +22,7 @@ class AdmissionRequest:
     captured_at: datetime
     content_sha256: str
     correlation_id: UUID
+    claim: IngestionClaim
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,10 +60,18 @@ class CameraAdmissionPort(Protocol):
         object_key: str,
         content_length: int,
         now: datetime,
+        *,
+        claim: IngestionClaim,
     ) -> TaskRecord: ...
 
     def fail_upload(
-        self, reservation_id: UUID, organization_id: UUID, error_code: str, now: datetime
+        self,
+        reservation_id: UUID,
+        organization_id: UUID,
+        error_code: str,
+        now: datetime,
+        *,
+        claim: IngestionClaim,
     ) -> None: ...
 
 

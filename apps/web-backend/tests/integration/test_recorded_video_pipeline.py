@@ -136,6 +136,7 @@ def test_recorded_video_creates_persistent_alert_and_duplicate_is_harmless(tmp_p
                     DatabaseIngestionHealth(sessions, sync, presence_digest),
                     source_from_session, lambda _: ArtifactSaga(control, storage),
                     process_id=f"ingestor-{token}",
+                    instance_id=uuid4(),
                 )
                 report = await ingestor.run_once(max_frames_per_session=1)
                 assert report.failed == 0

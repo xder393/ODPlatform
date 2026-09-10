@@ -13,10 +13,18 @@ from odp_api.modules.ingestion.artifacts import (
     SelectedFrame,
 )
 from odp_api.modules.tasks.models import TaskRecord, TaskStatus
+from odp_api.ports.inspection_sessions import IngestionClaim
 from odp_api.ports.storage import ObjectMetadata
 from odp_api.ports.tasks import AdmissionRejected, AdmissionReservation
 
 NOW = datetime(2026, 8, 25, 12, tzinfo=UTC)
+CLAIM = IngestionClaim(
+    organization_id=UUID("00000000-0000-0000-0000-000000000001"),
+    camera_id=UUID("00000000-0000-0000-0000-000000000002"),
+    session_id=UUID("00000000-0000-0000-0000-000000000003"),
+    owner_instance_id=UUID("00000000-0000-0000-0000-000000000005"),
+    generation=1,
+)
 
 
 def frame(*, content: bytes = b"jpeg-bytes") -> SelectedFrame:
@@ -28,6 +36,7 @@ def frame(*, content: bytes = b"jpeg-bytes") -> SelectedFrame:
         captured_at=NOW,
         content=content,
         correlation_id=UUID("00000000-0000-0000-0000-000000000004"),
+        claim=CLAIM,
     )
 
 
@@ -101,8 +110,11 @@ class RecordingAdmission:
         assert request.content_sha256 == sha256(b"jpeg-bytes").hexdigest()
         return self.reservation
 
-    def complete_upload(self, reservation_id, organization_id, object_key, content_length, now):
+    def complete_upload(
+        self, reservation_id, organization_id, object_key, content_length, now, *, claim
+    ):
         self.calls.append("complete_upload")
+        assert claim == CLAIM
         if self.complete_error:
             raise self.complete_error
         return TaskRecord(
@@ -118,8 +130,9 @@ class RecordingAdmission:
             artifact_id=self.reservation.artifact_id,
         )
 
-    def fail_upload(self, reservation_id, organization_id, error_code, now):
+    def fail_upload(self, reservation_id, organization_id, error_code, now, *, claim):
         self.calls.append("fail_upload")
+        assert claim == CLAIM
         self.failed.append(error_code)
 
 

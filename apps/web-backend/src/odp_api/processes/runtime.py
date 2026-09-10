@@ -14,7 +14,7 @@ import hashlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
 
@@ -265,6 +265,7 @@ def build_ingestor(settings: IngestorSettings) -> FrameIngestor:
         source_from_session,
         lambda _session: ArtifactSaga(repository, storage),
         process_id=_process_id("frame-ingestor"),
+        instance_id=uuid4(),
         heartbeat_interval_seconds=max(1.0, settings.lease_seconds / 4),
     )
 

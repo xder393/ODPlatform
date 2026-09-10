@@ -18,6 +18,7 @@ from odp_api.modules.ingestion.artifacts import (
 )
 from odp_api.modules.tasks.admission import AdmissionPolicy, FrameSampler
 from odp_api.ports.frame_sources import FrameEncoderPort, FrameEnvelope, FrameSource
+from odp_api.ports.inspection_sessions import IngestionClaim
 from odp_api.ports.tasks import AdmissionRejected, TaskRecord
 
 
@@ -68,6 +69,7 @@ class IngestionService:
         organization_id: UUID,
         health: IngestionHealthPort,
         saga: ArtifactSaga,
+        claim: IngestionClaim,
         max_frames: int | None = None,
         content_type: str = "image/jpeg",
     ) -> IngestionReport:
@@ -75,6 +77,8 @@ class IngestionService:
 
         if max_frames is not None and max_frames < 1:
             raise ValueError("max_frames must be positive when supplied")
+        if not isinstance(claim, IngestionClaim):
+            raise TypeError("claim must be an IngestionClaim")
         report = IngestionReport()
         sampler = FrameSampler(self._sample_fps)
         async for decoded in source.frames():
@@ -119,6 +123,7 @@ class IngestionService:
                 captured_at=decoded.captured_at,
                 content=envelope.jpeg_bytes,
                 correlation_id=decoded.session_id,
+                claim=claim,
                 content_sha256=envelope.sha256,
                 content_type=content_type,
             )

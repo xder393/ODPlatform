@@ -12,6 +12,7 @@ from uuid import UUID
 from odp_api.modules.tasks.admission import AdmissionPolicy
 from odp_api.modules.tasks.models import TaskRecord
 from odp_api.ports.evidence import EvidenceAuthorizationPort
+from odp_api.ports.inspection_sessions import IngestionClaim
 from odp_api.ports.storage import ObjectMetadata, ObjectStoragePort
 from odp_api.ports.tasks import (
     AdmissionRejected,
@@ -39,6 +40,7 @@ class SelectedFrame:
     captured_at: datetime
     content: bytes
     correlation_id: UUID
+    claim: IngestionClaim
     content_sha256: str | None = None
     content_type: str = "application/octet-stream"
 
@@ -116,6 +118,7 @@ class ArtifactSaga:
             captured_at=captured_at,
             content_sha256=digest,
             correlation_id=selected_frame.correlation_id,
+            claim=selected_frame.claim,
         )
         try:
             reservation = self._admission.reserve(request, now)
@@ -144,7 +147,11 @@ class ArtifactSaga:
                     extra={"object_key": object_key, "error_type": type(error).__name__},
                 )
             compensated = _best_effort_fail(
-                self._admission, reservation, "STORAGE_UPLOAD_FAILED", now
+                self._admission,
+                reservation,
+                "STORAGE_UPLOAD_FAILED",
+                now,
+                selected_frame.claim,
             )
             if uploaded and compensated:
                 _best_effort_delete(self._storage, object_key)
@@ -157,6 +164,7 @@ class ArtifactSaga:
                 object_key,
                 len(content),
                 now,
+                claim=selected_frame.claim,
             )
         except AdmissionRejected as error:
             # The object and PENDING row remain available to the reconciler.
@@ -226,6 +234,7 @@ def _best_effort_fail(
     reservation: Any,
     error_code: str,
     now: datetime,
+    claim: IngestionClaim,
 ) -> bool:
     try:
         admission.fail_upload(
@@ -233,6 +242,7 @@ def _best_effort_fail(
             reservation.organization_id,
             error_code,
             now,
+            claim=claim,
         )
         return True
     except Exception as error:  # noqa: BLE001 - never hide the primary storage failure

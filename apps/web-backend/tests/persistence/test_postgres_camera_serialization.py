@@ -16,6 +16,9 @@ from alembic import command
 WEB_BACKEND_SRC = Path(__file__).parents[2] / "src"
 sys.path[:0] = [str(WEB_BACKEND_SRC)]
 
+from odp_api.adapters.persistence.inspection_sessions import (
+    SqlAlchemyInspectionSessionRepository,
+)
 from odp_api.adapters.persistence.task_control import SqlAlchemyTaskControlRepository
 from odp_api.adapters.persistence.task_models import (
     FrameArtifactRow,
@@ -26,7 +29,7 @@ from odp_api.db import create_engine_and_session
 from odp_api.ports.tasks import AdmissionRejected, AdmissionRequest
 
 
-def _request(organization_id, camera_id, session_id, frame_sequence):
+def _request(organization_id, camera_id, session_id, frame_sequence, claim):
     return AdmissionRequest(
         organization_id=organization_id,
         camera_id=camera_id,
@@ -35,6 +38,7 @@ def _request(organization_id, camera_id, session_id, frame_sequence):
         captured_at=datetime(2026, 8, 25, 12, 0, frame_sequence, tzinfo=UTC),
         content_sha256=f"{frame_sequence:064x}",
         correlation_id=uuid4(),
+        claim=claim,
     )
 
 
@@ -60,7 +64,7 @@ def test_postgresql_camera_admission_serializes_eviction_and_keeps_two_ready_tas
                     line_id=uuid4(),
                     source_type="TEST",
                     sanitized_uri="rtsp://test.invalid/camera",
-                    status="RUNNING",
+                    status="START_REQUESTED",
                     idempotency_key=str(uuid4()),
                     started_at=now,
                     created_at=now,
@@ -68,13 +72,17 @@ def test_postgresql_camera_admission_serializes_eviction_and_keeps_two_ready_tas
                 )
             )
 
-        repository = SqlAlchemyTaskControlRepository(sessions)
-        first = repository.reserve(_request(organization_id, camera_id, session_id, 1), now)
+        ownership = SqlAlchemyInspectionSessionRepository(
+            sessions, clock=lambda _session: now
+        )
+        claim = ownership.claim_available("test-ingestor", uuid4(), 1)[0].claim
+        repository = SqlAlchemyTaskControlRepository(sessions, clock=lambda _session: now)
+        first = repository.reserve(_request(organization_id, camera_id, session_id, 1, claim), now)
         with pytest.raises(AdmissionRejected, match="RESERVATION_NOT_FOUND"):
-            repository.complete_upload(first.reservation_id, uuid4(), "frames/1.jpg", 10, now)
-        first_task = repository.complete_upload(first.reservation_id, organization_id, "frames/1.jpg", 10, now)
-        second = repository.reserve(_request(organization_id, camera_id, session_id, 2), now)
-        second_task = repository.complete_upload(second.reservation_id, organization_id, "frames/2.jpg", 10, now)
+            repository.complete_upload(first.reservation_id, uuid4(), "frames/1.jpg", 10, now, claim=claim)
+        first_task = repository.complete_upload(first.reservation_id, organization_id, "frames/1.jpg", 10, now, claim=claim)
+        second = repository.reserve(_request(organization_id, camera_id, session_id, 2, claim), now)
+        second_task = repository.complete_upload(second.reservation_id, organization_id, "frames/2.jpg", 10, now, claim=claim)
 
         barrier = Barrier(2)
         upload_finished = Condition()
@@ -87,7 +95,7 @@ def test_postgresql_camera_admission_serializes_eviction_and_keeps_two_ready_tas
             while True:
                 try:
                     reservation = repository.reserve(
-                        _request(organization_id, camera_id, session_id, frame_sequence), now
+                        _request(organization_id, camera_id, session_id, frame_sequence, claim), now
                     )
                 except AdmissionRejected as error:
                     if error.reason != "ADMISSION_IN_PROGRESS":
@@ -107,6 +115,7 @@ def test_postgresql_camera_admission_serializes_eviction_and_keeps_two_ready_tas
                     f"frames/{frame_sequence}.jpg",
                     10,
                     now,
+                    claim=claim,
                 )
                 with upload_finished:
                     completed_uploads += 1
