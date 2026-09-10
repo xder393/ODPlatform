@@ -205,34 +205,41 @@ class FrameIngestor:
         self, claimed: ClaimedInspectionSession, max_frames: int | None
     ) -> IngestionReport:
         session = claimed.session
-        source = self._source_factory(claimed)
-        ingestion = asyncio.create_task(
-            self._ingestion.run(
-                source,
-                organization_id=session.organization_id,
-                health=self._health,
-                saga=self._saga_factory(session),
-                claim=claimed.claim,
-                max_frames=max_frames,
-            )
-        )
-        heartbeat = asyncio.create_task(self._heartbeat_until_stop(claimed))
+        source: FrameSource | None = None
+        ingestion: asyncio.Task | None = None
+        heartbeat: asyncio.Task | None = None
         try:
+            source = self._source_factory(claimed)
+            saga = self._saga_factory(session)
+            ingestion = asyncio.create_task(
+                self._ingestion.run(
+                    source,
+                    organization_id=session.organization_id,
+                    health=self._health,
+                    saga=saga,
+                    claim=claimed.claim,
+                    max_frames=max_frames,
+                )
+            )
+            heartbeat = asyncio.create_task(self._heartbeat_until_stop(claimed))
             done, _ = await asyncio.wait(
                 (ingestion, heartbeat),
                 return_when=asyncio.FIRST_COMPLETED,
             )
+            if heartbeat in done and not heartbeat.result():
+                raise _IngestionClaimLost("ingestion claim was lost")
             if ingestion in done:
                 return ingestion.result()
-            if heartbeat.result() is False:
-                raise _IngestionClaimLost("ingestion claim was lost")
             raise _IngestionClaimLost("ingestion claim heartbeat stopped")
         finally:
-            for task in (ingestion, heartbeat):
+            children = tuple(task for task in (ingestion, heartbeat) if task is not None)
+            for task in children:
                 if not task.done():
                     task.cancel()
-            await asyncio.gather(ingestion, heartbeat, return_exceptions=True)
-            await source.close()
+            if children:
+                await asyncio.gather(*children, return_exceptions=True)
+            if source is not None:
+                await source.close()
 
     async def _heartbeat_until_stop(
         self, claimed: ClaimedInspectionSession, source: FrameSource | None = None

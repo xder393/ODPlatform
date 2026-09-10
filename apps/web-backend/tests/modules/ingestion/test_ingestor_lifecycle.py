@@ -6,6 +6,8 @@ from uuid import uuid4
 
 import pytest
 
+from odp_api.modules.ingestion.artifacts import ArtifactHealth
+from odp_api.modules.ingestion.service import IngestionReport
 from odp_api.ports.inspection_sessions import IngestionClaim
 from odp_api.processes.frame_ingestor import FrameIngestor
 
@@ -284,5 +286,88 @@ def test_renew_loss_stops_ingestion_and_closes_source(renew_result):
         assert isinstance(result[0], BaseException)
         assert drained.is_set()
         assert closed.is_set()
+
+    asyncio.run(scenario())
+
+
+def test_saga_setup_failure_still_closes_created_source():
+    async def scenario():
+        closed = asyncio.Event()
+        claim = claimed("setup-failure")
+
+        class Source:
+            async def close(self):
+                closed.set()
+
+        def source_factory(received):
+            assert received is claim
+            return Source()
+
+        def saga_factory(_session):
+            raise RuntimeError("saga setup failed")
+
+        class Ingestion:
+            async def run(self, _source, **_kwargs):
+                return IngestionReport()
+
+        process = FrameIngestor(
+            SimpleNamespace(),
+            Ingestion(),
+            None,
+            source_factory,
+            saga_factory,
+            process_id="test",
+            instance_id=uuid4(),
+        )
+
+        result = await asyncio.gather(
+            asyncio.create_task(process._run_claimed(claim, None)),
+            return_exceptions=True,
+        )
+        assert isinstance(result[0], RuntimeError)
+        assert closed.is_set()
+
+    asyncio.run(scenario())
+
+
+def test_heartbeat_failure_wins_when_ingestion_finishes_in_same_wait():
+    async def scenario():
+        rendezvous = asyncio.Event()
+        arrived = 0
+        claim = claimed("simultaneous-failure")
+
+        class Source:
+            async def close(self):
+                return None
+
+        async def meet():
+            nonlocal arrived
+            arrived += 1
+            if arrived == 2:
+                rendezvous.set()
+            await rendezvous.wait()
+
+        class Ingestion:
+            async def run(self, _source, **_kwargs):
+                await meet()
+                return IngestionReport()
+
+        async def heartbeat(_claimed):
+            await meet()
+            raise RuntimeError("renew failed")
+
+        process = FrameIngestor(
+            SimpleNamespace(),
+            Ingestion(),
+            ArtifactHealth(True, True),
+            lambda _claimed: Source(),
+            lambda _session: None,
+            process_id="test",
+            instance_id=uuid4(),
+        )
+        process._heartbeat_until_stop = heartbeat
+
+        with pytest.raises(RuntimeError, match="renew failed"):
+            await process._run_session(claim, None)
 
     asyncio.run(scenario())
