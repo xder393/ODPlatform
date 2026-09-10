@@ -55,6 +55,7 @@ from odp_api.modules.tasks.retention import (
     StreamRetentionPolicy,
 )
 from odp_api.ports.frame_sources import FrameSource
+from odp_api.ports.inspection_sessions import ClaimedInspectionSession
 from odp_api.ports.storage import ObjectStoragePort
 from odp_api.ports.vision import FrameInput, VisionInferencePort
 from odp_api.processes.frame_ingestor import FrameIngestor
@@ -227,11 +228,23 @@ class DatabaseIngestionHealth(IngestionHealthPort):
         )
 
 
-def source_from_session(session) -> FrameSource:
-    """Resolve only the three validated source types persisted by the API."""
+def source_from_session(claimed: ClaimedInspectionSession) -> FrameSource:
+    """Resolve a claimed source and resume after its persisted sequence high-water mark."""
 
+    # Keep accepting a plain session for old composition tests while all live
+    # ingestor calls pass the complete claim envelope.
+    if isinstance(claimed, ClaimedInspectionSession) or hasattr(claimed, "session"):
+        session = claimed.session
+        initial_sequence = getattr(claimed, "initial_sequence", 0)
+    else:
+        session = claimed
+        initial_sequence = 0
     source_type = str(session.source_type).strip().upper()
-    kwargs = {"camera_id": session.camera_id, "session_id": session.session_id}
+    kwargs = {
+        "camera_id": session.camera_id,
+        "session_id": session.session_id,
+        "initial_sequence": initial_sequence,
+    }
     if source_type == "RECORDED":
         return RecordedVideoSource(session.sanitized_uri, **kwargs)
     if source_type == "RTSP":
@@ -251,7 +264,10 @@ def build_ingestor(settings: IngestorSettings) -> FrameIngestor:
     storage = build_storage(settings)
     _verify_model_file(settings.model_path, settings.model_sha256)
     repository = SqlAlchemyTaskControlRepository(sessions)
-    session_repository = SqlAlchemyInspectionSessionRepository(sessions)
+    session_repository = SqlAlchemyInspectionSessionRepository(
+        sessions,
+        lease_duration=settings.ingestion_lease_seconds,
+    )
     if not settings.redis_url:
         raise ValueError("ODP_REDIS_URL is required")
     health = DatabaseIngestionHealth(
@@ -266,7 +282,8 @@ def build_ingestor(settings: IngestorSettings) -> FrameIngestor:
         lambda _session: ArtifactSaga(repository, storage),
         process_id=_process_id("frame-ingestor"),
         instance_id=uuid4(),
-        heartbeat_interval_seconds=max(1.0, settings.lease_seconds / 4),
+        heartbeat_interval_seconds=settings.ingestion_heartbeat_seconds,
+        poll_interval_seconds=settings.ingestion_poll_seconds,
     )
 
 

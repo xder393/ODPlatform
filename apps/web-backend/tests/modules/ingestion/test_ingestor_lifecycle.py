@@ -4,12 +4,20 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 from uuid import uuid4
 
+import pytest
+
 from odp_api.ports.inspection_sessions import IngestionClaim
 from odp_api.processes.frame_ingestor import FrameIngestor
 
 
 def claimed(name):
-    session = SimpleNamespace(session_id=name)
+    session = SimpleNamespace(
+        session_id=name,
+        organization_id=uuid4(),
+        camera_id=uuid4(),
+        source_type="RECORDED",
+        sanitized_uri="/safe/fixture.mp4",
+    )
     return SimpleNamespace(
         session=session,
         session_id=name,
@@ -22,7 +30,8 @@ def test_claimed_cameras_start_concurrently():
         both_started = asyncio.Event()
         seen = []
 
-        async def run_session(session, max_frames):
+        async def run_session(claimed_session, max_frames):
+            session = claimed_session.session
             seen.append(session.session_id)
             if len(seen) == 2:
                 both_started.set()
@@ -33,8 +42,9 @@ def test_claimed_cameras_start_concurrently():
             claim_available=lambda *args: [
                 claimed("first"), claimed("second")
             ],
-            claim_stop_requests=lambda *args: [],
-            mark_failed=lambda *args: True,
+            stop_candidates=lambda *args: [],
+            finalize_expired_stops=lambda *args: 0,
+            release=lambda *args: True,
         )
         process = FrameIngestor(
             sessions, None, None, None, None, process_id="test", instance_id=uuid4()
@@ -56,25 +66,27 @@ def test_stop_one_camera_releases_slot_without_stopping_other_camera():
         opened, closed = set(), set()
         claims = 0
         delivered_stop = False
+        claimed_sessions = {name: claimed(name) for name in ("one", "two", "three")}
 
         def claim(owner, instance_id, limit):
             nonlocal claims
             claims += 1
             if claims == 1:
                 assert limit == 2
-                return [claimed(name) for name in ("one", "two")]
+                return [claimed_sessions[name] for name in ("one", "two")]
             assert limit == 1
             assert "one" in closed
-            return [claimed("three")]
+            return [claimed_sessions["three"]]
 
-        def stops(*args):
+        def stops(instance_id, limit):
             nonlocal delivered_stop
             if request_stop.is_set() and not delivered_stop:
                 delivered_stop = True
-                return [SimpleNamespace(session_id="one")]
+                return [claimed_sessions["one"].claim]
             return []
 
-        async def stream(session, max_frames):
+        async def stream(claimed_session, max_frames):
+            session = claimed_session.session
             name = session.session_id
             opened.add(name)
             if {"one", "two"} <= opened:
@@ -86,7 +98,13 @@ def test_stop_one_camera_releases_slot_without_stopping_other_camera():
             finally:
                 closed.add(name)
 
-        sessions = SimpleNamespace(claim_available=claim, claim_stop_requests=stops)
+        sessions = SimpleNamespace(
+            claim_available=claim,
+            stop_candidates=stops,
+            finalize_expired_stops=lambda *args: 0,
+            finish_stop=Mock(return_value=True),
+            release=Mock(return_value=True),
+        )
         process = FrameIngestor(
             sessions, None, None, None, None, process_id="test",
             instance_id=uuid4(),
@@ -115,7 +133,7 @@ def test_process_runs_and_drains_active_iteration_on_stop():
         drained = asyncio.Event()
         stop = asyncio.Event()
 
-        async def step(session, max_frames):
+        async def step(claimed_session, max_frames):
             started.set()
             try:
                 await asyncio.Event().wait()
@@ -124,7 +142,9 @@ def test_process_runs_and_drains_active_iteration_on_stop():
 
         sessions = SimpleNamespace(
             claim_available=Mock(side_effect=[[claimed("one")], []]),
-            claim_stop_requests=Mock(return_value=[]),
+            stop_candidates=Mock(return_value=[]),
+            finalize_expired_stops=Mock(return_value=0),
+            release=Mock(return_value=True),
         )
         process = FrameIngestor(
             sessions, None, None, None, None, process_id="test", instance_id=uuid4()
@@ -174,7 +194,8 @@ def test_running_stream_does_not_block_later_camera_and_capacity_is_bounded():
                 return [claimed("second")]
             raise AssertionError("claimed more sessions while capacity was full")
 
-        async def run_session(session, max_frames):
+        async def run_session(claimed_session, max_frames):
+            session = claimed_session.session
             (first_started if session.session_id == "first" else second_started).set()
             try:
                 await asyncio.Event().wait()
@@ -183,7 +204,9 @@ def test_running_stream_does_not_block_later_camera_and_capacity_is_bounded():
 
         sessions = SimpleNamespace(
             claim_available=claim,
-            claim_stop_requests=Mock(return_value=[]),
+            stop_candidates=Mock(return_value=[]),
+            finalize_expired_stops=Mock(return_value=0),
+            release=Mock(return_value=True),
         )
         process = FrameIngestor(
             sessions, None, None, None, None, process_id="test",
@@ -196,12 +219,70 @@ def test_running_stream_does_not_block_later_camera_and_capacity_is_bounded():
             await asyncio.wait_for(second_started.wait(), 1)
             await asyncio.sleep(0.04)
             assert seen_limits == [2, 1]
-            assert sessions.claim_stop_requests.call_count >= 3
+            assert sessions.stop_candidates.call_count >= 3
             stop.set()
             await asyncio.wait_for(running, 1)
             assert set(drained) == {"first", "second"}
         finally:
             running.cancel()
             await asyncio.gather(running, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("renew_result", [False, RuntimeError("database unavailable")])
+def test_renew_loss_stops_ingestion_and_closes_source(renew_result):
+    async def scenario():
+        started = asyncio.Event()
+        drained = asyncio.Event()
+        closed = asyncio.Event()
+        claim = claimed("camera")
+
+        class Source:
+            async def frames(self):
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    drained.set()
+                yield None
+
+            async def close(self):
+                closed.set()
+
+        class Ingestion:
+            async def run(self, source, **_kwargs):
+                async for _frame in source.frames():
+                    pass
+
+        def renew(_claim):
+            if isinstance(renew_result, BaseException):
+                raise renew_result
+            return renew_result
+
+        sessions = SimpleNamespace(
+            renew=renew,
+            fail_claim=Mock(return_value=False),
+        )
+        source = Source()
+        process = FrameIngestor(
+            sessions,
+            Ingestion(),
+            None,
+            lambda received: source if received is claim else pytest.fail("claim was not passed to source factory"),
+            lambda _session: None,
+            process_id="test",
+            instance_id=uuid4(),
+            heartbeat_interval_seconds=0.001,
+        )
+
+        task = asyncio.create_task(process._run_claimed(claim, None))
+        await asyncio.wait_for(started.wait(), 1)
+        result = await asyncio.wait_for(
+            asyncio.gather(task, return_exceptions=True), 1
+        )
+        assert isinstance(result[0], BaseException)
+        assert drained.is_set()
+        assert closed.is_set()
 
     asyncio.run(scenario())

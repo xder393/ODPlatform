@@ -1,5 +1,6 @@
 """Guarded database-owned source-session transitions."""
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -47,14 +48,15 @@ def _seed(repository, status="START_REQUESTED"):
     return session_id
 
 
-def test_claim_start_is_atomic_and_heartbeat_is_status_guarded(repository):
+def test_claim_available_is_atomic_and_renew_is_status_guarded(repository):
     session_id = _seed(repository)
+    instance_id = uuid4()
 
-    claimed = repository.claim_start_requests("ingestor-1", 10)
-    assert [item.session_id for item in claimed] == [session_id]
-    assert claimed[0].status == "RUNNING"
-    assert not repository.heartbeat(session_id, "other-ingestor", NOW)
-    assert repository.heartbeat(session_id, "ingestor-1", NOW)
+    claimed = repository.claim_available("ingestor-1", instance_id, 10)
+    assert [item.session.session_id for item in claimed] == [session_id]
+    assert claimed[0].session.status == "RUNNING"
+    assert not repository.renew(replace(claimed[0].claim, owner_instance_id=uuid4()))
+    assert repository.renew(claimed[0].claim)
 
     with repository._session_factory() as session:
         row = session.get(InspectionSessionRow, session_id)
@@ -64,17 +66,18 @@ def test_claim_start_is_atomic_and_heartbeat_is_status_guarded(repository):
     with repository._session_factory() as session:
         session.get(InspectionSessionRow, session_id).status = "STOP_REQUESTED"
         session.commit()
-    assert not repository.heartbeat(session_id, "ingestor-1", NOW)
+    assert not repository.renew(claimed[0].claim)
 
 
 def test_stop_claim_and_failure_transition_are_durable(repository):
     session_id = _seed(repository)
-    repository.claim_start_requests("ingestor-1", 10)
+    instance_id = uuid4()
+    claimed = repository.claim_available("ingestor-1", instance_id, 10)[0]
     with repository._session_factory() as session:
         session.get(InspectionSessionRow, session_id).status = "STOP_REQUESTED"
         session.commit()
 
-    stopped = repository.claim_stop_requests("ingestor-1", 10)
+    stopped = repository.stop_candidates(instance_id, 10)
     assert [item.session_id for item in stopped] == [session_id]
-    assert stopped[0].status == "STOPPED"
-    assert not repository.mark_failed(session_id, "ingestor-1", "LATE", "too late", NOW)
+    assert repository.finish_stop(stopped[0])
+    assert not repository.fail_claim(claimed.claim, "LATE", "too late")

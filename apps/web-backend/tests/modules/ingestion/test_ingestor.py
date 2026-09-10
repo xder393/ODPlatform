@@ -82,6 +82,30 @@ def test_recorded_video_uses_current_loop_wall_clock():
     assert captures[0].released
 
 
+def test_recorded_video_resumes_after_claimed_sequence_high_water_mark():
+    from odp_api.adapters.frame_sources.opencv import RecordedVideoSource
+
+    async def read_frames():
+        source = RecordedVideoSource(
+            "fixture.mp4",
+            camera_id=uuid4(),
+            session_id=uuid4(),
+            initial_sequence=9,
+            capture_factory=lambda _path: FakeCapture([b"first", b"second"]),
+        )
+        try:
+            return [
+                (await anext(source.frames())).sequence,
+                (await anext(source.frames())).sequence,
+            ]
+        finally:
+            await source.close()
+
+    import asyncio
+
+    assert asyncio.run(read_frames()) == [10, 11]
+
+
 def test_ingestor_samples_before_encoding_and_rejects_without_upload():
     camera_id, session_id, organization_id = uuid4(), uuid4(), uuid4()
     claim = IngestionClaim(organization_id, camera_id, session_id, uuid4(), 1)
@@ -265,11 +289,13 @@ def test_frame_ingestor_uses_database_session_claim_and_sanitizes_credentials():
         def renew(self, _claim):
             return True
 
-        def claim_stop_requests(self, process_id, limit):
+        def stop_candidates(self, instance_id, limit):
             return []
 
-        def fail_claim(self, *args):
-            self.closed = True
+        def finalize_expired_stops(self, limit):
+            return 0
+
+        def release(self, _claim):
             return True
 
     class Source:

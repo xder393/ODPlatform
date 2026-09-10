@@ -7,7 +7,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from odp_api.adapters.persistence.ingestion_ownership import (
@@ -304,107 +304,6 @@ class SqlAlchemyInspectionSessionRepository(InspectionSessionPort):
             except BaseException:
                 session.rollback()
                 raise
-
-    def claim_start_requests(self, process_id: str, limit: int) -> list[InspectionSession]:
-        _validate_process_and_limit(process_id, limit)
-        with self._session_factory() as session:
-            try:
-                now = self._db_now(session)
-                rows = session.scalars(
-                    select(InspectionSessionRow)
-                    .where(InspectionSessionRow.status == "START_REQUESTED")
-                    .order_by(InspectionSessionRow.created_at, InspectionSessionRow.session_id)
-                    .limit(limit)
-                    .with_for_update(skip_locked=True)
-                ).all()
-                for row in rows:
-                    row.status = "RUNNING"
-                    row.ingestor_process_id = process_id
-                    row.started_at = now
-                    row.heartbeat_at = now
-                    row.error_code = None
-                    row.error_detail = None
-                    row.updated_at = now
-                result = [_session_from_row(row) for row in rows]
-                session.commit()
-                return result
-            except BaseException:
-                session.rollback()
-                raise
-
-    def heartbeat(self, session_id, process_id: str, now: datetime) -> bool:
-        _validate_process(process_id)
-        with self._session_factory() as session:
-            current = self._db_now(session)
-            result = session.execute(
-                update(InspectionSessionRow)
-                .where(
-                    InspectionSessionRow.session_id == session_id,
-                    InspectionSessionRow.status == "RUNNING",
-                    InspectionSessionRow.ingestor_process_id == process_id,
-                )
-                .values(heartbeat_at=current, updated_at=current)
-            )
-            session.commit()
-            return result.rowcount == 1
-
-    def claim_stop_requests(self, process_id: str, limit: int) -> list[InspectionSession]:
-        _validate_process_and_limit(process_id, limit)
-        with self._session_factory() as session:
-            try:
-                now = self._db_now(session)
-                rows = session.scalars(
-                    select(InspectionSessionRow)
-                    .where(
-                        InspectionSessionRow.status == "STOP_REQUESTED",
-                        (InspectionSessionRow.ingestor_process_id.is_(None))
-                        | (InspectionSessionRow.ingestor_process_id == process_id),
-                    )
-                    .order_by(InspectionSessionRow.updated_at, InspectionSessionRow.session_id)
-                    .limit(limit)
-                    .with_for_update(skip_locked=True)
-                ).all()
-                for row in rows:
-                    row.status = "STOPPED"
-                    row.ingestor_process_id = process_id
-                    row.stopped_at = now
-                    row.updated_at = now
-                result = [_session_from_row(row) for row in rows]
-                session.commit()
-                return result
-            except BaseException:
-                session.rollback()
-                raise
-
-    def mark_failed(
-        self,
-        session_id,
-        process_id: str,
-        error_code: str,
-        detail: str,
-        now: datetime,
-    ) -> bool:
-        _validate_process(process_id)
-        if not error_code.strip() or not detail.strip():
-            raise ValueError("session failure code and detail are required")
-        with self._session_factory() as session:
-            current = self._db_now(session)
-            result = session.execute(
-                update(InspectionSessionRow)
-                .where(
-                    InspectionSessionRow.session_id == session_id,
-                    InspectionSessionRow.status.in_(("START_REQUESTED", "RUNNING")),
-                    InspectionSessionRow.ingestor_process_id == process_id,
-                )
-                .values(
-                    status="FAILED",
-                    error_code=error_code[:128],
-                    error_detail=detail[:4096],
-                    updated_at=current,
-                )
-            )
-            session.commit()
-            return result.rowcount == 1
 
     def _db_now(self, session: Session) -> datetime:
         return database_now(session, self._clock)

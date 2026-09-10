@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
@@ -53,16 +51,6 @@ class InspectionSessionPort(Protocol):
     def release(self, claim: IngestionClaim) -> bool: ...
 
     def fail_claim(self, claim: IngestionClaim, error_code: str, detail: str) -> bool: ...
-
-    def claim_start_requests(self, process_id: str, limit: int) -> Sequence[InspectionSession]: ...
-
-    def heartbeat(self, session_id: UUID, process_id: str, now: datetime) -> bool: ...
-
-    def claim_stop_requests(self, process_id: str, limit: int) -> Sequence[InspectionSession]: ...
-
-    def mark_failed(
-        self, session_id: UUID, process_id: str, error_code: str, detail: str, now: datetime
-    ) -> bool: ...
 
 
 __all__ = [
