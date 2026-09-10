@@ -2,10 +2,11 @@
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import sessionmaker
 
 from odp_api.adapters.persistence.inspection_sessions import (
@@ -20,6 +21,12 @@ from odp_api.adapters.persistence.task_models import (
     InspectionSessionRow,
     OutboxEventRow,
 )
+from odp_api.modules.ingestion.artifacts import (
+    ArtifactHealth,
+    ArtifactSaga,
+    SelectedFrame,
+)
+from odp_api.modules.ingestion.reconciler import ArtifactReconciler
 from odp_api.modules.tasks.models import ArtifactState
 from odp_api.ports.storage import ObjectMetadata
 from odp_api.ports.tasks import AdmissionRejected, AdmissionRequest
@@ -109,6 +116,39 @@ def test_old_generation_cannot_complete_upload_after_session_reclaim(fenced_repo
         assert session.scalar(
             select(OutboxEventRow).where(OutboxEventRow.task_id.is_not(None))
         ) is None
+
+
+def test_old_generation_cannot_reserve_after_session_reclaim(fenced_repositories):
+    sessions, clock, ownership, admission, organization_id, camera_id, session_id = (
+        fenced_repositories
+    )
+    old_claim = ownership.claim_available("old", uuid4(), 1)[0].claim
+    first = AdmissionRequest(
+        organization_id=organization_id,
+        camera_id=camera_id,
+        stream_session_id=session_id,
+        frame_sequence=10,
+        captured_at=NOW,
+        content_sha256="a" * 64,
+        correlation_id=uuid4(),
+        claim=old_claim,
+    )
+    reservation = admission.reserve(first, NOW)
+
+    clock[0] = NOW + timedelta(seconds=6)
+    replacement = ownership.claim_available("new", uuid4(), 1)[0].claim
+    assert replacement.generation == old_claim.generation + 1
+
+    with pytest.raises(AdmissionRejected, match="INGESTION_LEASE_LOST"):
+        admission.reserve(replace(first, frame_sequence=11), clock[0])
+
+    with sessions() as session:
+        artifacts = session.scalars(select(FrameArtifactRow)).all()
+        state = session.get(CameraInferenceStateRow, (organization_id, camera_id))
+        inspection = session.get(InspectionSessionRow, session_id)
+        assert [artifact.artifact_id for artifact in artifacts] == [reservation.artifact_id]
+        assert state.reservation_id == reservation.reservation_id
+        assert inspection.last_reserved_sequence == 10
 
 
 def test_reconciler_cannot_promote_old_generation_after_session_reclaim(fenced_repositories):
@@ -237,6 +277,10 @@ def test_failed_object_cleanup_retries_without_releasing_new_reservation(fenced_
         def __init__(self):
             self.attempts = 0
 
+        def head(self, object_key):
+            del object_key
+            raise AssertionError("failed ownership candidate must skip HEAD")
+
         def delete(self, object_key):
             del object_key
             self.attempts += 1
@@ -244,17 +288,19 @@ def test_failed_object_cleanup_retries_without_releasing_new_reservation(fenced_
                 raise OSError("temporary delete failure")
 
     storage = RetryDeleteStorage()
-    candidates = admission.cleanup_candidates(clock[0], 10)
-    assert [candidate.artifact_id for candidate in candidates] == [old_reservation.artifact_id]
-
-    with pytest.raises(OSError, match="temporary delete failure"):
-        storage.delete(candidates[0].object_key)
+    reconciler = ArtifactReconciler(admission, storage)
+    # Keep the newer PENDING reservation newer than this recovery snapshot so
+    # the reconciler exercises only the old cleanup candidate.
+    first = reconciler.run_once(NOW)
+    assert first.deleted == 0
+    assert storage.attempts == 1
     with sessions() as session:
         assert session.get(FrameArtifactRow, old_reservation.artifact_id).state == ArtifactState.FAILED.value
         assert session.get(CameraInferenceStateRow, (organization_id, camera_id)).reservation_id == new_reservation.reservation_id
 
-    storage.delete(candidates[0].object_key)
-    assert admission.mark_artifact_deleted(candidates[0], clock[0])
+    second = reconciler.run_once(NOW)
+    assert second.deleted == 1
+    assert storage.attempts == 2
     with sessions() as session:
         assert session.get(FrameArtifactRow, old_reservation.artifact_id).state == ArtifactState.DELETED.value
         assert session.get(CameraInferenceStateRow, (organization_id, camera_id)).reservation_id == new_reservation.reservation_id
@@ -276,6 +322,29 @@ def test_reserve_rejects_cross_camera_claim(fenced_repositories):
                 content_sha256="a" * 64,
                 correlation_id=uuid4(),
                 claim=replace(claim, camera_id=uuid4()),
+            ),
+            clock[0],
+        )
+    with sessions() as session:
+        assert session.scalar(select(FrameArtifactRow)) is None
+
+
+def test_reserve_rejects_cross_tenant_claim(fenced_repositories):
+    sessions, clock, ownership, admission, organization_id, camera_id, session_id = (
+        fenced_repositories
+    )
+    claim = ownership.claim_available("old", uuid4(), 1)[0].claim
+    with pytest.raises(AdmissionRejected, match="INGESTION_LEASE_LOST"):
+        admission.reserve(
+            AdmissionRequest(
+                organization_id=organization_id,
+                camera_id=camera_id,
+                stream_session_id=session_id,
+                frame_sequence=10,
+                captured_at=clock[0],
+                content_sha256="a" * 64,
+                correlation_id=uuid4(),
+                claim=replace(claim, organization_id=uuid4()),
             ),
             clock[0],
         )
@@ -348,3 +417,132 @@ def test_high_water_rejects_reused_sequence_but_allows_same_content_later(fenced
         admission.reserve(request, clock[0])
     with sessions() as session:
         assert session.get(InspectionSessionRow, session_id).last_reserved_sequence == 11
+
+
+def test_same_sequence_different_content_is_rejected(fenced_repositories):
+    sessions, clock, ownership, admission, organization_id, camera_id, session_id = (
+        fenced_repositories
+    )
+    claim = ownership.claim_available("old", uuid4(), 1)[0].claim
+    request = AdmissionRequest(
+        organization_id=organization_id,
+        camera_id=camera_id,
+        stream_session_id=session_id,
+        frame_sequence=10,
+        captured_at=clock[0],
+        content_sha256="a" * 64,
+        correlation_id=uuid4(),
+        claim=claim,
+    )
+    reservation = admission.reserve(request, clock[0])
+
+    with pytest.raises(AdmissionRejected, match="FRAME_ALREADY_ADMITTED"):
+        admission.reserve(replace(request, content_sha256="b" * 64), clock[0])
+
+    with sessions() as session:
+        artifacts = session.scalars(select(FrameArtifactRow)).all()
+        assert [artifact.artifact_id for artifact in artifacts] == [reservation.artifact_id]
+        assert session.get(InspectionSessionRow, session_id).last_reserved_sequence == 10
+
+
+def test_failed_reserve_transaction_does_not_advance_high_water(fenced_repositories):
+    sessions, clock, ownership, admission, organization_id, camera_id, session_id = (
+        fenced_repositories
+    )
+    claim = ownership.claim_available("old", uuid4(), 1)[0].claim
+    request = AdmissionRequest(
+        organization_id=organization_id,
+        camera_id=camera_id,
+        stream_session_id=session_id,
+        frame_sequence=10,
+        captured_at=clock[0],
+        content_sha256="a" * 64,
+        correlation_id=uuid4(),
+        claim=claim,
+    )
+
+    def fail_flush(_session, _flush_context):
+        raise RuntimeError("forced reserve transaction failure")
+
+    event.listen(sessions.class_, "after_flush", fail_flush)
+    try:
+        with pytest.raises(RuntimeError, match="forced reserve transaction failure"):
+            admission.reserve(request, clock[0])
+    finally:
+        event.remove(sessions.class_, "after_flush", fail_flush)
+
+    with sessions() as session:
+        assert session.scalar(select(FrameArtifactRow)) is None
+        assert session.get(InspectionSessionRow, session_id).last_reserved_sequence == 0
+
+
+def test_saga_failed_upload_cleanup_retries_through_reconciler(fenced_repositories):
+    sessions, clock, ownership, admission, organization_id, camera_id, session_id = (
+        fenced_repositories
+    )
+    claim = ownership.claim_available("old", uuid4(), 1)[0].claim
+    content = b"jpeg-bytes"
+    digest = sha256(content).hexdigest()
+
+    class DeleteRetryStorage:
+        def __init__(self):
+            self.objects = {}
+            self.delete_attempts = 0
+
+        def put(self, object_key, value, *, sha256, content_type="application/octet-stream"):
+            del content_type
+            self.objects[object_key] = ObjectMetadata(object_key, len(value), sha256)
+
+        def head(self, object_key):
+            stored = self.objects.get(object_key)
+            if stored is None:
+                return None
+            return ObjectMetadata(object_key, stored.content_length + 1, stored.sha256)
+
+        def delete(self, object_key):
+            self.delete_attempts += 1
+            if self.delete_attempts < 3:
+                raise OSError("temporary delete failure")
+            self.objects.pop(object_key, None)
+
+    storage = DeleteRetryStorage()
+    saga = ArtifactSaga(admission, storage)
+    selected = SelectedFrame(
+        organization_id=organization_id,
+        camera_id=camera_id,
+        stream_session_id=session_id,
+        frame_sequence=10,
+        captured_at=clock[0],
+        content=content,
+        correlation_id=uuid4(),
+        claim=claim,
+    )
+
+    result = saga.ingest(
+        selected,
+        ArtifactHealth(worker_healthy=True, redis_available=True),
+        clock[0],
+    )
+
+    assert isinstance(result, AdmissionRejected)
+    assert result.reason == "STORAGE_UPLOAD_FAILED"
+    assert storage.delete_attempts == 1
+    with sessions() as session:
+        artifact = session.scalar(select(FrameArtifactRow))
+        assert artifact.state == ArtifactState.FAILED.value
+        assert artifact.lifecycle == "PROCESSING"
+        assert artifact.error_code == "STORAGE_UPLOAD_FAILED"
+        assert artifact.sha256 == digest
+
+    reconciler = ArtifactReconciler(admission, storage)
+    first = reconciler.run_once(clock[0])
+    assert first.deleted == 0
+    assert storage.delete_attempts == 2
+    with sessions() as session:
+        assert session.scalar(select(FrameArtifactRow)).state == ArtifactState.FAILED.value
+
+    second = reconciler.run_once(clock[0])
+    assert second.deleted == 1
+    assert storage.delete_attempts == 3
+    with sessions() as session:
+        assert session.scalar(select(FrameArtifactRow)).state == ArtifactState.DELETED.value

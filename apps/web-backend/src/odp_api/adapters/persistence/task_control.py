@@ -72,6 +72,10 @@ EVENT_SCHEMA_VERSION = 1
 REDISPATCH_AFTER_SECONDS = 10
 MAX_QUARANTINE_PAYLOAD_BYTES = 65536
 RECOVERY_BATCH_SIZE = 100
+RETRYABLE_UPLOAD_FAILURE_CODES = (
+    "INGESTION_LEASE_LOST",
+    "STORAGE_UPLOAD_FAILED",
+)
 
 
 class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
@@ -457,7 +461,7 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                         and_(
                             FrameArtifactRow.state == ArtifactState.FAILED.value,
                             FrameArtifactRow.lifecycle == ArtifactLifecycle.PROCESSING.value,
-                            FrameArtifactRow.error_code == "INGESTION_LEASE_LOST",
+                            FrameArtifactRow.error_code.in_(RETRYABLE_UPLOAD_FAILURE_CODES),
                         ),
                     ),
                 )
@@ -479,7 +483,7 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                         row,
                         referenced=referenced,
                         cleanup_reason=(
-                            "INGESTION_LEASE_LOST"
+                            row.error_code
                             if row.state == ArtifactState.FAILED.value
                             else "RETENTION_EXPIRED"
                         ),
@@ -530,7 +534,7 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                 is_failed_processing = (
                     artifact.state == ArtifactState.FAILED.value
                     and artifact.lifecycle == ArtifactLifecycle.PROCESSING.value
-                    and artifact.error_code == "INGESTION_LEASE_LOST"
+                    and artifact.error_code in RETRYABLE_UPLOAD_FAILURE_CODES
                 )
                 if not (is_expired_evidence or is_failed_processing):
                     session.commit()

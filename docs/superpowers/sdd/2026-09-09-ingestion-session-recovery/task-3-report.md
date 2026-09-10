@@ -143,3 +143,48 @@ PostgreSQL-serialization, and recorded-video tests.
   existing skipped tests unless that environment is supplied to the full run.
 - Legacy stop polling and broader lifecycle/recovery supervision remain
   intentionally out of scope for Task 3 and belong to Task 4.
+
+## Reviewer follow-up (round 1/5)
+
+The compensation review found that a post-upload metadata failure could leave
+an object behind when the immediate delete failed: the row was
+`FAILED`/`PROCESSING` with `STORAGE_UPLOAD_FAILED`, but cleanup selected only
+`INGESTION_LEASE_LOST`. The durable cleanup ledger now selects exactly those
+two upload-failure reasons, carries the persisted/deterministic object key,
+and applies the existing unreferenced, live-task, AVAILABLE-evidence, and
+exact-reservation protections before deletion.
+
+New RED command:
+
+```text
+PYTHONPATH=src:../../packages/shared-schemas/src /tmp/odp-lock-check.4s64E6/venv/bin/pytest -q tests/persistence/test_ingestion_admission_fencing.py::test_saga_failed_upload_cleanup_retries_through_reconciler
+```
+
+Observed RED: `1 failed in 0.43s`; the first real `ArtifactReconciler.run_once`
+retry did not select the failed row (`delete_attempts` remained `1` instead of
+`2`).
+
+GREEN command and result:
+
+```text
+PYTHONPATH=src:../../packages/shared-schemas/src /tmp/odp-lock-check.4s64E6/venv/bin/pytest -q tests/persistence/test_ingestion_admission_fencing.py::test_saga_failed_upload_cleanup_retries_through_reconciler
+1 passed in 0.43s
+```
+
+The persisted fencing suite now also has independent stale-reserve,
+cross-tenant-claim, same-sequence/different-content, and failed-reserve-
+transaction high-water regressions. The existing newer-reservation cleanup
+case now invokes the real `ArtifactReconciler.run_once` twice: the first
+storage exception leaves the FAILED row and newer reservation intact, and the
+second retry marks only the old row DELETED.
+
+Focused follow-up command:
+
+```text
+PYTHONPATH=src:../../packages/shared-schemas/src /tmp/odp-lock-check.4s64E6/venv/bin/pytest -q tests/persistence/test_ingestion_admission_fencing.py tests/persistence/test_artifact_reconciliation.py tests/modules/ingestion/test_artifact_saga.py tests/modules/ingestion/test_artifact_reconciler.py
+```
+
+Result: `27 passed in 0.62s`. Full-suite rerun was intentionally not repeated
+for this narrow review fix; the prior elevated full result remains
+`472 passed, 61 skipped`, and the dedicated PostgreSQL result remains
+`3 passed in 1.18s`.
