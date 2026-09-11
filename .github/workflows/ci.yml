@@ -112,7 +112,7 @@ jobs:
             python -m odp_api.seed_knowledge
 
       - name: Lint web backend
-        run: ruff check apps/web-backend/src apps/web-backend/tests
+        run: ruff check apps/web-backend/src apps/web-backend/tests apps/web-backend/scripts/verify_evidence_persistence.py
 
       - name: Run tests
         run: pytest apps/web-backend/tests -q
@@ -194,6 +194,13 @@ jobs:
           done
           echo "API did not become healthy in time" >&2
           exit 1
+
+      - name: Verify evidence volume across Compose down and up
+        env:
+          ODP_DOCKER_RUNTIME_TEST: "1"
+        # Start services above has already pulled MinIO on a clean runner.
+        # The regression itself stays offline and uses its own disposable project.
+        run: uvx --from pytest==9.1.1 pytest -q apps/web-backend/tests/integration/test_compose_evidence_volume.py
 
       - uses: actions/setup-node@v4
         with:
@@ -312,6 +319,71 @@ jobs:
           assert any(case["status"] == "RESOLVED" and case["history"] for case in cases), cases
           PY
 
+      - name: Recreate stack and verify original case evidence
+        timeout-minutes: 5
+        run: |
+          state_path=/workspace/recordings/evidence-persistence-state.json
+          # Worker deliberately cannot read case history. Only this observer
+          # subprocess uses the existing API read capability; do not widen grants.
+          docker compose -f deploy/compose.yaml exec -T \
+            -e ODP_DATABASE_URL=postgresql+psycopg://odp_api:odp_api_dev@postgres:5432/odp \
+            -e ODP_ALLOW_COMPOSE_PROBE=disposable frame-ingestor \
+            python /workspace/apps/web-backend/scripts/verify_evidence_persistence.py \
+            prepare --state "$state_path"
+          docker compose -f deploy/compose.yaml cp \
+            "frame-ingestor:$state_path" ./evidence-persistence-state.json
+          docker compose -f deploy/compose.yaml logs --no-color > compose-before-recreate.log
+          # Intentional down/up, not restart: anonymous volumes are not reattached.
+          # Only this job-scoped disposable project is affected. Never use -v here.
+          docker compose -f deploy/compose.yaml down
+          docker compose -f deploy/compose.yaml up -d --no-build --pull never
+          ready=0
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8080/healthz > /dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          test "$ready" = 1
+          docker compose -f deploy/compose.yaml exec -T \
+            -e ODP_DATABASE_URL=postgresql+psycopg://odp_api:odp_api_dev@postgres:5432/odp \
+            -e ODP_ALLOW_COMPOSE_PROBE=disposable frame-ingestor \
+            python /workspace/apps/web-backend/scripts/verify_evidence_persistence.py \
+            verify --state "$state_path"
+          # A fresh login and presign must still reach the same evidence from
+          # outside the containers; do not reuse a pre-recreation signed URL.
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          from urllib.request import Request, urlopen
+
+          state = json.loads(Path("evidence-persistence-state.json").read_text())
+          base = "http://localhost:8080"
+          login = Request(
+              f"{base}/api/v1/auth/login",
+              data=json.dumps({"email": "inspector@example.test", "password": "odp-inspector-dev"}).encode(),
+              headers={"Content-Type": "application/json"},
+          )
+          with urlopen(login, timeout=10) as response:
+              token = json.load(response)["access_token"]
+          headers = {"Authorization": f"Bearer {token}"}
+          with urlopen(Request(f"{base}/api/v1/cases", headers=headers), timeout=10) as response:
+              cases = json.load(response)
+          case = next(case for case in cases if case["case_id"] == state["case_id"])
+          assert case["status"] == "RESOLVED" and len(case["history"]) == len(state["history"])
+          endpoint = f"{base}/api/v1/artifacts/{state['artifact_id']}/evidence-url"
+          with urlopen(Request(endpoint, headers=headers), timeout=10) as response:
+              signed = json.load(response)
+          assert signed["expires_in"] == 60
+          with urlopen(signed["url"], timeout=10) as response:
+              content = response.read()
+          assert hashlib.sha256(content).hexdigest() == state["sha256"]
+          assert len(content) == state["content_length"]
+          print("Original case and authenticated evidence download survived stack recreation")
+          PY
+
       - name: Dump compose logs
         if: always()
         run: |
@@ -327,6 +399,8 @@ jobs:
           path: |
             compose-e2e-ps.log
             compose-e2e.log
+            compose-before-recreate.log
+            evidence-persistence-state.json
             apps/web-frontend/test-results/
 
       - name: Tear down services
