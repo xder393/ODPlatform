@@ -318,3 +318,60 @@ not enabled in that full run). This verifies infrastructure with a fixed-output
 synthetic model, not model accuracy, browser workflow, crash recovery, or load SLOs.
 A native read that never returns can still delay close; bounded RTSP I/O remains
 an explicit follow-up rather than releasing a handle underneath an active read.
+
+## Ingestor crash-recovery acceptance
+
+The disposable crash drill exercises a real process boundary. It creates one
+recorded session through the authenticated API, waits for a durable
+artifact/task/result chain, kills only `frame-ingestor`, starts a fresh
+ingestor instance, and verifies takeover under a higher ingestion generation
+and a higher committed frame sequence. It then requests stop through the API
+and requires the database row to remain `STOPPED` for longer than one
+ingestion lease window. The probe is an observer: it never calls an ingestor or
+worker loop directly.
+
+Run it only in a disposable Compose project. The explicit opt-in is required,
+and the state file contains only generated organization/session UUIDs, the
+first generation, and the highest committed sequence; it never contains API
+credentials or tokens.
+
+```sh
+docker compose -p YOUR_RECOVERY_PROJECT -f deploy/compose.yaml up -d --build
+docker compose -p YOUR_RECOVERY_PROJECT -f deploy/compose.yaml exec -T \
+  -e ODP_ALLOW_COMPOSE_PROBE=disposable frame-ingestor \
+  python /workspace/apps/web-backend/scripts/verify_ingestor_recovery.py \
+  prepare --state /workspace/ingestion-recovery-state.json
+docker compose -p YOUR_RECOVERY_PROJECT -f deploy/compose.yaml kill -s SIGKILL frame-ingestor
+docker compose -p YOUR_RECOVERY_PROJECT -f deploy/compose.yaml up -d frame-ingestor
+# Wait for the restarted container's dependency installation/imports first.
+docker compose -p YOUR_RECOVERY_PROJECT -f deploy/compose.yaml exec -T \
+  -e ODP_ALLOW_COMPOSE_PROBE=disposable frame-ingestor \
+  python /workspace/apps/web-backend/scripts/verify_ingestor_recovery.py \
+  verify --state /workspace/ingestion-recovery-state.json
+docker compose -p YOUR_RECOVERY_PROJECT -f deploy/compose.yaml down --volumes --remove-orphans
+```
+
+The recorded source is intentionally replayable: a new claim resumes from the
+persisted `last_reserved_sequence`, so a restarted source must produce a
+higher sequence and a newly linked result. This is at-least-once recovery
+evidence, not an exactly-once assertion; duplicate delivery remains harmless
+through the task/result idempotency and fencing contracts. The video path must
+be visible inside the `frame-ingestor` container (the Compose bind mount is
+the supported local setup). A local camera device or host-only path is not
+portable across process containers and is not covered by this drill.
+
+`STOPPED` is a durable session lifecycle outcome: it means the stop request
+was accepted and no new claim can reopen that session. It is not a claim that
+an operating-system camera or OpenCV/RTSP handle was physically closed at the
+same instant. Native OpenCV reads and releases are serialized; cancellation
+may leave a `to_thread` native operation running until it returns. For that
+reason a forced handle release underneath an active read is deliberately not
+used. A native read that never returns can still defer close, and bounded RTSP
+I/O remains a separate operational follow-up.
+
+The GitHub E2E job runs this drill before browser tests with a unique
+job-scoped Compose project, a separate bounded dependency-install wait after
+the kill/restart, and always-on logs/cleanup for that project. No successful
+GitHub crash-drill or browser result is recorded in this document yet; local
+or CI claims must be added only after the corresponding external run and
+diagnostics exist.

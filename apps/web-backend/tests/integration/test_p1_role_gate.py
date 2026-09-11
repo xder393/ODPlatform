@@ -1,16 +1,18 @@
 """Apply production grant SQL to an explicitly disposable PostgreSQL database."""
 
 import os
+import re
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from alembic.config import Config
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
-from odp_api.adapters.persistence import task_models  # noqa: F401
-from odp_api.adapters.persistence.models import Base
+from alembic import command
 from odp_api.database_roles import apply_runtime_grants, bootstrap_runtime_role
 
 URL = os.getenv("ODP_ROLE_GATE_ADMIN_URL")
@@ -19,14 +21,47 @@ pytestmark = pytest.mark.skipif(not URL, reason="requires disposable ODP_ROLE_GA
 
 @pytest.fixture(scope="module")
 def database():
-    engine = create_engine(URL)
-    bootstrap_runtime_role(URL)
-    Base.metadata.create_all(engine)
-    apply_runtime_grants(URL)
+    shared_url = make_url(URL)
+    database_name = f"odp_role_gate_{uuid4().hex}"
+    if re.fullmatch(r"[a-z0-9_]+", database_name) is None:
+        raise AssertionError("generated PostgreSQL test database name is unsafe")
+    admin_engine = create_engine(
+        shared_url.set(database="postgres"), isolation_level="AUTOCOMMIT"
+    )
+    isolated_url = shared_url.set(database=database_name).render_as_string(
+        hide_password=False
+    )
+    isolated_engine = None
+    created = True
     try:
-        yield engine
+        # Bootstrap the cluster-wide login roles against the configured admin
+        # database, then grant those roles on this generated database only.
+        bootstrap_runtime_role(URL)
+        with admin_engine.connect() as connection:
+            connection.exec_driver_sql(f'CREATE DATABASE "{database_name}"')
+
+        config = Config(str(Path(__file__).parents[2] / "alembic.ini"))
+        config.set_main_option("sqlalchemy.url", isolated_url.replace("%", "%%"))
+        command.upgrade(config, "head")
+        apply_runtime_grants(isolated_url)
+        isolated_engine = create_engine(isolated_url)
+        yield isolated_engine
     finally:
-        engine.dispose()
+        if isolated_engine is not None:
+            isolated_engine.dispose()
+        if created:
+            with admin_engine.connect() as connection:
+                connection.execute(
+                    text(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                        "WHERE datname = :database_name AND pid <> pg_backend_pid()"
+                    ),
+                    {"database_name": database_name},
+                )
+                connection.exec_driver_sql(
+                    f'DROP DATABASE IF EXISTS "{database_name}"'
+                )
+        admin_engine.dispose()
 
 
 @pytest.mark.parametrize("role,table,privilege", [
@@ -78,7 +113,9 @@ def test_actual_runtime_queries_use_nonowner_login(database, role):
     from odp_api.modules.inspection_sessions.service import InspectionSessionService
     from odp_api.modules.tasks.recovery import RecoveryService, SystemRecoveryScope
 
-    engine = create_engine(make_url(URL).set(username=role, password=f"{role}_dev"))
+    engine = create_engine(
+        make_url(database.url).set(username=role, password=f"{role}_dev")
+    )
     sessions = sessionmaker(engine, expire_on_commit=False)
     try:
         with engine.connect() as connection:

@@ -221,12 +221,59 @@ def _exercise_migration(database_url: str) -> None:
             assert session_columns["ingestion_generation"]["default"] is not None
             assert session_columns["last_reserved_sequence"]["default"] is not None
 
+            # Assert the physical dialect types, not just ORM metadata.  The
+            # lease/generation values must remain 64-bit on both engines and
+            # the owner/time columns must retain their dialect-specific forms.
+            assert session_columns["ingestion_generation"]["type"].compile(
+                dialect=connection.dialect
+            ).upper() == "BIGINT"
+            assert session_columns["last_reserved_sequence"]["type"].compile(
+                dialect=connection.dialect
+            ).upper() == "BIGINT"
+            if connection.dialect.name == "postgresql":
+                assert session_columns["owner_instance_id"]["type"].compile(
+                    dialect=connection.dialect
+                ).upper() == "UUID"
+                assert session_columns["lease_expires_at"]["type"].compile(
+                    dialect=connection.dialect
+                ).upper() == "TIMESTAMP WITH TIME ZONE"
+            else:
+                assert session_columns["owner_instance_id"]["type"].compile(
+                    dialect=connection.dialect
+                ).upper() == "CHAR(32)"
+                assert session_columns["lease_expires_at"]["type"].compile(
+                    dialect=connection.dialect
+                ).upper() == "DATETIME"
+
             artifact_columns = {
                 column["name"]: column
                 for column in inspect(connection).get_columns("frame_artifacts")
             }
             assert artifact_columns["ingestion_generation"]["nullable"] is False
             assert artifact_columns["ingestion_generation"]["default"] is not None
+            assert artifact_columns["ingestion_generation"]["type"].compile(
+                dialect=connection.dialect
+            ).upper() == "BIGINT"
+
+            unique_constraints = {
+                item["name"]: tuple(item["column_names"])
+                for item in inspect(connection).get_unique_constraints(
+                    "inspection_sessions"
+                )
+            }
+            assert unique_constraints["uq_inspection_session_tenant_key"] == (
+                "organization_id",
+                "idempotency_key",
+            )
+            metadata_unique = next(
+                constraint
+                for constraint in InspectionSessionRow.__table__.constraints
+                if constraint.name == "uq_inspection_session_tenant_key"
+            )
+            assert tuple(column.name for column in metadata_unique.columns) == (
+                "organization_id",
+                "idempotency_key",
+            )
 
             session_indexes = {
                 item["name"]: item
