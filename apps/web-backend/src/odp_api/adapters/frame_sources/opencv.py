@@ -46,6 +46,7 @@ class _OpenCvSource:
         *,
         camera_id: UUID,
         session_id: UUID,
+        initial_sequence: int = 0,
         clock: Clock | None = None,
         capture_factory: Callable[[str | int], Any] | None = None,
         reconnect_delay_seconds: float = 0.5,
@@ -54,6 +55,12 @@ class _OpenCvSource:
     ) -> None:
         if reconnect_delay_seconds <= 0 or max_reconnect_delay_seconds < reconnect_delay_seconds:
             raise ValueError("reconnect delay bounds are invalid")
+        if (
+            isinstance(initial_sequence, bool)
+            or not isinstance(initial_sequence, int)
+            or initial_sequence < 0
+        ):
+            raise ValueError("initial sequence must be a non-negative integer")
         self.source = source
         self.camera_id = camera_id
         self.session_id = session_id
@@ -63,7 +70,7 @@ class _OpenCvSource:
         self._max_reconnect_delay_seconds = max_reconnect_delay_seconds
         self._sleep = sleep
         self._capture: Any | None = None
-        self._sequence = 0
+        self._sequence = initial_sequence
         self._closed = False
         # asyncio cancellation does not stop an in-flight native read. Protect
         # the handle in the worker threads, including close from heartbeat expiry.

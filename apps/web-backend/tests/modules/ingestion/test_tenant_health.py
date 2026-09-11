@@ -18,6 +18,7 @@ from odp_api.adapters.persistence.task_models import (
 from odp_api.modules.ingestion.service import IngestionService
 from odp_api.modules.tasks.models import TaskRecord, TaskStatus
 from odp_api.ports.frame_sources import DecodedFrame
+from odp_api.ports.inspection_sessions import IngestionClaim
 from odp_api.processes.runtime import DatabaseIngestionHealth
 
 
@@ -28,13 +29,13 @@ def test_foreign_backlog_does_not_reject_or_contaminate_local_admission(own_coun
     )
     Base.metadata.create_all(engine)
     sessions = sessionmaker(engine)
-    foreign, local, camera = uuid4(), uuid4(), uuid4()
+    foreign, local, camera, session_id = uuid4(), uuid4(), uuid4(), uuid4()
     now = datetime.now(UTC)
     observed = []
 
     class Source:
         async def frames(self):
-            yield DecodedFrame(camera, uuid4(), 1, now, b"raw")
+            yield DecodedFrame(camera, session_id, 1, now, b"raw")
 
     class Saga:
         def ingest(self, selected, health, timestamp):
@@ -68,7 +69,14 @@ def test_foreign_backlog_does_not_reject_or_contaminate_local_admission(own_coun
         )
         report = asyncio.run(IngestionService(
             SimpleNamespace(encode=lambda frame: b"jpeg"), clock=lambda: now,
-        ).run(Source(), organization_id=local, health=health, saga=Saga(), max_frames=1))
+        ).run(
+            Source(),
+            organization_id=local,
+            health=health,
+            saga=Saga(),
+            claim=IngestionClaim(local, camera, session_id, uuid4(), 1),
+            max_frames=1,
+        ))
         assert report.admitted == 1
         assert report.rejected == 0
         assert observed[0][0] == local

@@ -6,11 +6,15 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, aliased, sessionmaker
 
+from odp_api.adapters.persistence.ingestion_ownership import (
+    database_now,
+    owns_live_session,
+)
 from odp_api.adapters.persistence.models import InspectionEventRow
 from odp_api.adapters.persistence.repositories import SqlAlchemyAuditSessionRepository
 from odp_api.adapters.persistence.task_models import (
@@ -46,6 +50,7 @@ from odp_api.modules.tasks.recovery import (
     ReplayResult,
     SystemRecoveryScope,
 )
+from odp_api.ports.inspection_sessions import IngestionClaim
 from odp_api.ports.storage import ObjectMetadata
 from odp_api.ports.tasks import (
     AdmissionRejected,
@@ -67,6 +72,12 @@ EVENT_SCHEMA_VERSION = 1
 REDISPATCH_AFTER_SECONDS = 10
 MAX_QUARANTINE_PAYLOAD_BYTES = 65536
 RECOVERY_BATCH_SIZE = 100
+CLEANUP_RETRY_DELAY_SECONDS = 30
+RETRYABLE_UPLOAD_FAILURE_CODES = (
+    "INGESTION_LEASE_LOST",
+    "STORAGE_UPLOAD_FAILED",
+    "ADMISSION_RESERVATION_EXPIRED",
+)
 
 
 class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
@@ -93,9 +104,17 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
         _validate_request(request)
         with self._session_factory() as session:
             try:
-                current_time = self._db_now(session)
                 state = self._lock_camera_state(session, request.organization_id, request.camera_id)
-                self._require_session(session, request)
+                session_row = self._lock_session(session, request)
+                current_time = self._db_now(session)
+                _require_live_claim(session_row, request.claim, current_time)
+
+                if (
+                    state.reservation_id is not None
+                    and state.reservation_expires_at is not None
+                    and _as_utc(state.reservation_expires_at) <= current_time
+                ):
+                    self._expire_reservation(session, state, current_time)
 
                 existing = session.scalar(
                     select(FrameArtifactRow)
@@ -111,6 +130,7 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                     if (
                         existing.sha256 == request.content_sha256
                         and existing.state == ArtifactState.PENDING.value
+                        and existing.ingestion_generation == request.claim.generation
                         and state.reservation_id == existing.artifact_id
                     ):
                         session.commit()
@@ -118,13 +138,10 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                     raise AdmissionRejected("FRAME_ALREADY_ADMITTED")
 
                 if state.reservation_id is not None:
-                    if (
-                        state.reservation_expires_at is not None
-                        and _as_utc(state.reservation_expires_at) <= current_time
-                    ):
-                        self._expire_reservation(session, state, current_time)
-                    else:
-                        raise AdmissionRejected("ADMISSION_IN_PROGRESS")
+                    raise AdmissionRejected("ADMISSION_IN_PROGRESS")
+
+                if request.frame_sequence <= int(session_row.last_reserved_sequence or 0):
+                    raise AdmissionRejected("FRAME_SEQUENCE_NOT_ADVANCED")
 
                 ready_count = self._sync_ready_count(session, state)
                 evicted_task_id: UUID | None = None
@@ -146,6 +163,7 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                     camera_id=request.camera_id,
                     stream_session_id=request.stream_session_id,
                     frame_sequence=request.frame_sequence,
+                    ingestion_generation=request.claim.generation,
                     captured_at=_as_utc(request.captured_at),
                     object_key=None,
                     sha256=request.content_sha256,
@@ -161,6 +179,7 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                 state.reservation_expires_at = current_time + timedelta(
                     seconds=RESERVATION_TTL_SECONDS
                 )
+                session_row.last_reserved_sequence = request.frame_sequence
                 state.version += 1
                 state.updated_at = current_time
                 session.commit()
@@ -186,6 +205,8 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
         object_key: str,
         content_length: int,
         now: datetime,
+        *,
+        claim: IngestionClaim,
     ) -> TaskRecord:
         """Promote an uploaded Artifact and create its READY Task and Outbox."""
 
@@ -193,28 +214,48 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
             raise AdmissionRejected("INVALID_OBJECT_KEY")
         if content_length < 0:
             raise AdmissionRejected("INVALID_CONTENT_LENGTH")
+        _validate_claim(claim)
         with self._session_factory() as session:
             try:
-                current_time = self._db_now(session)
-                # The reservation capability identifies the camera row. Lock it
-                # before reading/updating the Artifact to preserve the shared
-                # admission -> claim -> finalize lock order.
-                state = self._lock_camera_state_for_reservation(
-                    session, organization_id, reservation_id
+                # Locate the session through an unlocked artifact identity read;
+                # all authorization and mutation happens after camera -> session
+                # -> artifact locks are acquired.
+                snapshot = session.scalar(
+                    select(FrameArtifactRow).where(
+                        FrameArtifactRow.artifact_id == reservation_id,
+                        FrameArtifactRow.organization_id == organization_id,
+                    )
                 )
-                if state is None or state.reservation_id != reservation_id:
+                if snapshot is None:
                     raise AdmissionRejected("RESERVATION_NOT_FOUND")
+                state = self._lock_camera_state(
+                    session, organization_id, snapshot.camera_id
+                )
+                session_row = self._lock_session_by_identity(
+                    session,
+                    snapshot.organization_id,
+                    snapshot.camera_id,
+                    snapshot.stream_session_id,
+                )
                 artifact = session.scalar(
                     select(FrameArtifactRow)
                     .where(
                         FrameArtifactRow.artifact_id == reservation_id,
-                        FrameArtifactRow.organization_id == state.organization_id,
-                        FrameArtifactRow.camera_id == state.camera_id,
+                        FrameArtifactRow.organization_id == session_row.organization_id,
+                        FrameArtifactRow.camera_id == session_row.camera_id,
                     )
                     .with_for_update()
                 )
                 if artifact is None:
                     raise AdmissionRejected("RESERVATION_NOT_FOUND")
+                current_time = self._db_now(session)
+                _require_live_claim(session_row, claim, current_time)
+                if (
+                    artifact.stream_session_id != session_row.session_id
+                    or artifact.ingestion_generation != claim.generation
+                    or state.reservation_id != reservation_id
+                ):
+                    raise AdmissionRejected("INGESTION_LEASE_LOST")
                 if artifact.state != ArtifactState.PENDING.value:
                     raise AdmissionRejected("ARTIFACT_NOT_PENDING")
 
@@ -228,31 +269,57 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                 raise
 
     def fail_upload(
-        self, reservation_id: UUID, organization_id: UUID, error_code: str, now: datetime
+        self,
+        reservation_id: UUID,
+        organization_id: UUID,
+        error_code: str,
+        now: datetime,
+        *,
+        claim: IngestionClaim,
     ) -> None:
         """Mark a pending Artifact failed and release its camera reservation."""
 
         if not error_code.strip():
             raise AdmissionRejected("INVALID_ERROR_CODE")
+        _validate_claim(claim)
         with self._session_factory() as session:
             try:
-                current_time = self._db_now(session)
-                state = self._lock_camera_state_for_reservation(
-                    session, organization_id, reservation_id
+                snapshot = session.scalar(
+                    select(FrameArtifactRow).where(
+                        FrameArtifactRow.artifact_id == reservation_id,
+                        FrameArtifactRow.organization_id == organization_id,
+                    )
                 )
-                if state is None or state.reservation_id != reservation_id:
+                if snapshot is None:
                     raise AdmissionRejected("RESERVATION_NOT_FOUND")
+                state = self._lock_camera_state(
+                    session, organization_id, snapshot.camera_id
+                )
+                session_row = self._lock_session_by_identity(
+                    session,
+                    snapshot.organization_id,
+                    snapshot.camera_id,
+                    snapshot.stream_session_id,
+                )
                 artifact = session.scalar(
                     select(FrameArtifactRow)
                     .where(
                         FrameArtifactRow.artifact_id == reservation_id,
-                        FrameArtifactRow.organization_id == state.organization_id,
-                        FrameArtifactRow.camera_id == state.camera_id,
+                        FrameArtifactRow.organization_id == session_row.organization_id,
+                        FrameArtifactRow.camera_id == session_row.camera_id,
                     )
                     .with_for_update()
                 )
                 if artifact is None:
                     raise AdmissionRejected("RESERVATION_NOT_FOUND")
+                current_time = self._db_now(session)
+                _require_live_claim(session_row, claim, current_time)
+                if (
+                    artifact.stream_session_id != session_row.session_id
+                    or artifact.ingestion_generation != claim.generation
+                    or state.reservation_id != reservation_id
+                ):
+                    raise AdmissionRejected("INGESTION_LEASE_LOST")
                 if artifact.state == ArtifactState.PENDING.value:
                     artifact.state = ArtifactState.FAILED.value
                     artifact.error_code = error_code
@@ -260,8 +327,9 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                     artifact.updated_at = current_time
                 elif artifact.state != ArtifactState.FAILED.value:
                     raise AdmissionRejected("ARTIFACT_NOT_PENDING")
-                state.reservation_id = None
-                state.reservation_expires_at = None
+                if state.reservation_id == reservation_id:
+                    state.reservation_id = None
+                    state.reservation_expires_at = None
                 state.version += 1
                 state.updated_at = current_time
                 session.commit()
@@ -301,17 +369,24 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
 
         with self._session_factory() as session:
             try:
-                current = self._db_now(session)
-                state = self._lock_camera_state_for_reservation(
-                    session, candidate.organization_id, candidate.artifact_id
+                snapshot = session.scalar(
+                    select(FrameArtifactRow).where(
+                        FrameArtifactRow.artifact_id == candidate.artifact_id,
+                        FrameArtifactRow.organization_id == candidate.organization_id,
+                    )
                 )
-                if state is None:
+                if snapshot is None:
                     session.commit()
                     return False
-                if state.reservation_expires_at is None or _as_utc(state.reservation_expires_at) <= current:
-                    self._expire_reservation(session, state, current)
-                    session.commit()
-                    return False
+                state = self._lock_camera_state(
+                    session, snapshot.organization_id, snapshot.camera_id
+                )
+                session_row = self._lock_session_by_identity(
+                    session,
+                    snapshot.organization_id,
+                    snapshot.camera_id,
+                    snapshot.stream_session_id,
+                )
                 artifact = session.scalar(
                     select(FrameArtifactRow)
                     .where(
@@ -322,6 +397,32 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                     .with_for_update()
                 )
                 if artifact is None or artifact.state != ArtifactState.PENDING.value:
+                    session.commit()
+                    return False
+                current = self._db_now(session)
+                if not _artifact_generation_is_live(session_row, artifact, current):
+                    self._fail_pending_locked(
+                        session, state, artifact, "INGESTION_LEASE_LOST", current
+                    )
+                    session.commit()
+                    return False
+                if state.reservation_id != artifact.artifact_id:
+                    self._fail_pending_locked(
+                        session, state, artifact, "INGESTION_LEASE_LOST", current
+                    )
+                    session.commit()
+                    return False
+                if (
+                    state.reservation_expires_at is None
+                    or _as_utc(state.reservation_expires_at) <= current
+                ):
+                    self._fail_pending_locked(
+                        session,
+                        state,
+                        artifact,
+                        "ADMISSION_RESERVATION_EXPIRED",
+                        current,
+                    )
                     session.commit()
                     return False
                 if not _metadata_matches(candidate, metadata):
@@ -345,20 +446,42 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                 raise
 
     def cleanup_candidates(self, now: datetime, limit: int) -> list[PendingArtifact]:
-        """Return expired AVAILABLE artifacts, annotated with evidence references."""
+        """Return due evidence and retryable processing cleanup tombstones."""
 
         self._require_positive_recovery_limit(limit)
         with self._session_factory() as session:
+            retryable_processing = and_(
+                FrameArtifactRow.state.in_(
+                    [ArtifactState.FAILED.value, ArtifactState.DELETED.value]
+                ),
+                FrameArtifactRow.lifecycle == ArtifactLifecycle.PROCESSING.value,
+                FrameArtifactRow.error_code.in_(RETRYABLE_UPLOAD_FAILURE_CODES),
+                or_(
+                    FrameArtifactRow.cleanup_next_attempt_at.is_(None),
+                    FrameArtifactRow.cleanup_next_attempt_at <= now,
+                ),
+            )
             rows = session.scalars(
                 select(FrameArtifactRow)
                 .where(
-                    FrameArtifactRow.state == ArtifactState.AVAILABLE.value,
-                    FrameArtifactRow.lifecycle == ArtifactLifecycle.EVIDENCE.value,
-                    FrameArtifactRow.retention_until.is_not(None),
-                    FrameArtifactRow.retention_until <= now,
-                    FrameArtifactRow.object_key.is_not(None),
+                    or_(
+                        and_(
+                            FrameArtifactRow.state == ArtifactState.AVAILABLE.value,
+                            FrameArtifactRow.lifecycle == ArtifactLifecycle.EVIDENCE.value,
+                            FrameArtifactRow.retention_until.is_not(None),
+                            FrameArtifactRow.retention_until <= now,
+                        ),
+                        retryable_processing,
+                    ),
                 )
-                .order_by(FrameArtifactRow.retention_until, FrameArtifactRow.artifact_id)
+                .order_by(
+                    func.coalesce(
+                        FrameArtifactRow.cleanup_next_attempt_at,
+                        FrameArtifactRow.retention_until,
+                        FrameArtifactRow.updated_at,
+                    ),
+                    FrameArtifactRow.artifact_id,
+                )
                 .limit(limit)
             ).all()
             result: list[PendingArtifact] = []
@@ -371,15 +494,24 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                     )
                     .limit(1)
                 ) is not None
-                result.append(_pending_artifact(row, referenced=referenced))
+                result.append(
+                    _pending_artifact(
+                        row,
+                        referenced=referenced,
+                        cleanup_reason=(
+                            row.error_code
+                            if row.lifecycle == ArtifactLifecycle.PROCESSING.value
+                            else "RETENTION_EXPIRED"
+                        ),
+                    )
+                )
             return result
 
     def mark_artifact_deleted(self, candidate: PendingArtifact, now: datetime) -> bool:
-        """Mark a retention candidate deleted after locking and rechecking references."""
+        """Mark a candidate deleted and pace future processing-tombstone scans."""
 
         with self._session_factory() as session:
             try:
-                current = self._db_now(session)
                 snapshot = session.scalar(
                     select(FrameArtifactRow).where(
                         FrameArtifactRow.artifact_id == candidate.artifact_id,
@@ -389,17 +521,15 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                 if snapshot is None:
                     session.commit()
                     return False
-                state = session.scalar(
-                    select(CameraInferenceStateRow)
-                    .where(
-                        CameraInferenceStateRow.organization_id == snapshot.organization_id,
-                        CameraInferenceStateRow.camera_id == snapshot.camera_id,
-                    )
-                    .with_for_update()
+                state = self._lock_camera_state(
+                    session, snapshot.organization_id, snapshot.camera_id
                 )
-                if state is None:
-                    session.commit()
-                    return False
+                self._lock_session_by_identity(
+                    session,
+                    snapshot.organization_id,
+                    snapshot.camera_id,
+                    snapshot.stream_session_id,
+                )
                 artifact = session.scalar(
                     select(FrameArtifactRow)
                     .where(
@@ -409,10 +539,28 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                     )
                     .with_for_update()
                 )
-                if artifact is None or artifact.state != ArtifactState.AVAILABLE.value:
+                if artifact is None:
                     session.commit()
                     return False
-                if artifact.retention_until is None or _as_utc(artifact.retention_until) > current:
+                current = self._db_now(session)
+                is_expired_evidence = (
+                    artifact.state == ArtifactState.AVAILABLE.value
+                    and artifact.lifecycle == ArtifactLifecycle.EVIDENCE.value
+                )
+                is_failed_processing = (
+                    artifact.state in (
+                        ArtifactState.FAILED.value,
+                        ArtifactState.DELETED.value,
+                    )
+                    and artifact.lifecycle == ArtifactLifecycle.PROCESSING.value
+                    and artifact.error_code in RETRYABLE_UPLOAD_FAILURE_CODES
+                )
+                if not (is_expired_evidence or is_failed_processing):
+                    session.commit()
+                    return False
+                if is_expired_evidence and (
+                    artifact.retention_until is None or _as_utc(artifact.retention_until) > current
+                ):
                     session.commit()
                     return False
                 if session.scalar(
@@ -445,6 +593,69 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                     session.commit()
                     return False
                 artifact.state = ArtifactState.DELETED.value
+                artifact.cleanup_next_attempt_at = (
+                    current + timedelta(seconds=CLEANUP_RETRY_DELAY_SECONDS)
+                    if is_failed_processing
+                    else None
+                )
+                artifact.updated_at = current
+                if state.reservation_id == artifact.artifact_id:
+                    state.reservation_id = None
+                    state.reservation_expires_at = None
+                    state.version += 1
+                    state.updated_at = current
+                session.commit()
+                return True
+            except BaseException:
+                session.rollback()
+                raise
+
+    def defer_artifact_cleanup(self, candidate: PendingArtifact, now: datetime) -> bool:
+        """Persist positive retry pacing after a provider delete failure."""
+
+        del now
+        with self._session_factory() as session:
+            try:
+                snapshot = session.scalar(
+                    select(FrameArtifactRow).where(
+                        FrameArtifactRow.artifact_id == candidate.artifact_id,
+                        FrameArtifactRow.organization_id == candidate.organization_id,
+                    )
+                )
+                if snapshot is None:
+                    session.commit()
+                    return False
+                state = self._lock_camera_state(
+                    session, snapshot.organization_id, snapshot.camera_id
+                )
+                self._lock_session_by_identity(
+                    session,
+                    snapshot.organization_id,
+                    snapshot.camera_id,
+                    snapshot.stream_session_id,
+                )
+                artifact = session.scalar(
+                    select(FrameArtifactRow)
+                    .where(
+                        FrameArtifactRow.artifact_id == candidate.artifact_id,
+                        FrameArtifactRow.organization_id == state.organization_id,
+                        FrameArtifactRow.camera_id == state.camera_id,
+                    )
+                    .with_for_update()
+                )
+                if artifact is None or not _is_retryable_processing_artifact(artifact):
+                    session.commit()
+                    return False
+                current = self._db_now(session)
+                if (
+                    artifact.cleanup_next_attempt_at is not None
+                    and _as_utc(artifact.cleanup_next_attempt_at) > current
+                ):
+                    session.commit()
+                    return False
+                artifact.cleanup_next_attempt_at = current + timedelta(
+                    seconds=CLEANUP_RETRY_DELAY_SECONDS
+                )
                 artifact.updated_at = current
                 session.commit()
                 return True
@@ -464,10 +675,11 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
         artifact.error_code = error_code
         artifact.error_detail = error_code
         artifact.updated_at = now
-        state.reservation_id = None
-        state.reservation_expires_at = None
-        state.version += 1
-        state.updated_at = now
+        if state.reservation_id == artifact.artifact_id:
+            state.reservation_id = None
+            state.reservation_expires_at = None
+            state.version += 1
+            state.updated_at = now
 
     @staticmethod
     def _promote_pending_locked(
@@ -1858,10 +2070,7 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
         return state
 
     def _db_now(self, session: Session) -> datetime:
-        if self._clock is not None:
-            return _as_utc(self._clock(session))
-        value = session.scalar(select(func.now()))
-        return _as_utc(value)
+        return database_now(session, self._clock)
 
     @classmethod
     def _lock_camera_state_for_reservation(
@@ -1879,16 +2088,38 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
         )
 
     @staticmethod
-    def _require_session(session: Session, request: AdmissionRequest) -> None:
+    def _lock_session(session: Session, request: AdmissionRequest) -> InspectionSessionRow:
         row = session.scalar(
             select(InspectionSessionRow).where(
                 InspectionSessionRow.session_id == request.stream_session_id,
                 InspectionSessionRow.organization_id == request.organization_id,
                 InspectionSessionRow.camera_id == request.camera_id,
             )
+            .with_for_update()
         )
         if row is None:
             raise AdmissionRejected("SESSION_NOT_FOUND")
+        return row
+
+    @staticmethod
+    def _lock_session_by_identity(
+        session: Session,
+        organization_id: UUID,
+        camera_id: UUID,
+        session_id: UUID,
+    ) -> InspectionSessionRow:
+        row = session.scalar(
+            select(InspectionSessionRow)
+            .where(
+                InspectionSessionRow.session_id == session_id,
+                InspectionSessionRow.organization_id == organization_id,
+                InspectionSessionRow.camera_id == camera_id,
+            )
+            .with_for_update()
+        )
+        if row is None:
+            raise AdmissionRejected("SESSION_NOT_FOUND")
+        return row
 
     @staticmethod
     def _sync_ready_count(session: Session, state: CameraInferenceStateRow) -> int:
@@ -1978,6 +2209,23 @@ def _validate_request(request: AdmissionRequest) -> None:
         raise AdmissionRejected("INVALID_FRAME_SEQUENCE")
     if not request.content_sha256.strip():
         raise AdmissionRejected("INVALID_CONTENT_SHA256")
+    _validate_claim(request.claim)
+
+
+def _validate_claim(claim: IngestionClaim) -> None:
+    if not isinstance(claim, IngestionClaim):
+        raise TypeError("claim must be an IngestionClaim")
+    if claim.generation < 1:
+        raise ValueError("claim generation must be positive")
+
+
+def _require_live_claim(
+    session_row: InspectionSessionRow,
+    claim: IngestionClaim,
+    now: datetime,
+) -> None:
+    if not owns_live_session(session_row, claim, now):
+        raise AdmissionRejected("INGESTION_LEASE_LOST")
 
 
 def _reservation_from_artifact(artifact: FrameArtifactRow) -> AdmissionReservation:
@@ -2009,8 +2257,23 @@ def _artifact_object_key(organization_id: UUID, artifact_id: UUID) -> str:
     return f"organizations/{organization_id}/artifacts/{artifact_id}"
 
 
+def _is_retryable_processing_artifact(artifact: FrameArtifactRow) -> bool:
+    return (
+        artifact.state
+        in (
+            ArtifactState.FAILED.value,
+            ArtifactState.DELETED.value,
+        )
+        and artifact.lifecycle == ArtifactLifecycle.PROCESSING.value
+        and artifact.error_code in RETRYABLE_UPLOAD_FAILURE_CODES
+    )
+
+
 def _pending_artifact(
-    row: FrameArtifactRow, *, referenced: bool = False
+    row: FrameArtifactRow,
+    *,
+    referenced: bool = False,
+    cleanup_reason: str | None = None,
 ) -> PendingArtifact:
     return PendingArtifact(
         artifact_id=row.artifact_id,
@@ -2020,6 +2283,25 @@ def _pending_artifact(
         content_length=row.content_length,
         referenced=referenced,
         retention_until=_as_utc(row.retention_until) if row.retention_until is not None else None,
+        cleanup_reason=cleanup_reason,
+        cleanup_next_attempt_at=(
+            _as_utc(row.cleanup_next_attempt_at)
+            if row.cleanup_next_attempt_at is not None
+            else None
+        ),
+    )
+
+
+def _artifact_generation_is_live(
+    session_row: InspectionSessionRow,
+    artifact: FrameArtifactRow,
+    now: datetime,
+) -> bool:
+    return (
+        session_row.status == "RUNNING"
+        and session_row.ingestion_generation == artifact.ingestion_generation
+        and session_row.lease_expires_at is not None
+        and _as_utc(session_row.lease_expires_at) > now
     )
 
 

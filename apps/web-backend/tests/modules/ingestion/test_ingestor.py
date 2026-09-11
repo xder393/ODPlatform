@@ -10,7 +10,11 @@ from odp_api.modules.ingestion.artifacts import ArtifactHealth
 from odp_api.modules.ingestion.service import IngestionService
 from odp_api.modules.tasks.models import TaskRecord, TaskStatus
 from odp_api.ports.frame_sources import DecodedFrame
-from odp_api.ports.inspection_sessions import InspectionSession
+from odp_api.ports.inspection_sessions import (
+    ClaimedInspectionSession,
+    IngestionClaim,
+    InspectionSession,
+)
 from odp_api.ports.tasks import AdmissionRejected
 
 NOW = datetime(2026, 9, 7, 12, tzinfo=UTC)
@@ -78,8 +82,33 @@ def test_recorded_video_uses_current_loop_wall_clock():
     assert captures[0].released
 
 
+def test_recorded_video_resumes_after_claimed_sequence_high_water_mark():
+    from odp_api.adapters.frame_sources.opencv import RecordedVideoSource
+
+    async def read_frames():
+        source = RecordedVideoSource(
+            "fixture.mp4",
+            camera_id=uuid4(),
+            session_id=uuid4(),
+            initial_sequence=9,
+            capture_factory=lambda _path: FakeCapture([b"first", b"second"]),
+        )
+        try:
+            return [
+                (await anext(source.frames())).sequence,
+                (await anext(source.frames())).sequence,
+            ]
+        finally:
+            await source.close()
+
+    import asyncio
+
+    assert asyncio.run(read_frames()) == [10, 11]
+
+
 def test_ingestor_samples_before_encoding_and_rejects_without_upload():
     camera_id, session_id, organization_id = uuid4(), uuid4(), uuid4()
+    claim = IngestionClaim(organization_id, camera_id, session_id, uuid4(), 1)
     frames = [
         DecodedFrame(camera_id, session_id, index + 1, NOW + timedelta(seconds=index / 10), b"raw")
         for index in range(10)
@@ -120,6 +149,7 @@ def test_ingestor_samples_before_encoding_and_rejects_without_upload():
             organization_id=organization_id,
             health=Health(),
             saga=saga,
+            claim=claim,
             max_frames=10,
         )
     )
@@ -131,6 +161,7 @@ def test_ingestor_samples_before_encoding_and_rejects_without_upload():
 
 def test_ingestor_encodes_selected_frames_and_calls_saga_after_preflight():
     camera_id, session_id, organization_id = uuid4(), uuid4(), uuid4()
+    claim = IngestionClaim(organization_id, camera_id, session_id, uuid4(), 1)
     frames = [
         DecodedFrame(camera_id, session_id, index + 1, NOW + timedelta(seconds=index / 10), b"raw")
         for index in range(10)
@@ -181,6 +212,7 @@ def test_ingestor_encodes_selected_frames_and_calls_saga_after_preflight():
             organization_id=organization_id,
             health=Health(),
             saga=saga,
+            claim=claim,
             max_frames=10,
         )
     )
@@ -238,22 +270,32 @@ def test_frame_ingestor_uses_database_session_claim_and_sanitizes_credentials():
         secret_reference=None,
         status="RUNNING",
     )
+    claim = IngestionClaim(
+        session.organization_id,
+        session.camera_id,
+        session.session_id,
+        uuid4(),
+        1,
+    )
+    claimed = ClaimedInspectionSession(session, claim, 0)
 
     class Sessions:
         def __init__(self):
             self.closed = False
 
-        def claim_start_requests(self, process_id, limit):
-            return [session]
+        def claim_available(self, process_id, instance_id, limit):
+            return [claimed]
 
-        def heartbeat(self, session_id, process_id, now):
+        def renew(self, _claim):
             return True
 
-        def claim_stop_requests(self, process_id, limit):
+        def stop_candidates(self, instance_id, limit):
             return []
 
-        def mark_failed(self, *args):
-            self.closed = True
+        def finalize_expired_stops(self, limit):
+            return 0
+
+        def release(self, _claim):
             return True
 
     class Source:
@@ -298,6 +340,7 @@ def test_frame_ingestor_uses_database_session_claim_and_sanitizes_credentials():
             lambda _session: source,
             lambda _session: Saga(),
             process_id="ingestor-1",
+            instance_id=uuid4(),
         ).run_once(max_frames_per_session=1)
     )
     assert (report.started, report.failed, report.reports[0].admitted) == (1, 0, 1)

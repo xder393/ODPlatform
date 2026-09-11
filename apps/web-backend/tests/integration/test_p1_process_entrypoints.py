@@ -5,12 +5,16 @@ from hashlib import sha256
 from importlib import import_module
 from inspect import signature
 from pathlib import Path
-from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 
 from odp_api.modules.tasks.commands import InferenceExecutionContract, LeaseClaim
+from odp_api.ports.inspection_sessions import (
+    ClaimedInspectionSession,
+    IngestionClaim,
+    InspectionSession,
+)
 from odp_api.processes.inference_worker import LoadedArtifact
 
 PROCESS_MODULES = (
@@ -21,6 +25,27 @@ PROCESS_MODULES = (
     "artifact_reconciler",
     "stream_retention",
 )
+
+
+def _claimed_source_session(source_type: str, sanitized_uri: str) -> ClaimedInspectionSession:
+    session = InspectionSession(
+        session_id=uuid4(),
+        organization_id=uuid4(),
+        camera_id=uuid4(),
+        line_id=uuid4(),
+        source_type=source_type,
+        sanitized_uri=sanitized_uri,
+        secret_reference=None,
+        status="RUNNING",
+    )
+    claim = IngestionClaim(
+        organization_id=session.organization_id,
+        camera_id=session.camera_id,
+        session_id=session.session_id,
+        owner_instance_id=uuid4(),
+        generation=1,
+    )
+    return ClaimedInspectionSession(session, claim, initial_sequence=0)
 
 
 @pytest.mark.parametrize("module_name", PROCESS_MODULES)
@@ -56,18 +81,7 @@ def test_source_factory_rejects_unknown_source_type():
     runtime = import_module("odp_api.processes.runtime")
 
     with pytest.raises(ValueError, match="unsupported inspection source type"):
-        runtime.source_from_session(
-            type(
-                "Session",
-                (),
-                {
-                    "source_type": "USB",
-                    "sanitized_uri": "/dev/video0",
-                    "camera_id": None,
-                    "session_id": None,
-                },
-            )()
-        )
+        runtime.source_from_session(_claimed_source_session("USB", "/dev/video0"))
 
 
 @pytest.mark.parametrize(
@@ -80,14 +94,7 @@ def test_source_factory_rejects_unknown_source_type():
 )
 def test_source_factory_resolves_validated_source_types(source_type, uri, expected):
     runtime = import_module("odp_api.processes.runtime")
-    source = runtime.source_from_session(
-        SimpleNamespace(
-            source_type=source_type,
-            sanitized_uri=uri,
-            camera_id=uuid4(),
-            session_id=uuid4(),
-        )
-    )
+    source = runtime.source_from_session(_claimed_source_session(source_type, uri))
     assert type(source).__name__ == expected
 
 

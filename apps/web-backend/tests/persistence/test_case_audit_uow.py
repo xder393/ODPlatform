@@ -1,12 +1,14 @@
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta, timezone
 from threading import Event
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from argon2 import PasswordHasher
-from sqlalchemy import event, func, select
+from sqlalchemy import create_engine, event, func, select, text
+from sqlalchemy.engine import make_url
 
 from odp_api.adapters.persistence.models import (
     AuditChainHeadRow,
@@ -30,6 +32,41 @@ from odp_api.modules.cases.application import AuditContext, CaseApplicationServi
 from odp_api.modules.cases.errors import InvalidCaseTransition
 from odp_api.modules.identity.models import Actor
 from odp_api.seed import DEMO_ORG_ID, build_demo_seed, seed_business_data
+
+
+@pytest.fixture
+def postgres_case_audit_url():
+    """Run the PostgreSQL audit contract against one empty generated database."""
+
+    shared_url = make_url(os.environ["ODP_POSTGRES_TEST_URL"])
+    database_name = f"odp_case_audit_{uuid4().hex}"
+    if re.fullmatch(r"[a-z0-9_]+", database_name) is None:
+        raise AssertionError("generated PostgreSQL test database name is unsafe")
+    admin_engine = create_engine(
+        shared_url.set(database="postgres"), isolation_level="AUTOCOMMIT"
+    )
+    isolated_url = shared_url.set(database=database_name).render_as_string(
+        hide_password=False
+    )
+    created = True
+    try:
+        with admin_engine.connect() as connection:
+            connection.exec_driver_sql(f'CREATE DATABASE "{database_name}"')
+        yield isolated_url
+    finally:
+        if created:
+            with admin_engine.connect() as connection:
+                connection.execute(
+                    text(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                        "WHERE datname = :database_name AND pid <> pg_backend_pid()"
+                    ),
+                    {"database_name": database_name},
+                )
+                connection.exec_driver_sql(
+                    f'DROP DATABASE IF EXISTS "{database_name}"'
+                )
+        admin_engine.dispose()
 
 
 class FailingAuditUnitOfWork:
@@ -291,9 +328,11 @@ def test_sqlite_begin_immediate_serializes_two_case_writers(tmp_path) -> None:
     not os.getenv("ODP_POSTGRES_TEST_URL"),
     reason="requires the dedicated ODP_POSTGRES_TEST_URL CI database",
 )
-def test_postgresql_case_transition_locks_case_and_audit_head_then_commits_once() -> None:
+def test_postgresql_case_transition_locks_case_and_audit_head_then_commits_once(
+    postgres_case_audit_url,
+) -> None:
     """CI-only contract: a live PostgreSQL transition locks both rows and commits all facts."""
-    database_url = os.environ["ODP_POSTGRES_TEST_URL"]
+    database_url = postgres_case_audit_url
     engine, sessions = create_engine_and_session(database_url)
     statements: list[str] = []
 

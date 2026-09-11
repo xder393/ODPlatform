@@ -1,6 +1,6 @@
 """Tests for bounded Artifact reconciliation and protected cleanup."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -105,3 +105,15 @@ def test_cleaner_skips_referenced_evidence_and_marks_deleted_after_storage_delet
     assert result.deleted == 1
     assert storage.deleted == [deletable.object_key]
     assert repository.deleted == [deletable.artifact_id]
+
+
+def test_cleaner_retries_ownership_failed_processing_object_without_retention():
+    item = replace(candidate(), retention_until=None, cleanup_reason="INGESTION_LEASE_LOST")
+    repository = FakeRepository([], [item])
+    storage = FakeStorage({item.object_key: ObjectMetadata(item.object_key, 4, "a" * 64)})
+
+    result = ArtifactReconciler(repository, storage).run_once(NOW)
+
+    assert result.deleted == 1
+    assert storage.deleted == [item.object_key]
+    assert repository.deleted == [item.artifact_id]

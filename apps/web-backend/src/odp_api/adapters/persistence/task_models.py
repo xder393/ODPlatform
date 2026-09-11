@@ -76,7 +76,21 @@ class InspectionSessionRow(Base):
             "idempotency_key",
             name="uq_inspection_session_tenant_key",
         ),
+        CheckConstraint(
+            "ingestion_generation >= 0",
+            name="ck_inspection_session_generation_nonnegative",
+        ),
+        CheckConstraint(
+            "last_reserved_sequence >= 0",
+            name="ck_inspection_session_last_reserved_sequence_nonnegative",
+        ),
         Index("ix_inspection_sessions_ingestor_process_id", "ingestor_process_id"),
+        Index(
+            "ix_inspection_sessions_recovery_candidates",
+            "status",
+            "lease_expires_at",
+            "session_id",
+        ),
     )
 
     session_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
@@ -89,6 +103,14 @@ class InspectionSessionRow(Base):
     secret_reference: Mapped[str | None] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     ingestor_process_id: Mapped[str | None] = mapped_column(String(255))
+    owner_instance_id: Mapped[UUID | None] = mapped_column(Uuid)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ingestion_generation: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default=text("0")
+    )
+    last_reserved_sequence: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default=text("0")
+    )
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error_code: Mapped[str | None] = mapped_column(String(128))
@@ -122,6 +144,10 @@ class FrameArtifactRow(Base):
             "content_length IS NULL OR content_length >= 0",
             name="ck_frame_artifact_content_length_nonnegative",
         ),
+        CheckConstraint(
+            "ingestion_generation >= 0",
+            name="ck_frame_artifact_ingestion_generation_nonnegative",
+        ),
         Index(
             "ix_frame_artifacts_pending_updated",
             "updated_at",
@@ -140,6 +166,22 @@ class FrameArtifactRow(Base):
                 "state = 'AVAILABLE' AND lifecycle = 'EVIDENCE' AND retention_until IS NOT NULL"
             ),
         ),
+        Index(
+            "ix_frame_artifacts_cleanup_candidates",
+            "cleanup_next_attempt_at",
+            "updated_at",
+            "artifact_id",
+            postgresql_where=text(
+                "lifecycle = 'PROCESSING' AND state IN ('FAILED', 'DELETED') "
+                "AND error_code IN ('INGESTION_LEASE_LOST', "
+                "'STORAGE_UPLOAD_FAILED', 'ADMISSION_RESERVATION_EXPIRED')"
+            ),
+            sqlite_where=text(
+                "lifecycle = 'PROCESSING' AND state IN ('FAILED', 'DELETED') "
+                "AND error_code IN ('INGESTION_LEASE_LOST', "
+                "'STORAGE_UPLOAD_FAILED', 'ADMISSION_RESERVATION_EXPIRED')"
+            ),
+        ),
     )
 
     artifact_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
@@ -149,8 +191,14 @@ class FrameArtifactRow(Base):
         ForeignKey("inspection_sessions.session_id"), nullable=False, index=True
     )
     frame_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    ingestion_generation: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default=text("0")
+    )
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     object_key: Mapped[str | None] = mapped_column(String(1024))
+    cleanup_next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     content_length: Mapped[int | None] = mapped_column(BigInteger)
     state: Mapped[str] = mapped_column(String(32), nullable=False)

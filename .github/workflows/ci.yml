@@ -55,6 +55,7 @@ jobs:
       ODP_POSTGRES_URL: postgresql://odp:odp@localhost:5432/odp
       ODP_POSTGRES_TEST_URL: postgresql+psycopg://odp:odp@localhost:5432/odp
       ODP_POSTGRES_APP_TEST_URL: postgresql+psycopg://odp_app:odp_app_dev@localhost:5432/odp
+      ODP_ROLE_GATE_ADMIN_URL: postgresql+psycopg://odp:odp@localhost:5432/odp
       ODP_REDIS_TEST_URL: redis://localhost:6379/0
       ODP_MINIO_TEST_ENDPOINT: 127.0.0.1:29000
       ODP_MINIO_TEST_ACCESS_KEY: odp_task4
@@ -160,6 +161,8 @@ jobs:
     needs: [backend-web, frontend-web]
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      COMPOSE_PROJECT_NAME: odp-ingestion-recovery-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
 
@@ -232,6 +235,40 @@ jobs:
               capture.release()
           PY
 
+      - name: Verify frame-ingestor crash recovery
+        timeout-minutes: 8
+        run: |
+          state_path=/workspace/ingestion-recovery-state.json
+          test ! -e ingestion-recovery-state.json
+          docker compose -f deploy/compose.yaml exec -T \
+            -e ODP_ALLOW_COMPOSE_PROBE=disposable frame-ingestor \
+            python /workspace/apps/web-backend/scripts/verify_ingestor_recovery.py \
+            prepare --state "$state_path"
+          docker compose -f deploy/compose.yaml kill -s SIGKILL frame-ingestor
+          docker compose -f deploy/compose.yaml up -d frame-ingestor
+
+          # Dependency installation is a separate bound from lease recovery.
+          # Do not invoke verify until the restarted container can import the
+          # runtime modules used by the probe and process.
+          ready=0
+          for i in $(seq 1 120); do
+            if docker compose -f deploy/compose.yaml exec -T frame-ingestor \
+              python -c 'import cv2, numpy, odp_api'; then
+              ready=1
+              echo "restarted frame-ingestor dependencies are ready"
+              break
+            fi
+            sleep 2
+          done
+          if test "$ready" != 1; then
+            docker compose -f deploy/compose.yaml logs --no-color frame-ingestor
+            exit 1
+          fi
+          docker compose -f deploy/compose.yaml exec -T \
+            -e ODP_ALLOW_COMPOSE_PROBE=disposable frame-ingestor \
+            python /workspace/apps/web-backend/scripts/verify_ingestor_recovery.py \
+            verify --state "$state_path"
+
       - name: Run E2E tests
         working-directory: apps/web-frontend
         run: npm run test:e2e
@@ -266,7 +303,9 @@ jobs:
 
       - name: Dump compose logs
         if: always()
-        run: docker compose -f deploy/compose.yaml logs --no-color > compose-e2e.log
+        run: |
+          docker compose -f deploy/compose.yaml ps > compose-e2e-ps.log || true
+          docker compose -f deploy/compose.yaml logs --no-color > compose-e2e.log || true
 
       - name: Upload E2E diagnostics
         if: always()
@@ -275,9 +314,10 @@ jobs:
           name: e2e-diagnostics
           retention-days: 7
           path: |
+            compose-e2e-ps.log
             compose-e2e.log
             apps/web-frontend/test-results/
 
       - name: Tear down services
         if: always()
-        run: docker compose -f deploy/compose.yaml down
+        run: docker compose -f deploy/compose.yaml down --volumes --remove-orphans

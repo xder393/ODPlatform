@@ -1,6 +1,7 @@
-from typing import ClassVar, Literal
+import math
+from typing import Any, ClassVar, Literal
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["local", "test", "docker", "staging", "production"]
@@ -161,6 +162,48 @@ class WorkerSettings(ProcessSettings):
 
 class IngestorSettings(ProcessSettings):
     requires_model: ClassVar[bool] = True
+    ingestion_heartbeat_seconds: float = 5.0
+    ingestion_lease_seconds: float = 30.0
+    ingestion_poll_seconds: float = 1.0
+
+    @field_validator(
+        "ingestion_heartbeat_seconds",
+        "ingestion_lease_seconds",
+        "ingestion_poll_seconds",
+        mode="before",
+    )
+    @classmethod
+    def validate_ingestion_number(cls, value: Any) -> Any:
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            raise ValueError("ingestion timing values must be numeric")  # noqa: TRY004
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                raise ValueError("ingestion timing values must be numeric")
+            try:
+                value = float(value)
+            except ValueError as error:
+                raise ValueError("ingestion timing values must be numeric") from error
+        return value
+
+    @model_validator(mode="after")
+    def validate_ingestion_timing(self) -> "IngestorSettings":
+        values = (
+            self.ingestion_heartbeat_seconds,
+            self.ingestion_lease_seconds,
+            self.ingestion_poll_seconds,
+        )
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or value <= 0
+            for value in values
+        ):
+            raise ValueError("ingestion timing values must be finite and positive")
+        if self.ingestion_lease_seconds < 3 * self.ingestion_heartbeat_seconds:
+            raise ValueError("ingestion lease must be at least three heartbeat intervals")
+        return self
 
 
 class RelaySettings(ProcessSettings):

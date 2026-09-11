@@ -12,6 +12,9 @@ from sqlalchemy import func, select
 
 from alembic import command
 from odp_api.adapters.persistence.inspection_effects import SqlAlchemyInspectionEffects
+from odp_api.adapters.persistence.inspection_sessions import (
+    SqlAlchemyInspectionSessionRepository,
+)
 from odp_api.adapters.persistence.models import InspectionEventRow
 from odp_api.adapters.persistence.task_control import (
     LEASE_SECONDS,
@@ -60,7 +63,7 @@ class DeliveryHarness:
                     line_id=uuid4(),
                     source_type="rtsp",
                     sanitized_uri="rtsp://camera.example.test/stream",
-                    status="ACTIVE",
+                    status="START_REQUESTED",
                     idempotency_key="property-session",
                     started_at=self.now,
                     created_at=self.now,
@@ -70,6 +73,10 @@ class DeliveryHarness:
         self.repository = SqlAlchemyTaskControlRepository(
             self.sessions, clock=lambda _session: self.clock
         )
+        self.ingestion_claim = SqlAlchemyInspectionSessionRepository(
+            self.sessions,
+            clock=lambda _session: self.clock,
+        ).claim_available("property-ingestor", uuid4(), 1)[0].claim
         reservation = self.repository.reserve(
             AdmissionRequest(
                 organization_id=self.organization_id,
@@ -79,6 +86,7 @@ class DeliveryHarness:
                 captured_at=self.now,
                 content_sha256="a" * 64,
                 correlation_id=uuid4(),
+                claim=self.ingestion_claim,
             ),
             self.now,
         )
@@ -88,6 +96,7 @@ class DeliveryHarness:
             "frames/property.jpg",
             1,
             self.now,
+            claim=self.ingestion_claim,
         )
         self.effects = InspectionEffectService(
             SqlAlchemyInspectionEffects(self.sessions, clock=lambda _session: self.clock)

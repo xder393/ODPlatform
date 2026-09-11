@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
@@ -21,16 +19,43 @@ class InspectionSession:
     status: str
 
 
+@dataclass(frozen=True, slots=True)
+class IngestionClaim:
+    organization_id: UUID
+    camera_id: UUID
+    session_id: UUID
+    owner_instance_id: UUID
+    generation: int
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimedInspectionSession:
+    session: InspectionSession
+    claim: IngestionClaim
+    initial_sequence: int
+
+
 class InspectionSessionPort(Protocol):
-    def claim_start_requests(self, process_id: str, limit: int) -> Sequence[InspectionSession]: ...
+    def claim_available(
+        self, process_id: str, instance_id: UUID, limit: int
+    ) -> list[ClaimedInspectionSession]: ...
 
-    def heartbeat(self, session_id: UUID, process_id: str, now: datetime) -> bool: ...
+    def renew(self, claim: IngestionClaim) -> bool: ...
 
-    def claim_stop_requests(self, process_id: str, limit: int) -> Sequence[InspectionSession]: ...
+    def stop_candidates(self, instance_id: UUID, limit: int) -> list[IngestionClaim]: ...
 
-    def mark_failed(
-        self, session_id: UUID, process_id: str, error_code: str, detail: str, now: datetime
-    ) -> bool: ...
+    def finish_stop(self, claim: IngestionClaim) -> bool: ...
+
+    def finalize_expired_stops(self, limit: int) -> int: ...
+
+    def release(self, claim: IngestionClaim) -> bool: ...
+
+    def fail_claim(self, claim: IngestionClaim, error_code: str, detail: str) -> bool: ...
 
 
-__all__ = ["InspectionSession", "InspectionSessionPort"]
+__all__ = [
+    "ClaimedInspectionSession",
+    "IngestionClaim",
+    "InspectionSession",
+    "InspectionSessionPort",
+]
