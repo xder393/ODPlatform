@@ -1,0 +1,32 @@
+# Pin both multi-platform base images; application versions come only from uv.lock.
+FROM ghcr.io/astral-sh/uv:0.12.5-python3.12-trixie-slim@sha256:4677e08839853fe91c523b593f822ec1e87c7b91ba4c6b30929016b2e0933cd5 AS dependencies
+ENV UV_PYTHON_DOWNLOADS=never UV_LINK_MODE=copy
+WORKDIR /workspace/apps/web-backend
+COPY apps/web-backend/pyproject.toml apps/web-backend/uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    (uv lock --check --offline || { echo 'ERROR: frozen runtime lock validation failed; refresh uv.lock outside the image build.' >&2; exit 1; }) \
+    && uv export --quiet --frozen --no-dev --no-emit-project --no-annotate --output-file /requirements.txt \
+    && uv venv /opt/venv --python /usr/local/bin/python \
+    && uv pip sync --python /opt/venv/bin/python --require-hashes --only-binary :all: /requirements.txt
+
+FROM python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a AS runtime
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONPATH="/workspace/apps/web-backend/src:/workspace/packages/shared-schemas/src" \
+    PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WORKDIR /workspace
+COPY --from=dependencies /opt/venv /opt/venv
+COPY --from=dependencies /requirements.txt /opt/odp/requirements.txt
+# Keep the repository layout used by SQL migrations, grants and model fixtures.
+# Source is copied, not installed through an unlocked build-backend dependency.
+COPY apps/web-backend/src apps/web-backend/src
+COPY apps/web-backend/migrations apps/web-backend/migrations
+COPY apps/web-backend/alembic apps/web-backend/alembic
+COPY apps/web-backend/alembic.ini apps/web-backend/alembic.ini
+COPY apps/web-backend/pyproject.toml apps/web-backend/uv.lock apps/web-backend/
+COPY apps/web-backend/scripts apps/web-backend/scripts
+COPY apps/web-backend/tests/fixtures/models/tiny-detector.onnx apps/web-backend/tests/fixtures/models/tiny-detector.onnx
+COPY packages/shared-schemas/src packages/shared-schemas/src
+COPY deploy/postgres deploy/postgres
+RUN mkdir -p /workspace/recordings \
+    && python -c 'import cv2, numpy, onnxruntime, odp_api, odp_schemas'
+CMD ["uvicorn", "odp_api.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--log-config", "/workspace/apps/web-backend/src/odp_api/observability/uvicorn_logging.json"]
