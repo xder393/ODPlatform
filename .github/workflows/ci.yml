@@ -163,14 +163,25 @@ jobs:
     timeout-minutes: 25
     env:
       COMPOSE_PROJECT_NAME: odp-ingestion-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+      ODP_BACKEND_IMAGE: odp-backend:ci-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Validate Compose configuration
         run: docker compose -f deploy/compose.yaml config --quiet
 
+      - name: Build application images once
+        run: docker compose -f deploy/compose.yaml build api web
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Verify offline runtime image and shared environment
+        env:
+          ODP_DOCKER_RUNTIME_TEST: "1"
+        run: uvx --from pytest==9.1.1 pytest -q apps/web-backend/tests/integration/test_frozen_runtime_image.py
+
       - name: Start services
-        run: docker compose -f deploy/compose.yaml up -d --build
+        run: docker compose -f deploy/compose.yaml up -d --no-build
 
       - name: Wait for API health
         run: |
@@ -216,7 +227,7 @@ jobs:
           docker compose -f deploy/compose.yaml exec -T frame-ingestor python - <<'PY'
           import cv2
           import numpy as np
-          path = "/tmp/odp-browser-e2e.avi"
+          path = "/workspace/recordings/odp-browser-e2e.avi"
           writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"MJPG"), 5, (64, 64))
           if not writer.isOpened():
               raise RuntimeError("Unable to create recorded E2E video")
@@ -238,18 +249,17 @@ jobs:
       - name: Verify frame-ingestor crash recovery
         timeout-minutes: 8
         run: |
-          state_path=/workspace/ingestion-recovery-state.json
-          test ! -e ingestion-recovery-state.json
+          state_path=/workspace/recordings/ingestion-recovery-state.json
           docker compose -f deploy/compose.yaml exec -T \
-            -e ODP_ALLOW_COMPOSE_PROBE=disposable frame-ingestor \
+            -e ODP_ALLOW_COMPOSE_PROBE=disposable \
+            -e ODP_PROBE_WORKSPACE=/workspace/recordings frame-ingestor \
             python /workspace/apps/web-backend/scripts/verify_ingestor_recovery.py \
             prepare --state "$state_path"
           docker compose -f deploy/compose.yaml kill -s SIGKILL frame-ingestor
           docker compose -f deploy/compose.yaml up -d frame-ingestor
 
-          # Dependency installation is a separate bound from lease recovery.
-          # Do not invoke verify until the restarted container can import the
-          # runtime modules used by the probe and process.
+          # Dependencies are in the image; retain an explicit import/readiness
+          # boundary so missing image assets cannot masquerade as recovery.
           ready=0
           for i in $(seq 1 120); do
             if docker compose -f deploy/compose.yaml exec -T frame-ingestor \
@@ -265,7 +275,8 @@ jobs:
             exit 1
           fi
           docker compose -f deploy/compose.yaml exec -T \
-            -e ODP_ALLOW_COMPOSE_PROBE=disposable frame-ingestor \
+            -e ODP_ALLOW_COMPOSE_PROBE=disposable \
+            -e ODP_PROBE_WORKSPACE=/workspace/recordings frame-ingestor \
             python /workspace/apps/web-backend/scripts/verify_ingestor_recovery.py \
             verify --state "$state_path"
 
@@ -274,7 +285,7 @@ jobs:
         run: npm run test:e2e
         env:
           E2E_BASE_URL: http://localhost:8080
-          E2E_RECORDED_SOURCE: /tmp/odp-browser-e2e.avi
+          E2E_RECORDED_SOURCE: /workspace/recordings/odp-browser-e2e.avi
 
       - name: Restart API and verify durable case history
         run: |

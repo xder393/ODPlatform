@@ -19,15 +19,102 @@ is healthy. Database leases and fencing still decide task ownership.
 ## Start and stop
 
 ```bash
-docker compose -f deploy/compose.yaml up -d
+docker compose -f deploy/compose.yaml up -d --build
 docker compose -f deploy/compose.yaml down
 ```
 
-The API container installs the bind-mounted source as editable packages, so it
-does not use `uv sync --frozen` yet. Backend CI validates
-`apps/web-backend/uv.lock` and installs its hashed frozen export instead.
-Making the Compose path equally frozen is tracked as a follow-up because it
-needs an image-level `uv` installation and a container validation pass.
+All Python services share the image built by `deploy/Dockerfile.backend`.
+Its build checks `apps/web-backend/uv.lock` offline, exports the frozen runtime
+dependencies, and installs only hash-verified wheels into `/opt/venv`. Python
+and the build-only uv image are pinned by multi-platform digest. Startup and
+restart never run pip/uv or download packages. The lockfile is not regenerated.
+
+Application/shared-schema source, SQL grants, migrations and the synthetic model
+are copied into the image at their existing repository paths. The runtime uses
+an explicit `PYTHONPATH`, avoiding an unlocked packaging build backend. Rebuild
+after source changes; the default stack no longer bind-mounts the whole checkout.
+Only runtime dependencies are installed, not pytest/ONNX training/dev tools.
+
+Use `ODP_BACKEND_IMAGE=odp-backend:YOUR_RELEASE` to give all services the same
+release tag. Build once with `docker compose -f deploy/compose.yaml build api`,
+then start a prebuilt stack with `up -d --no-build --pull never` (the web image
+must also exist). This freezes Python/runtime inputs, not every dependency in
+the entire platform: external service images and example credentials remain
+development defaults. It does not claim bit-for-bit OCI archive reproducibility.
+
+### Recorded inputs and upgrades
+
+The `recordings` named volume is mounted at `/workspace/recordings`: writable
+by the ingestor, read-only by the API. Keep recorded input and recovery-probe
+state there so recreating an application container does not erase them. Copy a
+sample and use the container path in the UI:
+
+```bash
+docker compose -f deploy/compose.yaml cp ./sample.avi frame-ingestor:/workspace/recordings/sample.avi
+```
+
+`down --volumes` deletes this volume, so reserve that command for disposable data.
+
+Before upgrading an existing installation, stop old application processes and
+copy/remount any recorded sources previously reached through the checkout bind
+mount at their original container paths, or stop/recreate those sessions with a
+new source path. Do not remove the original source files. Explicit read-only
+media/model mounts remain supported through a Compose override; avoid mounting
+over `/opt/venv` or the image's source tree. Then build the image, run `migrate`,
+and start all processes from the same release. Retain the old image and data
+until acceptance is complete; image rollback does not undo schema migrations.
+
+Offline image acceptance (requires a built image and Docker):
+
+```bash
+ODP_DOCKER_RUNTIME_TEST=1 uvx --from pytest==9.1.1 pytest -q \
+  apps/web-backend/tests/integration/test_frozen_runtime_image.py
+```
+
+This starts a network-disabled container without host-source mounts, imports
+the actual runtime, loads the ONNX fixture, encodes a frame, migrates SQLite,
+and starts the actual API command through a health check. A separate negative
+build verifies that a stale lockfile is rejected before installing dependencies.
+The gate also validates the shared-schema package's Python/dependency constraints
+against the actual image. Missing or incompatible dependencies fail CI; introducing
+schema extras or direct URLs requires explicit lock integration rather than a
+partial dependency check.
+Full PostgreSQL/Redis/MinIO and browser acceptance remain separate gates.
+
+### Frozen runtime acceptance — 2026-09-11
+
+Verified locally on Linux ARM64 containers (Python 3.12.14) from base
+`63be03fad88a754befd33aaf253d350068ae353d` plus this change. The backend lock
+was unchanged: SHA-256
+`532a0ca3771f5d4e7e8bed478809e0d987d008201e8f5554d2db7698f434ab94`.
+
+- RED before the image change: the actual network-disabled bare Python
+  container failed with `ModuleNotFoundError: cv2` (1 failed, 1 passed).
+- GREEN: 22 focused runtime/process tests; 580 backend tests with every
+  PostgreSQL, Redis, MinIO and Docker opt-in gate enabled (0 skipped).
+- Frontend: 43 unit tests, TypeScript/Vite production build, and all 4 browser
+  E2E tests with a required recorded source. The real evidence image opened.
+- A fresh, isolated 17-service Compose project started with `PIP_NO_INDEX=1`
+  and `UV_OFFLINE=1` on every Python service. Migration/storage bootstrap exited
+  0. All 10 Python containers used image
+  `sha256:a650b139ef0ea40902b282717b20c6136277de54408ac8d4cb403f94f037bac5`.
+- The independent recorded pipeline verified linked result/case/alert/audit and
+  evidence bytes. After SIGKILL **and container recreation**, the recovery probe
+  observed generation 1 → 2, a higher committed sequence, and `STOPPED` held
+  past one lease. Both recording and probe-state files survived in the volume.
+- Two browser-resolved case histories were byte-equivalent after an API
+  restart (canonical JSON SHA-256 before/after:
+  `199e1e81ac0ec71e1965223676a5a9ea4210ce554416e4bf356fa9de345bf89b`).
+- The stale-lock negative test verifies failure at lock validation, rather than
+  accepting an arbitrary Docker/network failure. Ruff and `git diff --check`
+  passed.
+
+Known observations: the existing Starlette/httpx deprecation warning, ONNX's
+virtual CPU vendor warning, and Playwright's color-environment warning were
+non-fatal. No package upgrade was included. This is local acceptance, not a
+claim that this branch's new GitHub CI or native AMD64 execution has run; those
+remain required PR gates. The fixture does not establish model accuracy,
+capacity, or production readiness of the wider Compose stack.
 
 ## Services and ports
 
@@ -87,8 +174,7 @@ durable inspection alerts（`python -m odp_api.seed_alerts`）和知识库。API
 Reconciler 分别使用 `odp_worker`、`odp_relay` 和 `odp_scheduler`，其 SQL 授权
 边界按最小权限划分。API 不会在启动时重播这些告警。旧卷升级请运行
 `deploy/postgres/upgrade-existing-volume.sh`；脚本使用 migrate 的退出码，失败
-即失败。Compose 仍使用 editable `pip install`，尚未 frozen；这是明确保留的
-后续改进项。
+即失败。迁移与业务进程使用同一个预构建、锁定依赖的后端镜像。
 
 P1 进程的启动只依赖 `migrate` 完成、Redis/MinIO 健康检查；运行时恢复不依赖
 Compose 的 `depends_on`。每个进程从 PostgreSQL、Redis、MinIO 和（需要推理的
@@ -205,8 +291,9 @@ Database timings for sessions `99bdf4d4-e12d-4979-a37f-31655ec43a80` and
 2.129s/2.648s; mean task-created-to-claim latency 0.365s/0.508s (19/18 attempts).
 Backend regression: 442 passed, 58 skipped. This confirms removal of an artificial
 backlog throughput limit; it does not prove every historical timeout had that sole
-cause, nor establish full cold-start/load SLO compliance. Dependency installation
-at container startup and browser polling latency remain separate concerns.
+cause, nor establish full cold-start/load SLO compliance. That historical run
+still installed dependencies at container startup; the frozen-image change
+above removes that step. Browser polling latency remains a separate concern.
 
 ## Browser acceptance follow-up
 
@@ -287,8 +374,7 @@ Redis errors still surface. Real MinIO tests cover repeated initialization and
 preservation of existing evidence; real Redis tests cover cold start and PEL safety.
 
 The startup check above is **not** browser acceptance. Separate-process
-video-to-case acceptance is recorded below. Also note
-that this development Compose file still installs dependencies at startup and
+video-to-case acceptance is recorded below. This development Compose file
 does not persist MinIO `/data` across container replacement; it is not a production
 deployment manifest.
 
@@ -338,16 +424,18 @@ credentials or tokens.
 ```sh
 docker compose -p YOUR_RECOVERY_PROJECT -f deploy/compose.yaml up -d --build
 docker compose -p YOUR_RECOVERY_PROJECT -f deploy/compose.yaml exec -T \
-  -e ODP_ALLOW_COMPOSE_PROBE=disposable frame-ingestor \
+  -e ODP_ALLOW_COMPOSE_PROBE=disposable \
+  -e ODP_PROBE_WORKSPACE=/workspace/recordings frame-ingestor \
   python /workspace/apps/web-backend/scripts/verify_ingestor_recovery.py \
-  prepare --state /workspace/ingestion-recovery-state.json
+  prepare --state /workspace/recordings/ingestion-recovery-state.json
 docker compose -p YOUR_RECOVERY_PROJECT -f deploy/compose.yaml kill -s SIGKILL frame-ingestor
 docker compose -p YOUR_RECOVERY_PROJECT -f deploy/compose.yaml up -d frame-ingestor
-# Wait for the restarted container's dependency installation/imports first.
+# Verify imports from the prebuilt image before observing lease recovery.
 docker compose -p YOUR_RECOVERY_PROJECT -f deploy/compose.yaml exec -T \
-  -e ODP_ALLOW_COMPOSE_PROBE=disposable frame-ingestor \
+  -e ODP_ALLOW_COMPOSE_PROBE=disposable \
+  -e ODP_PROBE_WORKSPACE=/workspace/recordings frame-ingestor \
   python /workspace/apps/web-backend/scripts/verify_ingestor_recovery.py \
-  verify --state /workspace/ingestion-recovery-state.json
+  verify --state /workspace/recordings/ingestion-recovery-state.json
 docker compose -p YOUR_RECOVERY_PROJECT -f deploy/compose.yaml down --volumes --remove-orphans
 ```
 
@@ -356,8 +444,8 @@ persisted `last_reserved_sequence`, so a restarted source must produce a
 higher sequence and a newly linked result. This is at-least-once recovery
 evidence, not an exactly-once assertion; duplicate delivery remains harmless
 through the task/result idempotency and fencing contracts. The video path must
-be visible inside the `frame-ingestor` container (the Compose bind mount is
-the supported local setup). A local camera device or host-only path is not
+be visible inside the `frame-ingestor` container (use the recordings volume or
+an explicit media mount). A local camera device or host-only path is not
 portable across process containers and is not covered by this drill.
 
 `STOPPED` is a durable session lifecycle outcome: it means the stop request
@@ -370,7 +458,7 @@ used. A native read that never returns can still defer close, and bounded RTSP
 I/O remains a separate operational follow-up.
 
 The GitHub E2E job runs this drill before browser tests with a unique
-job-scoped Compose project, a separate bounded dependency-install wait after
+job-scoped Compose project, a separate bounded runtime-import check after
 the kill/restart, and always-on logs/cleanup for that project. No successful
 GitHub crash-drill or browser result is recorded in this document yet; local
 or CI claims must be added only after the corresponding external run and
