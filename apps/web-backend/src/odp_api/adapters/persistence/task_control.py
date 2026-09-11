@@ -72,9 +72,11 @@ EVENT_SCHEMA_VERSION = 1
 REDISPATCH_AFTER_SECONDS = 10
 MAX_QUARANTINE_PAYLOAD_BYTES = 65536
 RECOVERY_BATCH_SIZE = 100
+CLEANUP_RETRY_DELAY_SECONDS = 30
 RETRYABLE_UPLOAD_FAILURE_CODES = (
     "INGESTION_LEASE_LOST",
     "STORAGE_UPLOAD_FAILED",
+    "ADMISSION_RESERVATION_EXPIRED",
 )
 
 
@@ -444,10 +446,21 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                 raise
 
     def cleanup_candidates(self, now: datetime, limit: int) -> list[PendingArtifact]:
-        """Return expired evidence and ownership-failed processing objects."""
+        """Return due evidence and retryable processing cleanup tombstones."""
 
         self._require_positive_recovery_limit(limit)
         with self._session_factory() as session:
+            retryable_processing = and_(
+                FrameArtifactRow.state.in_(
+                    [ArtifactState.FAILED.value, ArtifactState.DELETED.value]
+                ),
+                FrameArtifactRow.lifecycle == ArtifactLifecycle.PROCESSING.value,
+                FrameArtifactRow.error_code.in_(RETRYABLE_UPLOAD_FAILURE_CODES),
+                or_(
+                    FrameArtifactRow.cleanup_next_attempt_at.is_(None),
+                    FrameArtifactRow.cleanup_next_attempt_at <= now,
+                ),
+            )
             rows = session.scalars(
                 select(FrameArtifactRow)
                 .where(
@@ -458,14 +471,17 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                             FrameArtifactRow.retention_until.is_not(None),
                             FrameArtifactRow.retention_until <= now,
                         ),
-                        and_(
-                            FrameArtifactRow.state == ArtifactState.FAILED.value,
-                            FrameArtifactRow.lifecycle == ArtifactLifecycle.PROCESSING.value,
-                            FrameArtifactRow.error_code.in_(RETRYABLE_UPLOAD_FAILURE_CODES),
-                        ),
+                        retryable_processing,
                     ),
                 )
-                .order_by(FrameArtifactRow.retention_until, FrameArtifactRow.artifact_id)
+                .order_by(
+                    func.coalesce(
+                        FrameArtifactRow.cleanup_next_attempt_at,
+                        FrameArtifactRow.retention_until,
+                        FrameArtifactRow.updated_at,
+                    ),
+                    FrameArtifactRow.artifact_id,
+                )
                 .limit(limit)
             ).all()
             result: list[PendingArtifact] = []
@@ -484,7 +500,7 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                         referenced=referenced,
                         cleanup_reason=(
                             row.error_code
-                            if row.state == ArtifactState.FAILED.value
+                            if row.lifecycle == ArtifactLifecycle.PROCESSING.value
                             else "RETENTION_EXPIRED"
                         ),
                     )
@@ -492,7 +508,7 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
             return result
 
     def mark_artifact_deleted(self, candidate: PendingArtifact, now: datetime) -> bool:
-        """Mark a retention candidate deleted after locking and rechecking references."""
+        """Mark a candidate deleted and pace future processing-tombstone scans."""
 
         with self._session_factory() as session:
             try:
@@ -532,7 +548,10 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                     and artifact.lifecycle == ArtifactLifecycle.EVIDENCE.value
                 )
                 is_failed_processing = (
-                    artifact.state == ArtifactState.FAILED.value
+                    artifact.state in (
+                        ArtifactState.FAILED.value,
+                        ArtifactState.DELETED.value,
+                    )
                     and artifact.lifecycle == ArtifactLifecycle.PROCESSING.value
                     and artifact.error_code in RETRYABLE_UPLOAD_FAILURE_CODES
                 )
@@ -574,12 +593,70 @@ class SqlAlchemyTaskControlRepository(CameraAdmissionPort, TaskExecutionPort):
                     session.commit()
                     return False
                 artifact.state = ArtifactState.DELETED.value
+                artifact.cleanup_next_attempt_at = (
+                    current + timedelta(seconds=CLEANUP_RETRY_DELAY_SECONDS)
+                    if is_failed_processing
+                    else None
+                )
                 artifact.updated_at = current
                 if state.reservation_id == artifact.artifact_id:
                     state.reservation_id = None
                     state.reservation_expires_at = None
                     state.version += 1
                     state.updated_at = current
+                session.commit()
+                return True
+            except BaseException:
+                session.rollback()
+                raise
+
+    def defer_artifact_cleanup(self, candidate: PendingArtifact, now: datetime) -> bool:
+        """Persist positive retry pacing after a provider delete failure."""
+
+        del now
+        with self._session_factory() as session:
+            try:
+                snapshot = session.scalar(
+                    select(FrameArtifactRow).where(
+                        FrameArtifactRow.artifact_id == candidate.artifact_id,
+                        FrameArtifactRow.organization_id == candidate.organization_id,
+                    )
+                )
+                if snapshot is None:
+                    session.commit()
+                    return False
+                state = self._lock_camera_state(
+                    session, snapshot.organization_id, snapshot.camera_id
+                )
+                self._lock_session_by_identity(
+                    session,
+                    snapshot.organization_id,
+                    snapshot.camera_id,
+                    snapshot.stream_session_id,
+                )
+                artifact = session.scalar(
+                    select(FrameArtifactRow)
+                    .where(
+                        FrameArtifactRow.artifact_id == candidate.artifact_id,
+                        FrameArtifactRow.organization_id == state.organization_id,
+                        FrameArtifactRow.camera_id == state.camera_id,
+                    )
+                    .with_for_update()
+                )
+                if artifact is None or not _is_retryable_processing_artifact(artifact):
+                    session.commit()
+                    return False
+                current = self._db_now(session)
+                if (
+                    artifact.cleanup_next_attempt_at is not None
+                    and _as_utc(artifact.cleanup_next_attempt_at) > current
+                ):
+                    session.commit()
+                    return False
+                artifact.cleanup_next_attempt_at = current + timedelta(
+                    seconds=CLEANUP_RETRY_DELAY_SECONDS
+                )
+                artifact.updated_at = current
                 session.commit()
                 return True
             except BaseException:
@@ -2180,6 +2257,18 @@ def _artifact_object_key(organization_id: UUID, artifact_id: UUID) -> str:
     return f"organizations/{organization_id}/artifacts/{artifact_id}"
 
 
+def _is_retryable_processing_artifact(artifact: FrameArtifactRow) -> bool:
+    return (
+        artifact.state
+        in (
+            ArtifactState.FAILED.value,
+            ArtifactState.DELETED.value,
+        )
+        and artifact.lifecycle == ArtifactLifecycle.PROCESSING.value
+        and artifact.error_code in RETRYABLE_UPLOAD_FAILURE_CODES
+    )
+
+
 def _pending_artifact(
     row: FrameArtifactRow,
     *,
@@ -2195,6 +2284,11 @@ def _pending_artifact(
         referenced=referenced,
         retention_until=_as_utc(row.retention_until) if row.retention_until is not None else None,
         cleanup_reason=cleanup_reason,
+        cleanup_next_attempt_at=(
+            _as_utc(row.cleanup_next_attempt_at)
+            if row.cleanup_next_attempt_at is not None
+            else None
+        ),
     )
 
 

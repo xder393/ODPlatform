@@ -101,16 +101,35 @@ def test_claimed_source_factory_resumes_from_persisted_sequence():
     assert source._sequence == 9
 
 
-def test_source_factory_keeps_unknown_source_types_rejected():
+def test_source_factory_requires_claimed_inspection_session_envelope():
     session = SimpleNamespace(
-        source_type="USB",
-        sanitized_uri="/dev/video0",
+        source_type="RECORDED",
+        sanitized_uri="/safe/fixture.mp4",
         camera_id=uuid4(),
         session_id=uuid4(),
     )
 
-    with pytest.raises(ValueError, match="unsupported inspection source type"):
+    with pytest.raises(TypeError, match="ClaimedInspectionSession"):
         runtime.source_from_session(session)
+
+
+def test_source_factory_keeps_unknown_source_types_rejected():
+    claimed = _claimed()
+    session = InspectionSession(
+        session_id=claimed.session.session_id,
+        organization_id=claimed.session.organization_id,
+        camera_id=claimed.session.camera_id,
+        line_id=claimed.session.line_id,
+        source_type="USB",
+        sanitized_uri="/dev/video0",
+        secret_reference=None,
+        status="RUNNING",
+    )
+
+    with pytest.raises(ValueError, match="unsupported inspection source type"):
+        runtime.source_from_session(
+            ClaimedInspectionSession(session, claimed.claim, claimed.initial_sequence)
+        )
 
 
 def test_cancelled_old_upload_cannot_publish_or_release_new_reservation(tmp_path):

@@ -375,3 +375,30 @@ the kill/restart, and always-on logs/cleanup for that project. No successful
 GitHub crash-drill or browser result is recorded in this document yet; local
 or CI claims must be added only after the corresponding external run and
 diagnostics exist.
+
+## Failed-upload cleanup semantics
+
+The artifact reconciler treats `INGESTION_LEASE_LOST`,
+`STORAGE_UPLOAD_FAILED`, and `ADMISSION_RESERVATION_EXPIRED` as the narrow
+failed `PROCESSING` upload class eligible for object cleanup. It never applies
+this path to `AVAILABLE` business evidence: evidence still requires its normal
+retention deadline and a fresh reference check before deletion.
+
+Each failed-processing row carries a durable `cleanup_next_attempt_at`. A
+successful storage delete changes the row to `DELETED` but retains it as a
+tombstone and schedules another bounded scan; a delete-provider failure leaves
+the row failed and persists the same positive retry pacing. The reconciler
+selects only due candidates in bounded, artifact-id-tiebroken batches, so one
+failing delete or an older tombstone cannot permanently hide later eligible
+objects. A tombstone records that the last deletion attempt completed; it is
+not proof that an uncancellable old provider PUT has quiesced. If that PUT
+recreates the immutable per-artifact key later, a subsequent due pass removes
+it. Tombstones remain until a future explicit quiescence/retention policy
+retires them; cleanup is eventual rather than immediate.
+
+The retained row metadata and recurring HEAD/delete requests are an explicit
+operational cost of this guarantee. Do not run the reconciler against
+production storage while validating the recovery drill; use disposable
+Compose data and retain its diagnostics. The local focused recovery and
+migration evidence is recorded in the final-fix report; no GitHub CI result is
+claimed here until an external run produces corresponding diagnostics.

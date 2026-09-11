@@ -32,6 +32,7 @@ class PendingArtifact:
     referenced: bool = False
     retention_until: datetime | None = None
     cleanup_reason: str | None = None
+    cleanup_next_attempt_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +60,8 @@ class ArtifactReconciliationRepository(Protocol):
     def cleanup_candidates(self, now: datetime, limit: int) -> list[PendingArtifact]: ...
 
     def mark_artifact_deleted(self, candidate: PendingArtifact, now: datetime) -> bool: ...
+
+    def defer_artifact_cleanup(self, candidate: PendingArtifact, now: datetime) -> bool: ...
 
 
 class ArtifactReconciler:
@@ -116,6 +119,16 @@ class ArtifactReconciler:
                     "artifact cleanup failed; candidate remains durable",
                     extra={"artifact_id": str(candidate.artifact_id), "error_type": type(error).__name__},
                 )
+                try:
+                    self._repository.defer_artifact_cleanup(candidate, now)
+                except Exception as defer_error:  # noqa: BLE001 - preserve the provider failure
+                    LOGGER.warning(
+                        "artifact cleanup retry pacing could not be persisted",
+                        extra={
+                            "artifact_id": str(candidate.artifact_id),
+                            "error_type": type(defer_error).__name__,
+                        },
+                    )
 
         return ReconcileSummary(
             promoted=promoted,

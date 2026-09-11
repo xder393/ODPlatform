@@ -231,14 +231,10 @@ class DatabaseIngestionHealth(IngestionHealthPort):
 def source_from_session(claimed: ClaimedInspectionSession) -> FrameSource:
     """Resolve a claimed source and resume after its persisted sequence high-water mark."""
 
-    # Keep accepting a plain session for old composition tests while all live
-    # ingestor calls pass the complete claim envelope.
-    if isinstance(claimed, ClaimedInspectionSession) or hasattr(claimed, "session"):
-        session = claimed.session
-        initial_sequence = getattr(claimed, "initial_sequence", 0)
-    else:
-        session = claimed
-        initial_sequence = 0
+    if not isinstance(claimed, ClaimedInspectionSession):
+        raise TypeError("source_from_session requires a ClaimedInspectionSession")
+    session = claimed.session
+    initial_sequence = claimed.initial_sequence
     source_type = str(session.source_type).strip().upper()
     kwargs = {
         "camera_id": session.camera_id,

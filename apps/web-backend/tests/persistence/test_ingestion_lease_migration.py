@@ -363,6 +363,118 @@ def test_postgresql_ingestion_lease_migration_backfills_scoped_sequence_state(
     _exercise_migration(postgres_migration_url)
 
 
+def _exercise_cleanup_tombstone_migration(database_url: str) -> None:
+    config = _config(database_url)
+    command.upgrade(config, "0014_ingestion_session_leases")
+    engine, _ = create_engine_and_session(database_url)
+    organization_id, camera_id, session_id = uuid4(), uuid4(), uuid4()
+    failed_id, deleted_id = uuid4(), uuid4()
+    try:
+        with engine.begin() as connection:
+            _insert_session(
+                connection,
+                session_id=session_id,
+                organization_id=organization_id,
+                camera_id=camera_id,
+                status="STOPPED",
+            )
+            for artifact_id, state, error_code in (
+                (failed_id, "FAILED", "ADMISSION_RESERVATION_EXPIRED"),
+                (deleted_id, "DELETED", "STORAGE_UPLOAD_FAILED"),
+            ):
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO frame_artifacts (
+                            artifact_id, organization_id, camera_id,
+                            stream_session_id, frame_sequence, captured_at,
+                            object_key, sha256, content_length, state, lifecycle,
+                            retention_until, error_code, error_detail,
+                            created_at, updated_at
+                        ) VALUES (
+                            :artifact_id, :organization_id, :camera_id,
+                            :session_id, :frame_sequence, :captured_at,
+                            :object_key, :sha256, 1, :state, 'PROCESSING',
+                            NULL, :error_code, :error_detail,
+                            :created_at, :updated_at
+                        )
+                        """
+                    ),
+                    {
+                        "artifact_id": str(artifact_id),
+                        "organization_id": str(organization_id),
+                        "camera_id": str(camera_id),
+                        "session_id": str(session_id),
+                        "frame_sequence": 1 if state == "FAILED" else 2,
+                        "captured_at": NOW_VALUE,
+                        "object_key": f"organizations/{organization_id}/artifacts/{artifact_id}",
+                        "sha256": "a" * 64,
+                        "state": state,
+                        "error_code": error_code,
+                        "error_detail": error_code,
+                        "created_at": NOW_VALUE,
+                        "updated_at": NOW_VALUE,
+                    },
+                )
+
+        command.upgrade(config, "head")
+
+        with engine.connect() as connection:
+            rows = {
+                str(row["artifact_id"]): row
+                for row in connection.execute(
+                    text(
+                        "SELECT artifact_id, state, lifecycle, error_code, "
+                        "cleanup_next_attempt_at FROM frame_artifacts"
+                    )
+                ).mappings()
+            }
+            assert rows[str(failed_id)]["state"] == "FAILED"
+            assert rows[str(failed_id)]["error_code"] == "ADMISSION_RESERVATION_EXPIRED"
+            assert rows[str(failed_id)]["cleanup_next_attempt_at"] is None
+            assert rows[str(deleted_id)]["state"] == "DELETED"
+            assert rows[str(deleted_id)]["error_code"] == "STORAGE_UPLOAD_FAILED"
+            assert rows[str(deleted_id)]["cleanup_next_attempt_at"] is None
+
+            cleanup_column = next(
+                column
+                for column in inspect(connection).get_columns("frame_artifacts")
+                if column["name"] == "cleanup_next_attempt_at"
+            )
+            assert cleanup_column["nullable"] is True
+            expected_type = (
+                "TIMESTAMP WITH TIME ZONE"
+                if connection.dialect.name == "postgresql"
+                else "DATETIME"
+            )
+            assert cleanup_column["type"].compile(dialect=connection.dialect).upper() == expected_type
+            assert "ix_frame_artifacts_cleanup_candidates" in {
+                item["name"] for item in inspect(connection).get_indexes("frame_artifacts")
+            }
+            metadata_cleanup_index = next(
+                index
+                for index in FrameArtifactRow.__table__.indexes
+                if index.name == "ix_frame_artifacts_cleanup_candidates"
+            )
+            assert [column.name for column in metadata_cleanup_index.columns] == [
+                "cleanup_next_attempt_at",
+                "updated_at",
+                "artifact_id",
+            ]
+    finally:
+        engine.dispose()
+
+
+def test_sqlite_cleanup_tombstone_migration_preserves_failed_and_deleted_rows(tmp_path) -> None:
+    _exercise_cleanup_tombstone_migration(f"sqlite:///{tmp_path / 'cleanup-tombstones.db'}")
+
+
+def test_postgresql_cleanup_tombstone_migration_preserves_failed_and_deleted_rows(
+    postgres_migration_url,
+) -> None:
+    _exercise_cleanup_tombstone_migration(postgres_migration_url)
+
+
 def test_ingestion_claim_dtos_are_frozen_and_keep_public_session_shape() -> None:
     from odp_api.ports.inspection_sessions import (
         ClaimedInspectionSession,

@@ -166,6 +166,22 @@ class FrameArtifactRow(Base):
                 "state = 'AVAILABLE' AND lifecycle = 'EVIDENCE' AND retention_until IS NOT NULL"
             ),
         ),
+        Index(
+            "ix_frame_artifacts_cleanup_candidates",
+            "cleanup_next_attempt_at",
+            "updated_at",
+            "artifact_id",
+            postgresql_where=text(
+                "lifecycle = 'PROCESSING' AND state IN ('FAILED', 'DELETED') "
+                "AND error_code IN ('INGESTION_LEASE_LOST', "
+                "'STORAGE_UPLOAD_FAILED', 'ADMISSION_RESERVATION_EXPIRED')"
+            ),
+            sqlite_where=text(
+                "lifecycle = 'PROCESSING' AND state IN ('FAILED', 'DELETED') "
+                "AND error_code IN ('INGESTION_LEASE_LOST', "
+                "'STORAGE_UPLOAD_FAILED', 'ADMISSION_RESERVATION_EXPIRED')"
+            ),
+        ),
     )
 
     artifact_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
@@ -180,6 +196,9 @@ class FrameArtifactRow(Base):
     )
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     object_key: Mapped[str | None] = mapped_column(String(1024))
+    cleanup_next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     content_length: Mapped[int | None] = mapped_column(BigInteger)
     state: Mapped[str] = mapped_column(String(32), nullable=False)

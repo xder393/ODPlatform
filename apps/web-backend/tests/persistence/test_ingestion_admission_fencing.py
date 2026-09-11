@@ -1,5 +1,6 @@
 """SQLite proofs for generation-fenced frame admission and publication."""
 
+import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -298,12 +299,23 @@ def test_failed_object_cleanup_retries_without_releasing_new_reservation(fenced_
         assert session.get(FrameArtifactRow, old_reservation.artifact_id).state == ArtifactState.FAILED.value
         assert session.get(CameraInferenceStateRow, (organization_id, camera_id)).reservation_id == new_reservation.reservation_id
 
-    second = reconciler.run_once(NOW)
+    new_key = f"organizations/{organization_id}/artifacts/{new_reservation.artifact_id}"
+    admission.complete_upload(
+        new_reservation.reservation_id,
+        organization_id,
+        new_key,
+        10,
+        clock[0],
+        claim=new_claim,
+    )
+    clock[0] = NOW + timedelta(seconds=37)
+    second = reconciler.run_once(clock[0])
     assert second.deleted == 1
     assert storage.attempts == 2
     with sessions() as session:
         assert session.get(FrameArtifactRow, old_reservation.artifact_id).state == ArtifactState.DELETED.value
-        assert session.get(CameraInferenceStateRow, (organization_id, camera_id)).reservation_id == new_reservation.reservation_id
+        assert session.get(FrameArtifactRow, new_reservation.artifact_id).state == ArtifactState.AVAILABLE.value
+        assert session.get(CameraInferenceStateRow, (organization_id, camera_id)).reservation_id is None
 
 
 def test_reserve_rejects_cross_camera_claim(fenced_repositories):
@@ -541,8 +553,196 @@ def test_saga_failed_upload_cleanup_retries_through_reconciler(fenced_repositori
     with sessions() as session:
         assert session.scalar(select(FrameArtifactRow)).state == ArtifactState.FAILED.value
 
+    clock[0] = clock[0] + timedelta(seconds=31)
     second = reconciler.run_once(clock[0])
     assert second.deleted == 1
     assert storage.delete_attempts == 3
     with sessions() as session:
         assert session.scalar(select(FrameArtifactRow)).state == ArtifactState.DELETED.value
+
+
+def test_expired_reservation_late_put_is_revisited_by_real_reconciler(fenced_repositories):
+    """A cleanup tombstone must catch an uncancellable PUT that finishes later."""
+
+    sessions, clock, ownership, admission, organization_id, camera_id, session_id = (
+        fenced_repositories
+    )
+    old_claim = ownership.claim_available("old", uuid4(), 1)[0].claim
+
+    class BlockingStorage:
+        def __init__(self):
+            self.put_entered = threading.Event()
+            self.release_put = threading.Event()
+            self.objects = {}
+            self.delete_calls = []
+
+        def put(self, object_key, content, *, sha256, content_type="application/octet-stream"):
+            del content_type
+            self.put_entered.set()
+            assert self.release_put.wait(2)
+            metadata = ObjectMetadata(object_key, len(content), sha256)
+            self.objects[object_key] = metadata
+            return metadata
+
+        def head(self, object_key):
+            return self.objects.get(object_key)
+
+        def delete(self, object_key):
+            self.delete_calls.append(object_key)
+            self.objects.pop(object_key, None)
+
+    storage = BlockingStorage()
+    saga = ArtifactSaga(admission, storage)
+    old_content = b"old-frame"
+    old_digest = sha256(old_content).hexdigest()
+    old_selected = SelectedFrame(
+        organization_id=organization_id,
+        camera_id=camera_id,
+        stream_session_id=session_id,
+        frame_sequence=10,
+        captured_at=NOW,
+        content=old_content,
+        correlation_id=uuid4(),
+        claim=old_claim,
+    )
+    old_result = []
+    old_worker = threading.Thread(
+        target=lambda: old_result.append(
+            saga.ingest(
+                old_selected,
+                ArtifactHealth(worker_healthy=True, redis_available=True),
+                NOW,
+            )
+        )
+    )
+    old_worker.start()
+    assert storage.put_entered.wait(2)
+    old_candidate = admission.pending_artifacts(NOW, 10)[0]
+
+    clock[0] = NOW + timedelta(seconds=31)
+    new_claim = ownership.claim_available("new", uuid4(), 1)[0].claim
+    new_reservation = admission.reserve(
+        AdmissionRequest(
+            organization_id=organization_id,
+            camera_id=camera_id,
+            stream_session_id=session_id,
+            frame_sequence=11,
+            captured_at=clock[0],
+            content_sha256=sha256(b"new-frame").hexdigest(),
+            correlation_id=uuid4(),
+            claim=new_claim,
+        ),
+        clock[0],
+    )
+    old_object_key = old_candidate.object_key
+
+    reconciler = ArtifactReconciler(admission, storage)
+    first = reconciler.run_once(NOW)
+    assert first.deleted == 1
+
+    storage.release_put.set()
+    old_worker.join(2)
+    assert not old_worker.is_alive()
+    assert isinstance(old_result[0], AdmissionRejected)
+    assert storage.objects[old_object_key].sha256 == old_digest
+
+    new_content = b"new-frame"
+    new_key = f"organizations/{organization_id}/artifacts/{new_reservation.artifact_id}"
+    storage.objects[new_key] = ObjectMetadata(
+        new_key,
+        len(new_content),
+        sha256(new_content).hexdigest(),
+    )
+    admission.complete_upload(
+        new_reservation.reservation_id,
+        organization_id,
+        new_key,
+        len(new_content),
+        clock[0],
+        claim=new_claim,
+    )
+
+    clock[0] = NOW + timedelta(seconds=90)
+    second = reconciler.run_once(clock[0])
+    assert second.deleted == 1
+    assert old_object_key not in storage.objects
+    assert new_key in storage.objects
+
+    with sessions() as session:
+        old_artifact = session.get(FrameArtifactRow, old_candidate.artifact_id)
+        new_artifact = session.get(FrameArtifactRow, new_reservation.artifact_id)
+        assert old_artifact.state == ArtifactState.DELETED.value
+        assert old_artifact.cleanup_next_attempt_at is not None
+        assert old_artifact.cleanup_next_attempt_at.replace(tzinfo=UTC) > clock[0]
+        assert new_artifact.state == ArtifactState.AVAILABLE.value
+        assert session.scalar(
+            select(InferenceTaskRow).where(
+                InferenceTaskRow.artifact_id == old_candidate.artifact_id
+            )
+        ) is None
+        new_task = session.scalar(
+            select(InferenceTaskRow).where(
+                InferenceTaskRow.artifact_id == new_reservation.artifact_id
+            )
+        )
+        assert new_task is not None
+        assert session.scalar(
+            select(OutboxEventRow).where(
+                OutboxEventRow.task_id == new_task.task_id
+            )
+        ) is not None
+
+
+def test_cleanup_failure_cooldown_keeps_later_candidate_fair(fenced_repositories):
+    sessions, _clock, ownership, admission, organization_id, camera_id, session_id = (
+        fenced_repositories
+    )
+    claim = ownership.claim_available("old", uuid4(), 1)[0].claim
+    for frame_sequence in (10, 11):
+        reservation = admission.reserve(
+            AdmissionRequest(
+                organization_id=organization_id,
+                camera_id=camera_id,
+                stream_session_id=session_id,
+                frame_sequence=frame_sequence,
+                captured_at=NOW,
+                content_sha256=("a" if frame_sequence == 10 else "b") * 64,
+                correlation_id=uuid4(),
+                claim=claim,
+            ),
+            NOW,
+        )
+        admission.fail_upload(
+            reservation.reservation_id,
+            organization_id,
+            "STORAGE_UPLOAD_FAILED",
+            NOW,
+            claim=claim,
+        )
+
+    candidates = admission.cleanup_candidates(NOW, 10)
+    assert len(candidates) == 2
+    first, second = candidates
+
+    class FairStorage:
+        def __init__(self):
+            self.delete_calls = []
+
+        def delete(self, object_key):
+            self.delete_calls.append(object_key)
+            if object_key == first.object_key:
+                raise OSError("first candidate temporarily unavailable")
+
+    storage = FairStorage()
+    reconciler = ArtifactReconciler(admission, storage)
+    assert reconciler.run_once(NOW, limit=1).deleted == 0
+    with sessions() as session:
+        first_row = session.get(FrameArtifactRow, first.artifact_id)
+        assert first_row.cleanup_next_attempt_at is not None
+        assert first_row.cleanup_next_attempt_at.replace(tzinfo=UTC) > NOW
+    assert reconciler.run_once(NOW, limit=1).deleted == 1
+    assert storage.delete_calls == [first.object_key, second.object_key]
+
+    with sessions() as session:
+        assert session.get(FrameArtifactRow, first.artifact_id).state == ArtifactState.FAILED.value
+        assert session.get(FrameArtifactRow, second.artifact_id).state == ArtifactState.DELETED.value
