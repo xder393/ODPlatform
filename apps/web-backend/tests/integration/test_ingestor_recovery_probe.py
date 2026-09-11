@@ -186,6 +186,26 @@ def test_recovery_acceptance_requires_both_generation_and_sequence_advance(datab
     )
 
 
+def test_cli_verify_returns_nonzero_when_recovery_does_not_advance(
+    database, monkeypatch, tmp_path: Path
+):
+    state = _seed_committed_result(database)
+    monkeypatch.setenv("ODP_ALLOW_COMPOSE_PROBE", "disposable")
+    monkeypatch.setenv("ODP_PROBE_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv(
+        "ODP_DATABASE_URL",
+        database.kw["bind"].url.render_as_string(hide_password=False),
+    )
+    monkeypatch.setenv("ODP_PROBE_POLL_SECONDS", "0.001")
+    monkeypatch.setenv("ODP_PROBE_RECOVERY_TIMEOUT_SECONDS", "0.01")
+    state_path = tmp_path / "state.json"
+    probe.write_state(state_path, state)
+    before = state_path.read_text(encoding="utf-8")
+
+    assert probe.cli(["verify", "--state", str(state_path)]) != 0
+    assert state_path.read_text(encoding="utf-8") == before
+
+
 def test_recovery_rejects_higher_sequence_from_previous_generation(database):
     state = _seed_committed_result(database)
     with database.begin() as session:
