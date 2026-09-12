@@ -18,6 +18,11 @@ is healthy. Database leases and fencing still decide task ownership.
 
 ## Start and stop
 
+**Existing installations:** read [Evidence data and existing-volume adoption](#evidence-data-and-existing-volume-adoption)
+before the first upgrade with this version. The new named MinIO volume does not
+automatically import an old anonymous volume. Starting without adoption can make
+old evidence unreachable even though its original volume still exists.
+
 ```bash
 docker compose -f deploy/compose.yaml up -d --build
 docker compose -f deploy/compose.yaml down
@@ -80,6 +85,135 @@ against the actual image. Missing or incompatible dependencies fail CI; introduc
 schema extras or direct URLs requires explicit lock integration rather than a
 partial dependency check.
 Full PostgreSQL/Redis/MinIO and browser acceptance remain separate gates.
+
+### Evidence data and existing-volume adoption
+
+New installations mount the project-scoped `minio-data` named volume at `/data`.
+Together with `postgres-data` and `recordings`, this survives normal
+`docker compose down` followed by `up` **using the same project name and files**.
+Changing the project name selects different default volumes. `down --volumes`
+deletes Compose-managed volumes; it is only appropriate for disposable test data.
+Do not run volume pruning while retaining an old anonymous volume for adoption.
+
+Earlier MinIO containers inherit an anonymous `/data` volume from the image.
+Ordinary `down` leaves it behind, but a subsequent `up` does not automatically
+reattach it. No application code or bootstrap task copies, deletes or migrates
+existing evidence on upgrade.
+
+For an installation with data, use this operator-reviewed adoption sequence:
+
+1. Keep the existing project name, deployment files, image versions and database
+   volume identity. Before removing any containers, resolve the existing MinIO
+   container with `docker compose -p YOUR_PROJECT -f deploy/compose.yaml ps -q minio`.
+   Inspect that **exact container ID** with
+   `docker inspect CONTAINER_ID --format '{{json .Mounts}}'` and record the volume
+   `Name` whose `Destination` is `/data`. Confirm it with
+   `docker volume inspect EXACT_EXISTING_VOLUME_NAME`. Never infer it from recency.
+2. Stop application writers and MinIO during a maintenance window; take and verify
+   backups of the matching PostgreSQL database and object data. Keep the original
+   volumes and old images. Do not run old and new MinIO instances against the same
+   volume concurrently. If `/data` is a bind mount or another driver, retain that
+   exact mount through an operator-reviewed override instead of this volume recipe.
+3. Create a local override, for example `/absolute/path/existing-minio.yaml`, with
+   the literal, inspected volume name (not the placeholder below):
+
+   ```yaml
+   volumes:
+     minio-data:
+       external: true
+       name: EXACT_EXISTING_VOLUME_NAME
+   ```
+
+4. Use the override on **every** subsequent Compose command, with the same project:
+
+   ```bash
+   docker compose -p YOUR_PROJECT -f deploy/compose.yaml -f /absolute/path/existing-minio.yaml config --quiet
+   docker compose -p YOUR_PROJECT -f deploy/compose.yaml -f /absolute/path/existing-minio.yaml up -d --build
+   ```
+
+   Stop the previous services first. An absent external volume must fail startup,
+   not create an empty replacement. Inspect the new MinIO mount and download
+   pre-upgrade evidence through its original case; verify the saved SHA-256 and
+   case history. Keep the override with the installation's deployment records.
+   External volumes are not removed by Compose, but database/recordings volumes
+   still are vulnerable to `down --volumes`; never use that command on retained data.
+
+A persistent volume is **not a backup**. Disk/host loss, deletion, corruption and
+restore to another host require separately tested DB + object-store backups and
+an explicit retention/RPO/RTO policy. This change does not provide those guarantees.
+
+### Evidence persistence acceptance
+
+The Docker regression uses only a unique disposable MinIO project derived from
+the shipped service configuration. It writes a per-run random object, runs `down`
+and `up`, then requires its independently calculated SHA-256, byte count and mount
+identity. CI runs it after stack startup so MinIO is available even on a cold
+runner. For a standalone local invocation, pull MinIO first and build the backend:
+
+```bash
+docker compose -f deploy/compose.yaml pull minio
+docker compose -f deploy/compose.yaml build api
+ODP_DOCKER_RUNTIME_TEST=1 uvx --from pytest==9.1.1 pytest -q \
+  apps/web-backend/tests/integration/test_compose_evidence_volume.py
+```
+
+The full-stack CI gate runs **after** recorded-video browser E2E has resolved a
+real independently inferred case. `verify_evidence_persistence.py prepare` follows
+that case to its event, published result and evidence artifact, downloads the
+object and saves IDs, case history, SHA-256 and byte count in the `recordings`
+volume. It stores no password, JWT or presigned URL. The job saves a diagnostic
+copy and pre-recreation logs, runs `down` **without `--volumes`**, starts the same
+project from the same images, then runs `verify` against the original IDs.
+The observer subprocess runs with the existing `odp_api` database identity to
+read case history, inside the ingestor container for the writable recordings
+mount. The ingestor/Worker's own credentials and restricted grants are unchanged.
+
+Missing cases, changed histories/links, missing objects or different bytes fail
+the gate; a new seed case is not accepted as a substitute. A final host-side check
+logs in again as the inspector, reads the original case and obtains a fresh
+60-second evidence URL through the API, then checks the downloaded SHA-256 and
+length against the pre-recreation state. This proves the external download path
+as well as DB/S3 durability, not model accuracy or backup restoration. Use the probe only with
+`ODP_ALLOW_COMPOSE_PROBE=disposable` in a disposable project. The state file is
+created exclusively; a rerun must not overwrite the pre-recreation baseline.
+
+### Evidence persistence local acceptance — 2026-09-11
+
+Verified on Linux ARM64 containers from base `ce612812` plus this change:
+
+- Before the mount fix, the disposable MinIO down/up regression failed with
+  `NoSuchBucket` on the second download. With `minio-data:/data`, it passed and
+  reattached the same volume. Only that test's generated resources were removed.
+  A review follow-up added a per-run nonce and independent digest/length checks;
+  a fixed-fixture writer was observed failing those assertions before correction.
+- Observer tests: 11 failed against unimplemented entrypoints, then 11 passed.
+  The full backend suite passed **592 tests, 0 skipped**, including explicit
+  PostgreSQL, Redis, MinIO and Docker gates. The initial local invocation exposed
+  an unprepared test schema/grants and relative subprocess import paths; applying
+  the existing migrations/grants and absolute `PYTHONPATH` resolved those setup
+  failures without changing application code or permissions.
+- Frontend: 43 tests, production build, E2E type check and mandatory recorded gate
+  passed; all 4 browser E2E scenarios passed against the isolated full stack.
+- The independently inferred, browser-resolved case
+  `c691e39b-fa77-4b08-b25f-e851a73a3802` retained its IDs, status, history and
+  evidence after all 17 services were removed/recreated without volume deletion.
+  The MinIO container ID changed while the `/data` volume identity stayed fixed.
+  Evidence SHA-256 before/after and after fresh authenticated HTTP download:
+  `669f95e2df1542084942faaaf58ca018316f2f5d0a28474bc99b36e755a16f87`.
+- Ruff, Compose validation and diff checks passed. The known Starlette/httpx
+  deprecation warning was non-fatal. No dependency or database grant change was
+  included. GitHub execution of the new gate remains a required PR check; local
+  acceptance is not a claim that the new workflow has already run on GitHub.
+
+One subsequent local full-suite run had three failures in existing PostgreSQL
+lease-expiry tests (ingestion takeover, Outbox claim release and camera-anchor
+expiry); all three passed together on an isolated rerun. Their fixtures derive
+expiry from host time while the implementation correctly uses database time.
+Later host/DB sampling differed by under 2 ms, so transient clock skew is only a
+hypothesis, not an established root cause. Keep this as a test-stability follow-up;
+no production lease checks or test expectations were relaxed to obtain a pass.
+The final full-suite rerun on the reviewed change passed 592 tests with 0 skipped
+(131.31 seconds); the intermittent local observation above is retained explicitly.
 
 ### Frozen runtime acceptance — 2026-09-11
 
@@ -374,9 +508,10 @@ Redis errors still surface. Real MinIO tests cover repeated initialization and
 preservation of existing evidence; real Redis tests cover cold start and PEL safety.
 
 The startup check above is **not** browser acceptance. Separate-process
-video-to-case acceptance is recorded below. This development Compose file
-does not persist MinIO `/data` across container replacement; it is not a production
-deployment manifest.
+video-to-case acceptance is recorded below. The current Compose file persists
+MinIO `/data` through a named volume; see the evidence adoption and acceptance
+sections above. It remains a development deployment manifest, not a production
+backup/recovery solution.
 
 ## Separate-process video acceptance (2026-09-08)
 
